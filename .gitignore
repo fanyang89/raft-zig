@@ -1,0 +1,14 @@
+# Reference snapshots of upstream projects (raftpp, grpc-lite). Never committed.
+/ref/
+
+# Zig build artifacts
+**/.zig-cache/
+/zig-out/
+
+# Local tool / editor state
+/.cache/
+/.idea/
+/.vscode/
+/.opencode/
+/.mise.local.toml
+/opencode.json
