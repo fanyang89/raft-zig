@@ -39,6 +39,8 @@ const progress_mod = @import("progress.zig");
 const progress_tracker_mod = @import("progress_tracker.zig");
 const conf_changer_mod = @import("conf_changer.zig");
 const conf_restore_mod = @import("conf_restore.zig");
+const raft_config_mod = @import("raft_config.zig");
+const raft_mod = @import("raft.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -137,6 +139,17 @@ pub const checkInvariants = conf_changer_mod.checkInvariants;
 pub const restore = conf_restore_mod.restore;
 pub const toConfChangeSingle = conf_restore_mod.toConfChangeSingle;
 
+pub const Config = raft_config_mod.Config;
+pub const defaultConfig = raft_config_mod.defaultConfig;
+pub const default_heartbeat_tick = raft_config_mod.default_heartbeat_tick;
+
+pub const UncommittedState = raft_mod.UncommittedState;
+pub const CampaignType = raft_mod.CampaignType;
+pub const campaign_pre_election = raft_mod.campaign_pre_election;
+pub const campaign_election = raft_mod.campaign_election;
+pub const campaign_transfer = raft_mod.campaign_transfer;
+pub const Raft = raft_mod.Raft;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -165,5 +178,7 @@ test "re-exported modules compile" {
     _ = progress_tracker_mod;
     _ = conf_changer_mod;
     _ = conf_restore_mod;
+    _ = raft_config_mod;
+    _ = raft_mod;
     _ = version_info;
 }

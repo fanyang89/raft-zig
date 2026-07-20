@@ -111,7 +111,7 @@ pub const Storage = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        initial_state: *const fn (ctx: *anyopaque) Error!RaftState,
+        initial_state: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState,
         entries: *const fn (
             ctx: *anyopaque,
             allocator: std.mem.Allocator,
@@ -131,8 +131,8 @@ pub const Storage = struct {
         ) Error!Snapshot,
     };
 
-    pub fn initialState(self: Storage) Error!RaftState {
-        return self.vtable.initial_state(self.ctx);
+    pub fn initialState(self: Storage, allocator: std.mem.Allocator) Error!RaftState {
+        return self.vtable.initial_state(self.ctx, allocator);
     }
 
     pub fn entries(
@@ -176,7 +176,7 @@ pub const WritableStorage = struct {
 
     pub const VTable = struct {
         // Reads (mirror Storage.VTable).
-        initial_state: *const fn (ctx: *anyopaque) Error!RaftState,
+        initial_state: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState,
         entries: *const fn (
             ctx: *anyopaque,
             allocator: std.mem.Allocator,
@@ -199,12 +199,12 @@ pub const WritableStorage = struct {
         append: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, to_append: []const Entry) Error!void,
         set_hard_state: *const fn (ctx: *anyopaque, hs: HardState) Error!void,
         set_conf_state: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, cs: ConfState) Error!void,
-        apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snapshot: Snapshot) Error!void,
+        apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         sync_: *const fn (ctx: *anyopaque) Error!void,
     };
 
-    pub fn initialState(self: WritableStorage) Error!RaftState {
-        return self.vtable.initial_state(self.ctx);
+    pub fn initialState(self: WritableStorage, allocator: std.mem.Allocator) Error!RaftState {
+        return self.vtable.initial_state(self.ctx, allocator);
     }
 
     pub fn entries(

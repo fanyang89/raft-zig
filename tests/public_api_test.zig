@@ -95,6 +95,17 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.checkInvariants;
         _ = raft.restore;
         _ = raft.toConfChangeSingle;
+
+        // Raft state machine.
+        _ = raft.Config;
+        _ = raft.defaultConfig;
+        _ = raft.default_heartbeat_tick;
+        _ = raft.UncommittedState;
+        _ = raft.CampaignType;
+        _ = raft.campaign_pre_election;
+        _ = raft.campaign_election;
+        _ = raft.campaign_transfer;
+        _ = raft.Raft;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);

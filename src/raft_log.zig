@@ -84,7 +84,7 @@ pub const RaftLog = struct {
     }
 
     pub fn getInitialState(self: *const RaftLog) Error!storage_mod.RaftState {
-        return self.store.initialState();
+        return self.store.initialState(self.allocator);
     }
 
     /// Term lookup. Returns 0 when `idx` is in the dummy-range or beyond
@@ -212,7 +212,10 @@ pub const RaftLog = struct {
             const start: usize = @intCast(conflict_idx - (idx + 1));
             const to_append = ents[start..];
             var cloned: std.ArrayList(Entry) = .empty;
-            defer cloned.deinit(self.allocator);
+            defer {
+                for (cloned.items) |*e| e.deinit(self.allocator);
+                cloned.deinit(self.allocator);
+            }
             try cloned.ensureTotalCapacity(self.allocator, to_append.len);
             for (to_append) |e| {
                 try cloned.append(self.allocator, try cloneEntry(self.allocator, e));

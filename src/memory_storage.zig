@@ -405,9 +405,9 @@ pub const MemoryStorage = struct {
     }
 
     /// VTable wiring for `asWritableStorage` / `asStorage`.
-    fn initial_state_impl(ctx: *anyopaque) Error!RaftState {
+    fn initial_state_impl(ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
-        return self.initialState(std.heap.page_allocator);
+        return self.initialState(allocator);
     }
 
     fn entries_impl(
