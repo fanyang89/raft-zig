@@ -5,7 +5,14 @@
 //! exported for experimentation but may evolve before 1.0.
 //!
 //! The port mirrors the layered architecture of raftpp:
-//!   * `core/`  — plain data types, errors, roles, and status snapshots.
+//!   * `core/`     — plain data types, errors, roles, status snapshots, and
+//!                    entry-sizing utilities.
+//!   * `inflights` — per-follower in-flight tracking ring buffer.
+//!   * `ack_indexer` — quorum helper: vote outcomes and the acknowledged-index
+//!     lookup vtable used by quorum math.
+//!   * `storage` / `memory_storage` — `Storage` / `WritableStorage` vtables
+//!     and the default in-memory backend.
+//!   * `read_only` — linearizable read-index queue.
 //!   * Future layers (`log`, `progress`, `raft`, `raw_node`, `raftor`,
 //!     `wal`, `rpc`) will be added under `src/` as they are ported.
 
@@ -17,6 +24,12 @@ const types = @import("core/types.zig");
 const error_model = @import("core/error.zig");
 const state_role = @import("core/state_role.zig");
 const status = @import("core/status.zig");
+const util = @import("core/util.zig");
+const inflights_mod = @import("inflights.zig");
+const ack_indexer_mod = @import("ack_indexer.zig");
+const storage_mod = @import("storage.zig");
+const memory_storage_mod = @import("memory_storage.zig");
+const read_only_mod = @import("read_only.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -24,6 +37,7 @@ pub const core = .{
     .error_model = error_model,
     .state_role = state_role,
     .status = status,
+    .util = util,
 };
 
 pub const Error = error_model.Error;
@@ -52,6 +66,35 @@ pub const roleName = state_role.roleName;
 
 pub const Status = status.Status;
 
+pub const entry_message_overhead = util.entry_message_overhead;
+pub const entryApproximateSize = util.entryApproximateSize;
+pub const limitSize = util.limitSize;
+pub const IndexTerm = util.IndexTerm;
+
+pub const Inflights = inflights_mod.Inflights;
+
+pub const VoteResult = ack_indexer_mod.VoteResult;
+pub const Index = ack_indexer_mod.Index;
+pub const AckedIndexer = ack_indexer_mod.AckedIndexer;
+pub const AckIndexer = ack_indexer_mod.AckIndexer;
+
+pub const RaftState = storage_mod.RaftState;
+pub const GetEntriesFor = storage_mod.GetEntriesFor;
+pub const GetEntriesContext = storage_mod.GetEntriesContext;
+pub const Storage = storage_mod.Storage;
+pub const WritableStorage = storage_mod.WritableStorage;
+pub const cloneConfState = storage_mod.cloneConfState;
+pub const cloneSnapshot = storage_mod.cloneSnapshot;
+pub const cloneEntry = storage_mod.cloneEntry;
+
+pub const MemoryStorageCore = memory_storage_mod.MemoryStorageCore;
+pub const MemoryStorage = memory_storage_mod.MemoryStorage;
+
+pub const ReadOnlyOption = read_only_mod.ReadOnlyOption;
+pub const ReadState = read_only_mod.ReadState;
+pub const ReadIndexStatus = read_only_mod.ReadIndexStatus;
+pub const ReadOnly = read_only_mod.ReadOnly;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -65,5 +108,11 @@ test "re-exported modules compile" {
     _ = error_model;
     _ = state_role;
     _ = status;
+    _ = util;
+    _ = inflights_mod;
+    _ = ack_indexer_mod;
+    _ = storage_mod;
+    _ = memory_storage_mod;
+    _ = read_only_mod;
     _ = version_info;
 }

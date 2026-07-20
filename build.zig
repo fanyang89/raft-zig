@@ -37,9 +37,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_public_api_tests = b.addRunArtifact(public_api_tests);
 
+    const storage_tests = b.addTest(.{
+        .name = "storage",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/storage_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_storage_tests = b.addRunArtifact(storage_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
+    test_step.dependOn(&run_storage_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
