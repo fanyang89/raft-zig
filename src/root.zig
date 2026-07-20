@@ -30,6 +30,8 @@ const ack_indexer_mod = @import("ack_indexer.zig");
 const storage_mod = @import("storage.zig");
 const memory_storage_mod = @import("memory_storage.zig");
 const read_only_mod = @import("read_only.zig");
+const unstable_log_mod = @import("unstable_log.zig");
+const raft_log_mod = @import("raft_log.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -95,6 +97,12 @@ pub const ReadState = read_only_mod.ReadState;
 pub const ReadIndexStatus = read_only_mod.ReadIndexStatus;
 pub const ReadOnly = read_only_mod.ReadOnly;
 
+pub const Unstable = unstable_log_mod.Unstable;
+pub const RaftLog = raft_log_mod.RaftLog;
+pub const MaybeAppendResult = raft_log_mod.MaybeAppendResult;
+pub const FindConflictByTermResult = raft_log_mod.FindConflictByTermResult;
+pub const CommitInfo = raft_log_mod.CommitInfo;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -114,5 +122,7 @@ test "re-exported modules compile" {
     _ = storage_mod;
     _ = memory_storage_mod;
     _ = read_only_mod;
+    _ = unstable_log_mod;
+    _ = raft_log_mod;
     _ = version_info;
 }

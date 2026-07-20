@@ -66,6 +66,13 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.ReadState;
         _ = raft.ReadIndexStatus;
         _ = raft.ReadOnly;
+
+        // Log layer.
+        _ = raft.Unstable;
+        _ = raft.RaftLog;
+        _ = raft.MaybeAppendResult;
+        _ = raft.FindConflictByTermResult;
+        _ = raft.CommitInfo;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);
