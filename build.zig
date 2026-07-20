@@ -59,11 +59,47 @@ pub fn build(b: *std.Build) void {
     });
     const run_log_tests = b.addRunArtifact(log_tests);
 
+    const progress_tests = b.addTest(.{
+        .name = "progress",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/progress_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_progress_tests = b.addRunArtifact(progress_tests);
+
+    const quorum_tests = b.addTest(.{
+        .name = "quorum",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/quorum_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_quorum_tests = b.addRunArtifact(quorum_tests);
+
+    const confchange_tests = b.addTest(.{
+        .name = "confchange",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/confchange_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_confchange_tests = b.addRunArtifact(confchange_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
     test_step.dependOn(&run_storage_tests.step);
     test_step.dependOn(&run_log_tests.step);
+    test_step.dependOn(&run_progress_tests.step);
+    test_step.dependOn(&run_quorum_tests.step);
+    test_step.dependOn(&run_confchange_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);

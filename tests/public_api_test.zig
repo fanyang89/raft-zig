@@ -73,6 +73,28 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.MaybeAppendResult;
         _ = raft.FindConflictByTermResult;
         _ = raft.CommitInfo;
+
+        // Configuration / progress cluster.
+        _ = raft.MajorityConfig;
+        _ = raft.CommittedIndexResult;
+        _ = raft.majority;
+        _ = raft.JointConfiguration;
+        _ = raft.TrackerConfiguration;
+        _ = raft.ProgressState;
+        _ = raft.progressStateName;
+        _ = raft.Progress;
+        _ = raft.ProgressMap;
+        _ = raft.MapChangeKind;
+        _ = raft.MapChangeEntry;
+        _ = raft.CountVoteResult;
+        _ = raft.ProgressTracker;
+        _ = raft.IncrChangeMap;
+        _ = raft.ConfChangeResult;
+        _ = raft.ConfChanger;
+        _ = raft.joint;
+        _ = raft.checkInvariants;
+        _ = raft.restore;
+        _ = raft.toConfChangeSingle;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);

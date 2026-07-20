@@ -32,6 +32,13 @@ const memory_storage_mod = @import("memory_storage.zig");
 const read_only_mod = @import("read_only.zig");
 const unstable_log_mod = @import("unstable_log.zig");
 const raft_log_mod = @import("raft_log.zig");
+const majority_conf_mod = @import("majority_conf.zig");
+const joint_conf_mod = @import("joint_conf.zig");
+const tracker_conf_mod = @import("tracker_conf.zig");
+const progress_mod = @import("progress.zig");
+const progress_tracker_mod = @import("progress_tracker.zig");
+const conf_changer_mod = @import("conf_changer.zig");
+const conf_restore_mod = @import("conf_restore.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -103,6 +110,33 @@ pub const MaybeAppendResult = raft_log_mod.MaybeAppendResult;
 pub const FindConflictByTermResult = raft_log_mod.FindConflictByTermResult;
 pub const CommitInfo = raft_log_mod.CommitInfo;
 
+pub const MajorityConfig = majority_conf_mod.MajorityConfig;
+pub const CommittedIndexResult = majority_conf_mod.CommittedIndexResult;
+pub const majority = majority_conf_mod.majority;
+
+pub const JointConfiguration = joint_conf_mod.JointConfiguration;
+
+pub const TrackerConfiguration = tracker_conf_mod.TrackerConfiguration;
+
+pub const ProgressState = progress_mod.ProgressState;
+pub const progressStateName = progress_mod.progressStateName;
+pub const Progress = progress_mod.Progress;
+pub const ProgressMap = progress_mod.ProgressMap;
+
+pub const MapChangeKind = progress_tracker_mod.MapChangeKind;
+pub const MapChangeEntry = progress_tracker_mod.MapChangeEntry;
+pub const CountVoteResult = progress_tracker_mod.CountVoteResult;
+pub const ProgressTracker = progress_tracker_mod.ProgressTracker;
+
+pub const IncrChangeMap = conf_changer_mod.IncrChangeMap;
+pub const ConfChangeResult = conf_changer_mod.ConfChangeResult;
+pub const ConfChanger = conf_changer_mod.ConfChanger;
+pub const joint = conf_changer_mod.joint;
+pub const checkInvariants = conf_changer_mod.checkInvariants;
+
+pub const restore = conf_restore_mod.restore;
+pub const toConfChangeSingle = conf_restore_mod.toConfChangeSingle;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -124,5 +158,12 @@ test "re-exported modules compile" {
     _ = read_only_mod;
     _ = unstable_log_mod;
     _ = raft_log_mod;
+    _ = majority_conf_mod;
+    _ = joint_conf_mod;
+    _ = tracker_conf_mod;
+    _ = progress_mod;
+    _ = progress_tracker_mod;
+    _ = conf_changer_mod;
+    _ = conf_restore_mod;
     _ = version_info;
 }
