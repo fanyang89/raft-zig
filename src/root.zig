@@ -41,6 +41,7 @@ const conf_changer_mod = @import("conf_changer.zig");
 const conf_restore_mod = @import("conf_restore.zig");
 const raft_config_mod = @import("raft_config.zig");
 const raft_mod = @import("raft.zig");
+const raw_node_mod = @import("raw_node.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -150,6 +151,15 @@ pub const campaign_election = raft_mod.campaign_election;
 pub const campaign_transfer = raft_mod.campaign_transfer;
 pub const Raft = raft_mod.Raft;
 
+pub const Peer = raw_node_mod.Peer;
+pub const SnapshotStatus = raw_node_mod.SnapshotStatus;
+pub const isLocalMessage = raw_node_mod.isLocalMessage;
+pub const isResponseMessage = raw_node_mod.isResponseMessage;
+pub const LightReady = raw_node_mod.LightReady;
+pub const Ready = raw_node_mod.Ready;
+pub const RawNodeStatus = raw_node_mod.Status;
+pub const RawNode = raw_node_mod.RawNode;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -180,5 +190,6 @@ test "re-exported modules compile" {
     _ = conf_restore_mod;
     _ = raft_config_mod;
     _ = raft_mod;
+    _ = raw_node_mod;
     _ = version_info;
 }

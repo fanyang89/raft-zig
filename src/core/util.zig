@@ -10,8 +10,13 @@ const std = @import("std");
 const types = @import("types.zig");
 
 const Entry = types.Entry;
+const EntryType = types.EntryType;
 const Message = types.Message;
 const Snapshot = types.Snapshot;
+const ConfChangeV2 = types.ConfChangeV2;
+const ConfChangeSingle = types.ConfChangeSingle;
+const ConfChangeType = types.ConfChangeType;
+const ConfChangeTransition = types.ConfChangeTransition;
 
 /// Fixed overhead added to data/context length to approximate the serialized
 /// size of an Entry (header + index/term/type fields). Matches raftpp's
@@ -114,4 +119,187 @@ test "isContinuousEntries detects gap" {
     const gap = [_]Entry{.{ .index = 7, .term = 1 }};
     try std.testing.expect(isContinuousEntries(msg, &cont));
     try std.testing.expect(!isContinuousEntries(msg, &gap));
+}
+
+// ===========================================================================
+// Entry checksum (CRC32C, matches raftpp's wal::CRC32C)
+// ===========================================================================
+
+const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
+
+/// Compute the CRC32C checksum of an entry's wire-identifying fields:
+/// entry_type, context, then data. Matches `ComputeEntryChecksum` in
+/// `include/raftpp/raftor/entry_checksum.h`.
+pub fn computeEntryChecksum(entry: Entry) u32 {
+    var crc = Crc32Iscsi.init();
+    const entry_type_word: u32 = @intFromEnum(entry.entry_type);
+    crc.update(std.mem.asBytes(&entry_type_word));
+    crc.update(entry.context);
+    crc.update(entry.data);
+    return crc.final();
+}
+
+/// Empty normal entries (no data, no context) are exempt from checksumming
+/// because raftpp historically allows them through without verification.
+pub fn isChecksumExemptEntry(entry: Entry) bool {
+    return entry.entry_type == .normal and entry.data.len == 0 and entry.context.len == 0;
+}
+
+/// Set `entry.checksum` if it isn't exempt. Mirrors `SetEntryChecksum`.
+pub fn setEntryChecksum(entry: *Entry) void {
+    if (isChecksumExemptEntry(entry.*)) return;
+    entry.checksum = computeEntryChecksum(entry.*);
+}
+
+test "computeEntryChecksum is stable and order-sensitive" {
+    const allocator = std.testing.allocator;
+    const hello = try allocator.dupe(u8, "hello");
+    defer allocator.free(hello);
+    const world = try allocator.dupe(u8, "world");
+    defer allocator.free(world);
+    const ctx = try allocator.dupe(u8, "ctx");
+    defer allocator.free(ctx);
+
+    const e1 = Entry{ .entry_type = .normal, .data = hello, .context = ctx };
+    const e2 = Entry{ .entry_type = .normal, .data = hello, .context = ctx };
+    try std.testing.expectEqual(computeEntryChecksum(e1), computeEntryChecksum(e2));
+
+    const e2b = Entry{ .entry_type = .normal, .data = world, .context = ctx };
+    try std.testing.expect(computeEntryChecksum(e1) != computeEntryChecksum(e2b));
+
+    const e3 = Entry{ .entry_type = .conf_change_v2, .data = hello, .context = ctx };
+    try std.testing.expect(computeEntryChecksum(e1) != computeEntryChecksum(e3));
+}
+
+test "setEntryChecksum skips exempt entries" {
+    var empty = Entry{};
+    setEntryChecksum(&empty);
+    try std.testing.expectEqual(@as(u32, 0), empty.checksum);
+
+    const allocator = std.testing.allocator;
+    const x = try allocator.dupe(u8, "x");
+    defer allocator.free(x);
+    var populated = Entry{ .data = x };
+    setEntryChecksum(&populated);
+    try std.testing.expect(populated.checksum != 0);
+}
+
+// ===========================================================================
+// ConfChangeV2 binary codec
+// ===========================================================================
+//
+// Wire format (all integers little-endian):
+//   magic           : 4 bytes  "RCC2"
+//   version         : 1 byte   currently 1
+//   transition      : 1 byte   ConfChangeTransition value
+//   num_changes     : 2 bytes  u16
+//   changes[]       : num_changes * 9 bytes
+//       change_type : 1 byte   ConfChangeType value
+//       node_id     : 8 bytes  u64
+//   context_len     : 4 bytes  u32
+//   context         : context_len bytes
+//
+// This is internal to raft-zig; encoding and decoding are both in this file.
+// Swap for a standard schema (protobuf, capnp) when wire compatibility with
+// other raft implementations is required.
+
+const cc_magic = [_]u8{ 'R', 'C', 'C', '2' };
+const cc_version: u8 = 1;
+
+pub fn encodeConfChangeV2(allocator: std.mem.Allocator, cc: ConfChangeV2) ![]u8 {
+    const changes_bytes = cc.changes.len * 9;
+    const total = 4 + 1 + 1 + 2 + changes_bytes + 4 + cc.context.len;
+    var out = try allocator.alloc(u8, total);
+    var pos: usize = 0;
+
+    @memcpy(out[pos..][0..4], &cc_magic);
+    pos += 4;
+    out[pos] = cc_version;
+    pos += 1;
+    out[pos] = @intFromEnum(cc.transition);
+    pos += 1;
+    std.mem.writeInt(u16, out[pos..][0..2], @intCast(cc.changes.len), .little);
+    pos += 2;
+    for (cc.changes) |c| {
+        out[pos] = @intFromEnum(c.change_type);
+        pos += 1;
+        std.mem.writeInt(u64, out[pos..][0..8], c.node_id, .little);
+        pos += 8;
+    }
+    std.mem.writeInt(u32, out[pos..][0..4], @intCast(cc.context.len), .little);
+    pos += 4;
+    @memcpy(out[pos..][0..cc.context.len], cc.context);
+    return out;
+}
+
+pub fn decodeConfChangeV2(allocator: std.mem.Allocator, bytes: []const u8) !ConfChangeV2 {
+    if (bytes.len < 4 + 1 + 1 + 2 + 4) return error.ConfChangeParseError;
+    if (!std.mem.eql(u8, bytes[0..4], &cc_magic)) return error.ConfChangeParseError;
+    if (bytes[4] != cc_version) return error.ConfChangeParseError;
+
+    var pos: usize = 5;
+    const transition: ConfChangeTransition = @enumFromInt(bytes[pos]);
+    pos += 1;
+    const num_changes = std.mem.readInt(u16, bytes[pos..][0..2], .little);
+    pos += 2;
+
+    const expect_after_changes = pos + @as(usize, num_changes) * 9 + 4;
+    if (bytes.len < expect_after_changes) return error.ConfChangeParseError;
+
+    var changes = try allocator.alloc(ConfChangeSingle, num_changes);
+    errdefer allocator.free(changes);
+    for (0..num_changes) |i| {
+        changes[i] = .{
+            .change_type = @enumFromInt(bytes[pos]),
+            .node_id = std.mem.readInt(u64, bytes[pos + 1 ..][0..8], .little),
+        };
+        pos += 9;
+    }
+
+    const context_len = std.mem.readInt(u32, bytes[pos..][0..4], .little);
+    pos += 4;
+    if (bytes.len < pos + context_len) return error.ConfChangeParseError;
+    const context = try allocator.dupe(u8, bytes[pos .. pos + context_len]);
+
+    return ConfChangeV2{
+        .transition = transition,
+        .changes = changes,
+        .context = context,
+    };
+}
+
+test "encodeConfChangeV2 round-trips through decodeConfChangeV2" {
+    const allocator = std.testing.allocator;
+
+    var changes = [_]ConfChangeSingle{
+        .{ .change_type = .add_node, .node_id = 1 },
+        .{ .change_type = .add_learner_node, .node_id = 2 },
+    };
+    const ctx = try allocator.dupe(u8, "hi");
+    defer allocator.free(ctx);
+    const original = ConfChangeV2{
+        .transition = .auto_,
+        .changes = &changes,
+        .context = ctx,
+    };
+
+    const bytes = try encodeConfChangeV2(allocator, original);
+    defer allocator.free(bytes);
+
+    var decoded = try decodeConfChangeV2(allocator, bytes);
+    defer decoded.deinit(allocator);
+
+    try std.testing.expectEqual(original.transition, decoded.transition);
+    try std.testing.expectEqual(original.changes.len, decoded.changes.len);
+    for (original.changes, decoded.changes) |a, b| {
+        try std.testing.expectEqual(a.change_type, b.change_type);
+        try std.testing.expectEqual(a.node_id, b.node_id);
+    }
+    try std.testing.expectEqualStrings(original.context, decoded.context);
+}
+
+test "decodeConfChangeV2 rejects bad magic" {
+    const allocator = std.testing.allocator;
+    const bad = [_]u8{ 'B', 'A', 'D', 'X', 1, 0, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(error.ConfChangeParseError, decodeConfChangeV2(allocator, &bad));
 }

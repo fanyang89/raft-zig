@@ -106,6 +106,16 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.campaign_election;
         _ = raft.campaign_transfer;
         _ = raft.Raft;
+
+        // RawNode.
+        _ = raft.Peer;
+        _ = raft.SnapshotStatus;
+        _ = raft.isLocalMessage;
+        _ = raft.isResponseMessage;
+        _ = raft.LightReady;
+        _ = raft.Ready;
+        _ = raft.RawNodeStatus;
+        _ = raft.RawNode;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);
