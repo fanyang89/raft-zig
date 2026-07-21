@@ -116,6 +116,24 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.Ready;
         _ = raft.RawNodeStatus;
         _ = raft.RawNode;
+
+        // Raftor layer.
+        _ = raft.ApplyResult;
+        _ = raft.SnapshotWriter;
+        _ = raft.SnapshotReader;
+        _ = raft.StateMachine;
+        _ = raft.MockStateMachine;
+        _ = raft.MessageCallback;
+        _ = raft.Transport;
+        _ = raft.NoopTransport;
+        _ = raft.ProposalResult;
+        _ = raft.ReadIndexResult;
+        _ = raft.ProposalCallback;
+        _ = raft.ReadIndexCallback;
+        _ = raft.ProposalTracker;
+        _ = raft.RaftorConfig;
+        _ = raft.NodeStatus;
+        _ = raft.Raftor;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);

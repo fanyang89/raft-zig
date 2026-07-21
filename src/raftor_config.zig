@@ -1,0 +1,47 @@
+//! Configuration for the Raftor orchestration layer.
+//!
+//! Ports `include/raftpp/raftor/raftor_config.h`. Wraps a `raft.Config` and
+//! adds orchestration knobs: node identity, listen address, initial peers,
+//! tick interval, snapshot thresholds.
+
+const std = @import("std");
+
+const raft_config_mod = @import("raft_config.zig");
+const raw_node_mod = @import("raw_node.zig");
+
+const Config = raft_config_mod.Config;
+const Peer = raw_node_mod.Peer;
+
+pub const RaftorConfig = struct {
+    /// Underlying Raft configuration. `id` must be set.
+    raft: Config = .{},
+    /// This node's network address (e.g. "127.0.0.1:9000"). Used by future
+    /// RPC transports; NoopTransport ignores it.
+    listen_addr: []const u8 = "",
+    /// Initial cluster peers for bootstrap. If empty, a single-node cluster
+    /// is created with just this node.
+    initial_peers: []const Peer = &.{},
+    /// Data directory for future WAL storage. MemoryStorage ignores it.
+    data_dir: []const u8 = "",
+    /// Interval between ticks in milliseconds. The event loop sleeps this
+    /// long when idle.
+    tick_interval_ms: u64 = 100,
+    /// Number of applied entries above which a snapshot is triggered.
+    snapshot_threshold: u64 = 10_000,
+    /// Maximum number of uncommitted entries allowed before proposals are
+    /// rejected.
+    max_uncommitted_entries: u64 = std.math.maxInt(u64),
+    /// Whether to verify CRC32C entry checksums on apply.
+    checksum_enabled: bool = false,
+
+    pub fn nodeId(self: RaftorConfig) u64 {
+        return self.raft.id;
+    }
+};
+
+test "raftor config defaults" {
+    const c = RaftorConfig{};
+    try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
+    try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_threshold);
+    try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
+}

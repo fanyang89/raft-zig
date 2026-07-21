@@ -42,6 +42,12 @@ const conf_restore_mod = @import("conf_restore.zig");
 const raft_config_mod = @import("raft_config.zig");
 const raft_mod = @import("raft.zig");
 const raw_node_mod = @import("raw_node.zig");
+const state_machine_mod = @import("state_machine.zig");
+const transport_mod = @import("transport.zig");
+const proposal_tracker_mod = @import("proposal_tracker.zig");
+const raftor_config_mod = @import("raftor_config.zig");
+const ready_processor_mod = @import("ready_processor.zig");
+const raftor_mod = @import("raftor.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -160,6 +166,27 @@ pub const Ready = raw_node_mod.Ready;
 pub const RawNodeStatus = raw_node_mod.Status;
 pub const RawNode = raw_node_mod.RawNode;
 
+pub const ApplyResult = state_machine_mod.ApplyResult;
+pub const SnapshotWriter = state_machine_mod.SnapshotWriter;
+pub const SnapshotReader = state_machine_mod.SnapshotReader;
+pub const StateMachine = state_machine_mod.StateMachine;
+pub const MockStateMachine = state_machine_mod.MockStateMachine;
+
+pub const MessageCallback = transport_mod.MessageCallback;
+pub const Transport = transport_mod.Transport;
+pub const NoopTransport = transport_mod.NoopTransport;
+
+pub const ProposalResult = proposal_tracker_mod.ProposalResult;
+pub const ReadIndexResult = proposal_tracker_mod.ReadIndexResult;
+pub const ProposalCallback = proposal_tracker_mod.ProposalCallback;
+pub const ReadIndexCallback = proposal_tracker_mod.ReadIndexCallback;
+pub const ProposalTracker = proposal_tracker_mod.ProposalTracker;
+
+pub const RaftorConfig = raftor_config_mod.RaftorConfig;
+
+pub const NodeStatus = raftor_mod.NodeStatus;
+pub const Raftor = raftor_mod.Raftor;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -191,5 +218,11 @@ test "re-exported modules compile" {
     _ = raft_config_mod;
     _ = raft_mod;
     _ = raw_node_mod;
+    _ = state_machine_mod;
+    _ = transport_mod;
+    _ = proposal_tracker_mod;
+    _ = raftor_config_mod;
+    _ = ready_processor_mod;
+    _ = raftor_mod;
     _ = version_info;
 }

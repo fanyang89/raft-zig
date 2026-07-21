@@ -114,6 +114,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_raw_node_tests = b.addRunArtifact(raw_node_tests);
 
+    const raftor_tests = b.addTest(.{
+        .name = "raftor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/raftor_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_raftor_tests = b.addRunArtifact(raftor_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
@@ -124,6 +135,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_confchange_tests.step);
     test_step.dependOn(&run_raft_tests.step);
     test_step.dependOn(&run_raw_node_tests.step);
+    test_step.dependOn(&run_raftor_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
