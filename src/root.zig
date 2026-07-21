@@ -48,6 +48,7 @@ const proposal_tracker_mod = @import("proposal_tracker.zig");
 const raftor_config_mod = @import("raftor_config.zig");
 const ready_processor_mod = @import("ready_processor.zig");
 const raftor_mod = @import("raftor.zig");
+const wal_mod = @import("wal.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -187,6 +188,9 @@ pub const RaftorConfig = raftor_config_mod.RaftorConfig;
 pub const NodeStatus = raftor_mod.NodeStatus;
 pub const Raftor = raftor_mod.Raftor;
 
+pub const WAL = wal_mod.WAL;
+pub const WALStorage = wal_mod.WALStorage;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -224,5 +228,6 @@ test "re-exported modules compile" {
     _ = raftor_config_mod;
     _ = ready_processor_mod;
     _ = raftor_mod;
+    _ = wal_mod;
     _ = version_info;
 }
