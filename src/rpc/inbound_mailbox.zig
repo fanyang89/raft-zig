@@ -72,3 +72,51 @@ test "inbound mailbox push and drain" {
     try std.testing.expectEqual(types.MessageType.append, msgs[0].msg_type);
     try std.testing.expect(mb.empty());
 }
+
+test "inbound mailbox supports concurrent producers and draining" {
+    const allocator = std.heap.smp_allocator;
+    const producer_count = 4;
+    const messages_per_producer = 128;
+
+    var mailbox = InboundMailbox.init(allocator);
+    defer mailbox.deinit();
+    var producers_done = std.atomic.Value(usize).init(0);
+
+    const Producer = struct {
+        mailbox: *InboundMailbox,
+        done: *std.atomic.Value(usize),
+        id: u64,
+
+        fn run(self: *@This()) void {
+            for (0..messages_per_producer) |index| {
+                self.mailbox.push(.{
+                    .msg_type = .append,
+                    .from = self.id,
+                    .to = 1,
+                    .index = index,
+                });
+            }
+            _ = self.done.fetchAdd(1, .release);
+        }
+    };
+
+    var producers: [producer_count]Producer = undefined;
+    var threads: [producer_count]std.Thread = undefined;
+    for (&producers, &threads, 0..) |*producer, *thread, index| {
+        producer.* = .{ .mailbox = &mailbox, .done = &producers_done, .id = index + 1 };
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+
+    var received: usize = 0;
+    while (producers_done.load(.acquire) != producer_count or !mailbox.empty()) {
+        const messages = try mailbox.drain();
+        received += messages.len;
+        for (messages) |*message| message.deinit(allocator);
+        allocator.free(messages);
+        if (messages.len == 0) std.atomic.spinLoopHint();
+    }
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expectEqual(producer_count * messages_per_producer, received);
+    try std.testing.expect(mailbox.empty());
+}

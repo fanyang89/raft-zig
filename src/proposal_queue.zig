@@ -129,3 +129,99 @@ test "proposal queue push and tryPop" {
 
     try std.testing.expect(q.tryPop() == null);
 }
+
+test "proposal queue supports concurrent producers and consumption" {
+    const allocator = std.heap.smp_allocator;
+    const producer_count = 4;
+    const items_per_producer = 128;
+
+    var queue = ProposalQueue.init(allocator);
+    defer queue.deinit();
+    var producers_done = std.atomic.Value(usize).init(0);
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+    };
+    const Producer = struct {
+        queue: *ProposalQueue,
+        done: *std.atomic.Value(usize),
+
+        fn run(self: *@This()) void {
+            for (0..items_per_producer) |_| {
+                const data = allocator.dupe(u8, "data") catch @panic("OOM");
+                const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
+                self.queue.push(data, ctx, .{ .ctx = self.queue, .function = Cb.callback });
+            }
+            _ = self.done.fetchAdd(1, .release);
+        }
+    };
+
+    var producers: [producer_count]Producer = undefined;
+    var threads: [producer_count]std.Thread = undefined;
+    for (&producers, &threads) |*producer, *thread| {
+        producer.* = .{ .queue = &queue, .done = &producers_done };
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+
+    var consumed: usize = 0;
+    while (producers_done.load(.acquire) != producer_count or !queue.empty()) {
+        if (queue.tryPop()) |item| {
+            allocator.free(item.data);
+            allocator.free(item.ctx);
+            consumed += 1;
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expectEqual(producer_count * items_per_producer, consumed);
+    try std.testing.expect(queue.empty());
+}
+
+test "read index queue supports concurrent producers and consumption" {
+    const allocator = std.heap.smp_allocator;
+    const producer_count = 4;
+    const items_per_producer = 128;
+
+    var queue = ReadIndexQueue.init(allocator);
+    defer queue.deinit();
+    var producers_done = std.atomic.Value(usize).init(0);
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ReadIndexResult) void {}
+    };
+    const Producer = struct {
+        queue: *ReadIndexQueue,
+        done: *std.atomic.Value(usize),
+
+        fn run(self: *@This()) void {
+            for (0..items_per_producer) |_| {
+                const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
+                self.queue.push(ctx, .{ .ctx = self.queue, .function = Cb.callback });
+            }
+            _ = self.done.fetchAdd(1, .release);
+        }
+    };
+
+    var producers: [producer_count]Producer = undefined;
+    var threads: [producer_count]std.Thread = undefined;
+    for (&producers, &threads) |*producer, *thread| {
+        producer.* = .{ .queue = &queue, .done = &producers_done };
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+
+    var consumed: usize = 0;
+    while (producers_done.load(.acquire) != producer_count or !queue.empty()) {
+        if (queue.tryPop()) |item| {
+            allocator.free(item.ctx);
+            consumed += 1;
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expectEqual(producer_count * items_per_producer, consumed);
+    try std.testing.expect(queue.empty());
+}
