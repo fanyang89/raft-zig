@@ -1255,7 +1255,8 @@ pub const Raft = struct {
         var old = old_tracker;
         old.deinit();
 
-        _ = self.postConfChange();
+        var post_cs = self.postConfChange();
+        defer post_cs.deinit(self.allocator);
         self.pending_request_snapshot = invalid_index;
         log.info("restored snapshot at index {}", .{meta.index});
         return true;

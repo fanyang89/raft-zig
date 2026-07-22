@@ -158,6 +158,39 @@ pub fn build(b: *std.Build) void {
     });
     const run_figure8_tests = b.addRunArtifact(figure8_tests);
 
+    const snap_tests = b.addTest(.{
+        .name = "raft_snap",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/raft_snap_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_snap_tests = b.addRunArtifact(snap_tests);
+
+    const flow_control_tests = b.addTest(.{
+        .name = "raft_flow_control",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/raft_flow_control_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_flow_control_tests = b.addRunArtifact(flow_control_tests);
+
+    const paper_tests = b.addTest(.{
+        .name = "raft_paper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/raft_paper_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_paper_tests = b.addRunArtifact(paper_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
@@ -172,6 +205,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_multi_node_tests.step);
     test_step.dependOn(&run_raftor_multi_node_tests.step);
     test_step.dependOn(&run_figure8_tests.step);
+    test_step.dependOn(&run_snap_tests.step);
+    test_step.dependOn(&run_flow_control_tests.step);
+    test_step.dependOn(&run_paper_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
