@@ -40,6 +40,18 @@ test "rpc: peer manager add and remove" {
     try std.testing.expect(!pm.hasPeer(1));
 }
 
+test "rpc: failed transport start releases resources" {
+    const first = raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19101") catch return error.SkipZigTest;
+    defer first.destroy();
+
+    if (raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19101")) |unexpected| {
+        unexpected.destroy();
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expectEqual(error.ListenFailed, err);
+    }
+}
+
 test "rpc: grpc transport self-connect round-trip" {
     // Create a transport listening on localhost.
     const tp = raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19100") catch |e| {

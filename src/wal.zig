@@ -774,7 +774,7 @@ fn removeFile(path: [:0]const u8) void {
 
 test "wal: open, append, recover" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_recover";
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-recover";
     removeWALDir(allocator, path);
 
     {
@@ -813,7 +813,7 @@ test "wal: open, append, recover" {
 
 test "wal: compact removes old entries" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_compact";
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-compact";
     removeWALDir(allocator, path);
 
     {
@@ -853,7 +853,7 @@ test "wal: compact removes old entries" {
 
 test "wal: WALStorage applyLocalSnapshot compacts" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_snap_compact";
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-snap-compact";
     removeWALDir(allocator, path);
 
     {
@@ -888,7 +888,7 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
 
 test "wal: restart recovers entries and hardstate via WALStorage" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_restart";
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-restart";
     removeWALDir(allocator, path);
 
     // First session: write entries + hardstate.
@@ -927,7 +927,7 @@ test "wal: restart recovers entries and hardstate via WALStorage" {
 
 test "wal: WALStorage vtable dispatches correctly" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_vtable";
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-vtable";
     removeWALDir(allocator, path);
 
     {

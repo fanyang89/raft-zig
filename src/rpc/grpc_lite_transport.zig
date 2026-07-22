@@ -56,6 +56,10 @@ pub const GrpcLiteTransport = struct {
             .listen_addr = addr_copy,
             .addr_copy = addr_copy,
         };
+        errdefer {
+            self.peer_manager.deinit();
+            self.mailbox.deinit();
+        }
 
         // Parse host and port from listen_addr (e.g. "127.0.0.1:9000").
         const colon = std.mem.lastIndexOfScalar(u8, listen_addr, ':') orelse return error.AddressPortInvalid;
@@ -70,6 +74,7 @@ pub const GrpcLiteTransport = struct {
             .host = host,
             .port = port,
         });
+        errdefer srv.deinit();
         self.server = srv;
 
         try srv.registerUnary(raft_method_path, .{
