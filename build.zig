@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
     });
     raft_zig.addOptions("raft_zig_options", raft_zig_options);
 
+    // grpc-lite RPC backend (optional dependency).
+    const grpc_dep = b.dependency("grpc_lite", .{});
+    const grpc_lite = grpc_dep.module("grpc_lite");
+    raft_zig.addImport("grpc_lite", grpc_lite);
+
     const library = b.addLibrary(.{
         .name = "raft-zig",
         .root_module = raft_zig,
@@ -191,6 +196,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_paper_tests = b.addRunArtifact(paper_tests);
 
+    const rpc_tests = b.addTest(.{
+        .name = "rpc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/rpc_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_rpc_tests = b.addRunArtifact(rpc_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
@@ -208,6 +224,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_snap_tests.step);
     test_step.dependOn(&run_flow_control_tests.step);
     test_step.dependOn(&run_paper_tests.step);
+    test_step.dependOn(&run_rpc_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);

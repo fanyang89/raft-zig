@@ -3,13 +3,19 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xd98872fa44f543c3,
-    .dependencies = .{},
+    .dependencies = .{
+        .grpc_lite = .{
+            .url = "ref/grpc-lite-0.2.0.tar.gz",
+            .hash = "grpc_lite-0.2.0-BcwY0AvmAwB61eEABtjmBvlothF495oMr20-ZeqnPUgY",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "examples",
         "tests",
+        "ref",
         "LICENSE",
         "README.md",
     },

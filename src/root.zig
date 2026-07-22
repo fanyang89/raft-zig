@@ -52,6 +52,9 @@ const wal_mod = @import("wal.zig");
 const codec_mod = @import("codec.zig");
 const loopback_transport_mod = @import("loopback_transport.zig");
 const proposal_queue_mod = @import("proposal_queue.zig");
+const rpc_inbound_mailbox = @import("rpc/inbound_mailbox.zig");
+const rpc_peer_manager = @import("rpc/peer_manager.zig");
+const rpc_grpc_transport = @import("rpc/grpc_lite_transport.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -205,6 +208,10 @@ pub const LoopbackTransport = loopback_transport_mod.LoopbackTransport;
 pub const ProposalQueue = proposal_queue_mod.ProposalQueue;
 pub const ReadIndexQueue = proposal_queue_mod.ReadIndexQueue;
 
+pub const InboundMailbox = rpc_inbound_mailbox.InboundMailbox;
+pub const PeerManager = rpc_peer_manager.PeerManager;
+pub const GrpcLiteTransport = rpc_grpc_transport.GrpcLiteTransport;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -246,5 +253,8 @@ test "re-exported modules compile" {
     _ = codec_mod;
     _ = loopback_transport_mod;
     _ = proposal_queue_mod;
+    _ = rpc_inbound_mailbox;
+    _ = rpc_peer_manager;
+    _ = rpc_grpc_transport;
     _ = version_info;
 }

@@ -12,3 +12,4 @@
 /.opencode/
 /.mise.local.toml
 /opencode.json
+zig-pkg/
