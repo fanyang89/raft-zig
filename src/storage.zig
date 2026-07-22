@@ -200,6 +200,7 @@ pub const WritableStorage = struct {
         set_hard_state: *const fn (ctx: *anyopaque, hs: HardState) Error!void,
         set_conf_state: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, cs: ConfState) Error!void,
         apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
+        apply_local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         sync_: *const fn (ctx: *anyopaque) Error!void,
     };
 
@@ -265,6 +266,14 @@ pub const WritableStorage = struct {
         snapshot: Snapshot,
     ) Error!void {
         return self.vtable.apply_snapshot(self.ctx, allocator, snapshot);
+    }
+
+    pub fn applyLocalSnapshot(
+        self: WritableStorage,
+        allocator: std.mem.Allocator,
+        snapshot: Snapshot,
+    ) Error!void {
+        return self.vtable.apply_local_snapshot(self.ctx, allocator, snapshot);
     }
 
     pub fn sync(self: WritableStorage) Error!void {

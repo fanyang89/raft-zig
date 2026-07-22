@@ -92,6 +92,8 @@ pub const MockStateMachine = struct {
     applied: std.ArrayList([]u8),
     allocator: std.mem.Allocator,
     last_applied_index: u64 = 0,
+    snapshot_count: usize = 0,
+    last_snapshot_index: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) MockStateMachine {
         return .{ .applied = .empty, .allocator = allocator };
@@ -113,10 +115,9 @@ pub const MockStateMachine = struct {
     }
 
     pub fn takeSnapshotImpl(ctx: *anyopaque, allocator: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: ConfState) Error!Snapshot {
-        _ = ctx;
-        var data: std.ArrayList(u8) = .empty;
-        defer data.deinit(allocator);
-        // Serialize nothing meaningful; just record the index/term/conf_state.
+        const self: *MockStateMachine = @ptrCast(@alignCast(ctx));
+        self.snapshot_count += 1;
+        self.last_snapshot_index = applied_index;
         return .{
             .data = try allocator.dupe(u8, ""),
             .metadata = .{

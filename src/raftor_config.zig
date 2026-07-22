@@ -27,7 +27,12 @@ pub const RaftorConfig = struct {
     /// long when idle.
     tick_interval_ms: u64 = 100,
     /// Number of applied entries above which a snapshot is triggered.
-    snapshot_threshold: u64 = 10_000,
+    /// 0 = disabled.
+    snapshot_entries_threshold: u64 = 10_000,
+    /// Tick interval between automatic snapshots. 0 = disabled.
+    snapshot_interval_ticks: u64 = 0,
+    /// Minimum ticks between snapshot retry attempts (rate limiting).
+    snapshot_retry_min_ticks: u64 = 10,
     /// Maximum number of uncommitted entries allowed before proposals are
     /// rejected.
     max_uncommitted_entries: u64 = std.math.maxInt(u64),
@@ -46,6 +51,6 @@ pub const RaftorConfig = struct {
 test "raftor config defaults" {
     const c = RaftorConfig{};
     try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
-    try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_threshold);
+    try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_entries_threshold);
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
 }

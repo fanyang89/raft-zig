@@ -467,6 +467,11 @@ pub const MemoryStorage = struct {
         return self.applySnapshot(allocator, snapshot);
     }
 
+    fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
+        const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
+        return self.applyLocalSnapshot(allocator, snap);
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
         return self.sync_();
@@ -483,6 +488,7 @@ pub const MemoryStorage = struct {
         .set_hard_state = set_hard_state_impl,
         .set_conf_state = set_conf_state_impl,
         .apply_snapshot = apply_snapshot_impl,
+        .apply_local_snapshot = apply_local_snapshot_impl,
         .sync_ = sync_impl,
     };
 

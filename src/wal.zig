@@ -698,6 +698,13 @@ pub const WALStorage = struct {
         self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
     }
 
+    fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
+        // For WAL, apply_local_snapshot persists the snapshot metadata and
+        // compacts entries before it. Currently delegates to apply_snapshot
+        // since WAL compact is not yet implemented.
+        return apply_snapshot_impl(ctx, allocator, snap);
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         self.wal.sync() catch return error.OutOfMemory;
@@ -714,6 +721,7 @@ pub const WALStorage = struct {
         .set_hard_state = set_hard_state_impl,
         .set_conf_state = set_conf_state_impl,
         .apply_snapshot = apply_snapshot_impl,
+        .apply_local_snapshot = apply_local_snapshot_impl,
         .sync_ = sync_impl,
     };
 

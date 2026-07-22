@@ -80,6 +80,11 @@ pub const Raftor = struct {
     running: bool = false,
     terminal_error: ?Error = null,
 
+    // Snapshot triggering state.
+    last_snapshot_attempt_index: u64 = 0,
+    last_snapshot_attempt_tick: u64 = 0,
+    last_snapshot_tick: u64 = 0,
+
     const PendingProposal = struct {
         data: []u8,
         ctx: []u8,
@@ -136,6 +141,9 @@ pub const Raftor = struct {
         self.tick_count = 0;
         self.running = false;
         self.terminal_error = null;
+        self.last_snapshot_attempt_index = 0;
+        self.last_snapshot_attempt_tick = 0;
+        self.last_snapshot_tick = 0;
 
         // Bootstrap: only seed ConfState if storage is empty (no prior voters).
         // This prevents overwriting an existing cluster configuration on restart.
@@ -244,6 +252,10 @@ pub const Raftor = struct {
             had_work = true;
         }
 
+        self.maybeAutoSnapshot() catch |e| {
+            log.warn("snapshot attempt failed: {s}", .{@errorName(e)});
+        };
+
         return had_work;
     }
 
@@ -325,6 +337,84 @@ pub const Raftor = struct {
         defer self.allocator.free(cc.changes);
         cc.changes[0] = .{ .change_type = .remove_node, .node_id = id };
         try self.raw_node.proposeConfChange("", cc);
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot triggering
+    // -----------------------------------------------------------------------
+
+    /// Manually trigger a snapshot at the current applied_index. The
+    /// StateMachine's `takeSnapshot` is called, then the result is persisted
+    /// via `storage.applyLocalSnapshot` (which also compacts old entries).
+    pub fn takeSnapshot(self: *Raftor) Error!void {
+        const applied_index = self.ready_processor.getAppliedIndex();
+        if (applied_index == 0) return;
+
+        const init_state = try self.storage.initialState(self.allocator);
+        var is_copy = init_state;
+        defer is_copy.deinit(self.allocator);
+
+        const applied_term = self.storage.term(applied_index) catch 0;
+
+        var snap = try self.ready_processor.state_machine.takeSnapshot(
+            self.allocator,
+            applied_index,
+            applied_term,
+            is_copy.conf_state,
+        );
+        defer snap.deinit(self.allocator);
+
+        log.info("taking snapshot at index {} term {}", .{ applied_index, applied_term });
+        self.storage.asWritableStorage().applyLocalSnapshot(self.allocator, snap) catch |e| {
+            log.warn("applyLocalSnapshot failed: {s}", .{@errorName(e)});
+            return e;
+        };
+
+        self.last_snapshot_tick = self.tick_count;
+        self.last_snapshot_attempt_index = applied_index;
+    }
+
+    /// Check if a snapshot should be automatically triggered based on the
+    /// configured thresholds. Called at the end of each `tick()`.
+    fn maybeAutoSnapshot(self: *Raftor) Error!void {
+        const cfg = self.config;
+        const entries_threshold = cfg.snapshot_entries_threshold;
+        const interval_ticks = cfg.snapshot_interval_ticks;
+
+        // Both zero → auto-snapshot disabled.
+        if (entries_threshold == 0 and interval_ticks == 0) return;
+
+        const applied_index = self.ready_processor.getAppliedIndex();
+        if (applied_index == 0) return;
+
+        // Rate limiting: if applied_index hasn't advanced and we tried
+        // recently, skip.
+        if (applied_index <= self.last_snapshot_attempt_index and
+            (self.tick_count - self.last_snapshot_attempt_tick) < cfg.snapshot_retry_min_ticks)
+        {
+            return;
+        }
+
+        // Condition 1: entry count threshold.
+        const snapshot_index = self.last_snapshot_attempt_index;
+        if (entries_threshold > 0 and applied_index > snapshot_index and
+            (applied_index - snapshot_index) >= entries_threshold)
+        {
+            try self.takeSnapshot();
+            return;
+        }
+
+        // Condition 2: time interval.
+        if (interval_ticks > 0 and
+            (self.tick_count - self.last_snapshot_tick) >= interval_ticks)
+        {
+            try self.takeSnapshot();
+            return;
+        }
+
+        // Record the attempt so rate limiting works even if no condition fired.
+        self.last_snapshot_attempt_index = applied_index;
+        self.last_snapshot_attempt_tick = self.tick_count;
     }
 
     // -----------------------------------------------------------------------
