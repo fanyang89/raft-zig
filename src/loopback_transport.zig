@@ -110,6 +110,11 @@ pub const LoopbackTransport = struct {
 
     /// Drain the inbox and invoke the callback for each message. Returns
     /// true if any messages were delivered.
+    ///
+    /// **Ownership**: the callback receives each Message by value and becomes
+    /// the sole owner of its heap-allocated fields. The callback (or its
+    /// callee) must call `msg.deinit(allocator)` exactly once. `poll()` does
+    /// NOT free the messages after delivery.
     pub fn poll(self: *LoopbackTransport) bool {
         if (self.inbox.items.len == 0) return false;
         const cb = self.callback orelse return false;
@@ -118,12 +123,13 @@ pub const LoopbackTransport = struct {
         var local = self.inbox;
         self.inbox = .empty;
 
+        // Transfer ownership of each message to the callback.
         for (local.items) |msg| {
             cb.invoke(msg);
         }
 
-        // Free delivered messages.
-        for (local.items) |*m| m.deinit(self.allocator);
+        // Only free the ArrayList metadata (the messages themselves are now
+        // owned by the callbacks).
         local.deinit(self.allocator);
         return true;
     }
@@ -229,12 +235,15 @@ test "loopback: poll invokes callback" {
     var received_count: usize = 0;
     const Cb = struct {
         count: *usize,
-        fn invoke(ctx: *anyopaque, _: Message) void {
+        alloc: std.mem.Allocator,
+        fn invoke(ctx: *anyopaque, msg: Message) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.count.* += 1;
+            var m = msg;
+            m.deinit(self.alloc);
         }
     };
-    var cb_obj = Cb{ .count = &received_count };
+    var cb_obj = Cb{ .count = &received_count, .alloc = allocator };
     tp2.transport().setMessageCallback(.{ .ctx = &cb_obj, .function = Cb.invoke });
 
     tp1.transport().send(&.{.{ .msg_type = .heartbeat, .to = 2, .from = 1 }});

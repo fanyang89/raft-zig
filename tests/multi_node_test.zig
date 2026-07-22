@@ -100,12 +100,11 @@ fn destroyCluster(comptime n: usize, net: *LoopbackNetwork, nodes: *[n]Node) voi
 }
 
 /// Callback invoked by LoopbackTransport when a message arrives. Forwards
-/// the message to the node's RawNode.
+/// the message to the node's RawNode. Ownership of the Message's heap-
+/// allocated fields transfers to `step()`, which calls `defer m.deinit()`.
 fn messageCallback(ctx: *anyopaque, msg: Message) void {
     const node: *Node = @ptrCast(@alignCast(ctx));
-    var m = msg;
-    defer m.deinit(allocator);
-    node.raw_node.step(m) catch {};
+    node.raw_node.step(msg) catch {};
 }
 
 /// Drive one full event-loop cycle across all nodes:
@@ -214,5 +213,62 @@ test "multi-node: partition prevents replication" {
         // (Node 1 might briefly become candidate but not leader.)
         const state = nd.raw_node.raftConst().state;
         try std.testing.expect(state != .leader);
+    }
+}
+
+test "multi-node: log replication across 3 nodes" {
+    var cluster = try createCluster();
+    try initRawNodes(&cluster.nodes);
+    registerCallbacks(&cluster.nodes);
+    defer cluster.destroy();
+
+    // Elect a leader.
+    try cluster.nodes[0].raw_node.campaign();
+    var i: usize = 0;
+    while (i < 30 and countLeaders(&cluster.nodes) == 0) : (i += 1) {
+        try tickCluster(cluster.net, &cluster.nodes);
+    }
+    try std.testing.expectEqual(@as(usize, 1), countLeaders(&cluster.nodes));
+
+    // Propose data from the leader.
+    const leader_idx = blk: {
+        for (&cluster.nodes, 0..) |*nd, j| {
+            if (nd.raw_node.raftConst().state == .leader) break :blk j;
+        }
+        return error.TestExpectedLeader;
+    };
+    try cluster.nodes[leader_idx].raw_node.propose("", "hello");
+
+    // Drive cycles until replication completes.
+    i = 0;
+    while (i < 30) : (i += 1) {
+        try tickCluster(cluster.net, &cluster.nodes);
+    }
+
+    // All nodes should have the proposed entry in their log (at index 2,
+    // after the leader's noop at index 1).
+    for (&cluster.nodes) |*nd| {
+        const last = nd.raw_node.raftConst().raft_log.lastIndex();
+        try std.testing.expect(last >= 2);
+    }
+}
+
+test "multi-node: leader stays unique across multiple ticks" {
+    var cluster = try createCluster();
+    try initRawNodes(&cluster.nodes);
+    registerCallbacks(&cluster.nodes);
+    defer cluster.destroy();
+
+    try cluster.nodes[0].raw_node.campaign();
+    var i: usize = 0;
+    while (i < 30 and countLeaders(&cluster.nodes) == 0) : (i += 1) {
+        try tickCluster(cluster.net, &cluster.nodes);
+    }
+
+    // Drive 20 more cycles — leader should remain unique.
+    i = 0;
+    while (i < 20) : (i += 1) {
+        try tickCluster(cluster.net, &cluster.nodes);
+        try std.testing.expectEqual(@as(usize, 1), countLeaders(&cluster.nodes));
     }
 }
