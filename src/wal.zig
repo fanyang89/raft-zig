@@ -576,6 +576,23 @@ pub const WAL = struct {
         return self.entries.items[self.entries.items.len - 1].index;
     }
 
+    /// Remove entries before `compact_index` from the in-memory list. The
+    /// underlying WAL file is not truncated (single-file simplification); the
+    /// stale records are simply skipped on future recoveries because
+    /// `firstIndex()` advances past them.
+    pub fn compact(self: *WAL, compact_index: u64) !void {
+        if (self.entries.items.len == 0) return;
+        if (compact_index <= self.firstIndex()) return;
+        if (compact_index > self.lastIndex() + 1) return error.Fatal;
+
+        const drop_count: usize = @intCast(compact_index - self.firstIndex());
+        var i: usize = 0;
+        while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
+        // Shift remaining entries forward.
+        std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
+        self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
+    }
+
     pub fn term(self: WAL, idx: u64) Error!u64 {
         if (idx == self.snapshot_metadata.index and self.snapshot_metadata.index > 0) {
             return self.snapshot_metadata.term;
@@ -699,10 +716,12 @@ pub const WALStorage = struct {
     }
 
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
-        // For WAL, apply_local_snapshot persists the snapshot metadata and
-        // compacts entries before it. Currently delegates to apply_snapshot
-        // since WAL compact is not yet implemented.
-        return apply_snapshot_impl(ctx, allocator, snap);
+        const self: *WALStorage = @ptrCast(@alignCast(ctx));
+        // Persist snapshot metadata record.
+        self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
+        // Compact entries before the snapshot index.
+        self.wal.compact(snap.metadata.index + 1) catch return error.OutOfMemory;
+        _ = allocator;
     }
 
     fn sync_impl(ctx: *anyopaque) Error!void {

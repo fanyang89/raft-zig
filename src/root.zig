@@ -51,6 +51,7 @@ const raftor_mod = @import("raftor.zig");
 const wal_mod = @import("wal.zig");
 const codec_mod = @import("codec.zig");
 const loopback_transport_mod = @import("loopback_transport.zig");
+const proposal_queue_mod = @import("proposal_queue.zig");
 
 pub const core = .{
     .primitives = primitives,
@@ -201,6 +202,9 @@ pub const decodeFramed = codec_mod.decodeFramed;
 pub const LoopbackNetwork = loopback_transport_mod.LoopbackNetwork;
 pub const LoopbackTransport = loopback_transport_mod.LoopbackTransport;
 
+pub const ProposalQueue = proposal_queue_mod.ProposalQueue;
+pub const ReadIndexQueue = proposal_queue_mod.ReadIndexQueue;
+
 pub const version = version_info.string;
 
 test "version is parseable" {
@@ -241,5 +245,6 @@ test "re-exported modules compile" {
     _ = wal_mod;
     _ = codec_mod;
     _ = loopback_transport_mod;
+    _ = proposal_queue_mod;
     _ = version_info;
 }

@@ -35,6 +35,7 @@ pub const Transport = struct {
         remove_peer: *const fn (ctx: *anyopaque, id: u64) void,
         send: *const fn (ctx: *anyopaque, messages: []const Message) void,
         set_message_callback: *const fn (ctx: *anyopaque, cb: MessageCallback) void,
+        poll: *const fn (ctx: *anyopaque) void,
     };
 
     pub fn start(self: Transport) Error!void {
@@ -54,6 +55,9 @@ pub const Transport = struct {
     }
     pub fn setMessageCallback(self: Transport, cb: MessageCallback) void {
         self.vtable.set_message_callback(self.ctx, cb);
+    }
+    pub fn poll(self: Transport) void {
+        self.vtable.poll(self.ctx);
     }
 };
 
@@ -105,6 +109,8 @@ pub const NoopTransport = struct {
         self.callback = cb;
     }
 
+    fn pollImpl(_: *anyopaque) void {}
+
     pub const vtable: Transport.VTable = .{
         .start = startImpl,
         .stop = stopImpl,
@@ -112,6 +118,7 @@ pub const NoopTransport = struct {
         .remove_peer = removePeerImpl,
         .send = sendImpl,
         .set_message_callback = setMessageCallbackImpl,
+        .poll = pollImpl,
     };
 
     pub fn transport(self: *NoopTransport) Transport {

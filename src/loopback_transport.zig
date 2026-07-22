@@ -156,6 +156,11 @@ pub const LoopbackTransport = struct {
         self.callback = cb;
     }
 
+    fn pollImpl(ctx: *anyopaque) void {
+        const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
+        _ = self.poll();
+    }
+
     pub const vtable: Transport.VTable = .{
         .start = startImpl,
         .stop = stopImpl,
@@ -163,6 +168,7 @@ pub const LoopbackTransport = struct {
         .remove_peer = removePeerImpl,
         .send = sendImpl,
         .set_message_callback = setMessageCallbackImpl,
+        .poll = pollImpl,
     };
 
     pub fn transport(self: *LoopbackTransport) Transport {
