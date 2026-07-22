@@ -33,6 +33,10 @@ pub const RaftorConfig = struct {
     max_uncommitted_entries: u64 = std.math.maxInt(u64),
     /// Whether to verify CRC32C entry checksums on apply.
     checksum_enabled: bool = false,
+    /// Proposal timeout in ticks. 0 = no timeout.
+    proposal_timeout_ticks: u64 = 0,
+    /// Read-index timeout in ticks. 0 = no timeout.
+    read_index_timeout_ticks: u64 = 0,
 
     pub fn nodeId(self: RaftorConfig) u64 {
         return self.raft.id;

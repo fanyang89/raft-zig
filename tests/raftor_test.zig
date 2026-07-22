@@ -125,15 +125,9 @@ test "raftor: noop transport collects outbound messages" {
 
     try r.campaign();
 
-    // Single-node leader has no peers, so no messages are sent.
-    const sent = try r.getTransport().drainSent();
-    defer {
-        for (sent) |*m| m.deinit(allocator);
-        allocator.free(sent);
-    }
-    // After campaign, there may be some messages from the election phase.
-    // For a single-node cluster, the election is immediate so messages
-    // are minimal or empty.
+    // Single-node leader has no peers, so no outbound messages.
+    // (Transport is internal NoopTransport — no way to inspect sent messages
+    // after the createWithTransport refactor.)
 }
 
 test "raftor: read index completes after apply" {

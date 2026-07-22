@@ -136,6 +136,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_multi_node_tests = b.addRunArtifact(multi_node_tests);
 
+    const raftor_multi_node_tests = b.addTest(.{
+        .name = "raftor_multi_node",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/raftor_multi_node_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_raftor_multi_node_tests = b.addRunArtifact(raftor_multi_node_tests);
+
+    const figure8_tests = b.addTest(.{
+        .name = "figure8",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/figure8_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        }),
+    });
+    const run_figure8_tests = b.addRunArtifact(figure8_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
@@ -148,6 +170,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_raw_node_tests.step);
     test_step.dependOn(&run_raftor_tests.step);
     test_step.dependOn(&run_multi_node_tests.step);
+    test_step.dependOn(&run_raftor_multi_node_tests.step);
+    test_step.dependOn(&run_figure8_tests.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);

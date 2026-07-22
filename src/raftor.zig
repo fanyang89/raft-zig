@@ -1,14 +1,13 @@
 //! Top-level Raftor orchestration: ties RawNode, ReadyProcessor, Transport,
-//! and StateMachine into a complete single-node Raft server.
+//! and StateMachine into a complete Raft server.
 //!
 //! Ports `include/raftpp/raftor/raftor.h` and `lib/raftor/raftor.cc` with
 //! major simplifications:
 //!   * Uses MemoryStorage instead of WAL (durable storage arrives later).
-//!   * Uses NoopTransport instead of CapnpTransport (RPC arrives later).
+//!   * Accepts any Transport implementation (NoopTransport for single-node,
+//!     LoopbackTransport for multi-node testing, future TCP for production).
 //!   * Single-threaded: no mutexes, no cross-thread proposal queues.
 //!   * No telemetry / OpenTelemetry.
-//!
-//! The event loop is driven by `tick()` (non-blocking) or `run()` (blocking).
 
 const std = @import("std");
 
@@ -31,13 +30,11 @@ const Entry = types.Entry;
 const Message = types.Message;
 const ConfState = types.ConfState;
 const ConfChangeV2 = types.ConfChangeV2;
-const Snapshot = types.Snapshot;
 
 const Config = raft_config_mod.Config;
 const Raft = raft_mod.Raft;
 const RawNode = raw_node_mod.RawNode;
 const MemoryStorage = memory_storage_mod.MemoryStorage;
-const WritableStorage = storage_mod.WritableStorage;
 const StateMachine = state_machine_mod.StateMachine;
 const Transport = transport_mod.Transport;
 const NoopTransport = transport_mod.NoopTransport;
@@ -68,19 +65,20 @@ pub const Raftor = struct {
 
     // Subsystems — order matters for initialization.
     storage: MemoryStorage,
-    transport_impl: NoopTransport,
+    // Owned only when created internally via `create` (single-node).
+    // `createWithTransport` leaves this null and borrows externally.
+    noop_transport: ?NoopTransport = null,
+    transport: Transport,
     raw_node: RawNode,
     proposal_tracker: ProposalTracker,
     ready_processor: ReadyProcessor,
 
-    // Pending proposals submitted via `propose()` but not yet fed to RawNode.
     pending_proposals: std.ArrayList(PendingProposal),
-
-    // Pending reads submitted via `readIndex()` but not yet fed to RawNode.
     pending_reads: std.ArrayList(PendingRead),
 
     tick_count: u64 = 0,
     running: bool = false,
+    terminal_error: ?Error = null,
 
     const PendingProposal = struct {
         data: []u8,
@@ -93,8 +91,7 @@ pub const Raftor = struct {
         callback: proposal_tracker_mod.ReadIndexCallback,
     };
 
-    /// Create a Raftor on the heap. The caller owns the returned pointer and
-    /// must call `destroy` to free it.
+    /// Create a Raftor with an internal NoopTransport (single-node mode).
     pub fn create(
         allocator: std.mem.Allocator,
         config: RaftorConfig,
@@ -102,8 +99,23 @@ pub const Raftor = struct {
     ) Error!*Raftor {
         const self = try allocator.create(Raftor);
         errdefer allocator.destroy(self);
+        self.noop_transport = NoopTransport.init(allocator);
+        try self.initInternal(allocator, config, state_machine, self.noop_transport.?.transport());
+        return self;
+    }
 
-        try self.initInternal(allocator, config, state_machine);
+    /// Create a Raftor with an externally-owned Transport (multi-node mode).
+    /// The caller must keep `transport` alive for the Raftor's lifetime.
+    pub fn createWithTransport(
+        allocator: std.mem.Allocator,
+        config: RaftorConfig,
+        state_machine: StateMachine,
+        transport: Transport,
+    ) Error!*Raftor {
+        const self = try allocator.create(Raftor);
+        errdefer allocator.destroy(self);
+        self.noop_transport = null;
+        try self.initInternal(allocator, config, state_machine, transport);
         return self;
     }
 
@@ -113,29 +125,41 @@ pub const Raftor = struct {
         allocator.destroy(self);
     }
 
-    fn initInternal(self: *Raftor, allocator: std.mem.Allocator, config: RaftorConfig, state_machine: StateMachine) Error!void {
+    fn initInternal(self: *Raftor, allocator: std.mem.Allocator, config: RaftorConfig, state_machine: StateMachine, transport: Transport) Error!void {
         self.allocator = allocator;
         self.config = config;
         self.storage = MemoryStorage.init();
-        self.transport_impl = NoopTransport.init(allocator);
+        self.transport = transport;
         self.proposal_tracker = ProposalTracker.init(allocator);
         self.pending_proposals = .empty;
         self.pending_reads = .empty;
         self.tick_count = 0;
         self.running = false;
+        self.terminal_error = null;
 
-        // Bootstrap: seed storage with the initial ConfState.
-        const voters = if (config.initial_peers.len > 0)
-            buildVoterIds(allocator, config) catch return error.OutOfMemory
-        else
-            allocator.dupe(u64, &.{config.nodeId()}) catch return error.OutOfMemory;
-        defer allocator.free(voters);
-        // setRaftState clones the ConfState internally; no need to deinit cs.
-        const cs = ConfState{ .voters = voters };
-        try self.storage.setRaftState(allocator, .{ .conf_state = cs });
+        // Bootstrap: only seed ConfState if storage is empty (no prior voters).
+        // This prevents overwriting an existing cluster configuration on restart.
+        const existing_state = self.storage.initialState(allocator) catch RaftState{};
+        var es_copy = existing_state;
+        defer es_copy.deinit(allocator);
+        if (es_copy.conf_state.voters.len == 0) {
+            const voters = if (config.initial_peers.len > 0)
+                buildVoterIds(allocator, config) catch return error.OutOfMemory
+            else
+                allocator.dupe(u64, &.{config.nodeId()}) catch return error.OutOfMemory;
+            defer allocator.free(voters);
+            const cs = ConfState{ .voters = voters };
+            try self.storage.setRaftState(allocator, .{ .conf_state = cs });
+        }
 
         // Build RawNode AFTER storage is at its final address.
         self.raw_node = try RawNode.init(allocator, config.raft, self.storage.asStorage());
+
+        // Register inbound message callback: transport → raw_node.step().
+        self.transport.setMessageCallback(.{
+            .ctx = self,
+            .function = onMessage,
+        });
 
         // Build ReadyProcessor AFTER raw_node is at its final address.
         self.ready_processor = ReadyProcessor.init(
@@ -143,7 +167,7 @@ pub const Raftor = struct {
             &self.raw_node,
             self.storage.asWritableStorage(),
             state_machine,
-            self.transport_impl.transport(),
+            self.transport,
             &self.proposal_tracker,
             config.nodeId(),
             config.checksum_enabled,
@@ -161,8 +185,15 @@ pub const Raftor = struct {
         self.pending_reads.deinit(self.allocator);
         self.proposal_tracker.deinit();
         self.raw_node.deinit();
-        self.transport_impl.deinit();
+        if (self.noop_transport) |*nt| nt.deinit();
         self.storage.deinit(self.allocator);
+    }
+
+    /// Inbound message callback. Transfers message ownership to `step()`.
+    fn onMessage(ctx: *anyopaque, msg: Message) void {
+        const self: *Raftor = @ptrCast(@alignCast(ctx));
+        if (self.terminal_error != null) return;
+        self.raw_node.step(msg) catch {};
     }
 
     // -----------------------------------------------------------------------
@@ -171,20 +202,21 @@ pub const Raftor = struct {
 
     /// Advance the event loop by one tick. Returns true if there was work.
     pub fn tick(self: *Raftor) Error!bool {
+        if (self.terminal_error) |e| return e;
         self.tick_count += 1;
 
-        // Expire timed-out proposals and reads.
         self.proposal_tracker.expireTimeouts(self.tick_count);
 
         // Drain pending proposals into RawNode.
         var had_work = false;
+        const proposal_timeout = if (self.config.proposal_timeout_ticks > 0) self.config.proposal_timeout_ticks else 0;
         while (self.pending_proposals.items.len > 0) {
             const p = self.pending_proposals.swapRemove(self.pending_proposals.items.len - 1);
             defer {
                 self.allocator.free(p.data);
                 self.allocator.free(p.ctx);
             }
-            self.proposal_tracker.track(p.ctx, p.callback, self.tick_count, 0) catch {};
+            self.proposal_tracker.track(p.ctx, p.callback, self.tick_count, proposal_timeout) catch {};
             self.raw_node.propose(p.ctx, p.data) catch |e| {
                 if (e == error.ProposalDropped) {
                     self.proposal_tracker.fail(p.ctx, error.ProposalDropped);
@@ -195,20 +227,19 @@ pub const Raftor = struct {
             had_work = true;
         }
 
-        // Drain pending reads into RawNode.
+        // Drain pending reads.
+        const read_timeout = if (self.config.read_index_timeout_ticks > 0) self.config.read_index_timeout_ticks else 0;
         while (self.pending_reads.items.len > 0) {
             const r = self.pending_reads.swapRemove(self.pending_reads.items.len - 1);
             defer self.allocator.free(r.ctx);
-            self.proposal_tracker.trackRead(r.ctx, r.callback, self.tick_count, 0) catch {};
+            self.proposal_tracker.trackRead(r.ctx, r.callback, self.tick_count, read_timeout) catch {};
             self.raw_node.readIndex(r.ctx) catch {};
             had_work = true;
         }
 
-        // Tick the raft FSM.
         _ = try self.raw_node.tick();
         had_work = true;
 
-        // Process ready cycles until none remain.
         while (try self.ready_processor.process()) {
             had_work = true;
         }
@@ -220,10 +251,11 @@ pub const Raftor = struct {
     pub fn run(self: *Raftor) Error!void {
         self.running = true;
         while (self.running) {
+            if (self.terminal_error) |e| return e;
             _ = try self.tick();
-            // In a real implementation, we'd sleep for tick_interval_ms here.
-            // For now, yield to avoid busy-looping in tests.
-            std.Thread.yield() catch {};
+            // Sleep for the configured tick interval to avoid busy-looping.
+            const ns: u64 = self.config.tick_interval_ms * std.time.ns_per_ms;
+            std.Thread.sleep(ns);
         }
     }
 
@@ -240,9 +272,9 @@ pub const Raftor = struct {
     // -----------------------------------------------------------------------
 
     pub fn propose(self: *Raftor, data: []const u8, callback: proposal_tracker_mod.ProposalCallback) !void {
+        if (self.terminal_error != null) return error.ShuttingDown;
         const data_copy = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(data_copy);
-        // Generate a unique context from the tick count + pending count.
         var ctx_buf: [32]u8 = undefined;
         const ctx = try std.fmt.bufPrint(&ctx_buf, "p{}-{}", .{ self.tick_count, self.pending_proposals.items.len });
         const ctx_copy = try self.allocator.dupe(u8, ctx);
@@ -255,6 +287,7 @@ pub const Raftor = struct {
     }
 
     pub fn readIndex(self: *Raftor, ctx: []const u8, callback: proposal_tracker_mod.ReadIndexCallback) !void {
+        if (self.terminal_error != null) return error.ShuttingDown;
         const ctx_copy = try self.allocator.dupe(u8, ctx);
         errdefer self.allocator.free(ctx_copy);
         try self.pending_reads.append(self.allocator, .{
@@ -277,18 +310,17 @@ pub const Raftor = struct {
     }
 
     pub fn addNode(self: *Raftor, id: u64, addr: []const u8) Error!void {
-        self.transport_impl.transport().addPeer(id, addr);
+        self.transport.addPeer(id, addr);
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
         cc.changes[0] = .{ .change_type = .add_node, .node_id = id };
-        // Use addr as context for transport discovery.
         cc.context = try self.allocator.dupe(u8, addr);
         defer self.allocator.free(cc.context);
         try self.raw_node.proposeConfChange(addr, cc);
     }
 
     pub fn removeNode(self: *Raftor, id: u64) Error!void {
-        self.transport_impl.transport().removePeer(id);
+        self.transport.removePeer(id);
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
         cc.changes[0] = .{ .change_type = .remove_node, .node_id = id };
@@ -323,15 +355,13 @@ pub const Raftor = struct {
     pub fn getRawNode(self: *Raftor) *RawNode {
         return &self.raw_node;
     }
-
-    pub fn getTransport(self: *Raftor) *NoopTransport {
-        return &self.transport_impl;
-    }
 };
 
 // ===========================================================================
 // Bootstrap helpers
 // ===========================================================================
+
+const RaftState = storage_mod.RaftState;
 
 fn buildVoterIds(allocator: std.mem.Allocator, config: RaftorConfig) ![]u64 {
     var ids = try allocator.alloc(u64, config.initial_peers.len);
@@ -363,11 +393,9 @@ test "raftor: single-node campaign and propose" {
     var r = try Raftor.create(allocator, config, sm.stateMachine());
     defer r.destroy();
 
-    // Campaign to become leader.
     try r.campaign();
     try std.testing.expect(r.isLeader());
 
-    // Propose data.
     const Tester = struct {
         applied: bool = false,
         fn cb(ctx: *anyopaque, result: proposal_tracker_mod.ProposalResult) void {
@@ -378,13 +406,10 @@ test "raftor: single-node campaign and propose" {
     var tester = Tester{};
     try r.propose("hello", .{ .ctx = &tester, .function = Tester.cb });
 
-    // Tick a few times to process the proposal through the Ready pipeline.
     var i: usize = 0;
-    while (i < 10) : (i += 1) {
-        _ = try r.tick();
-    }
+    while (i < 10) : (i += 1) _ = try r.tick();
+
     try std.testing.expect(tester.applied);
-    // The noop entry (from becomeLeader) and the proposed entry are both applied.
     try std.testing.expectEqual(@as(usize, 2), sm.applied.items.len);
     try std.testing.expectEqualStrings("hello", sm.applied.items[1]);
 }
