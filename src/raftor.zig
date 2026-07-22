@@ -15,6 +15,7 @@ const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
 const memory_storage_mod = @import("memory_storage.zig");
+const wal_mod = @import("wal.zig");
 const raft_config_mod = @import("raft_config.zig");
 const raft_mod = @import("raft.zig");
 const raw_node_mod = @import("raw_node.zig");
@@ -36,6 +37,7 @@ const Config = raft_config_mod.Config;
 const Raft = raft_mod.Raft;
 const RawNode = raw_node_mod.RawNode;
 const MemoryStorage = memory_storage_mod.MemoryStorage;
+const WALStorage = wal_mod.WALStorage;
 const StateMachine = state_machine_mod.StateMachine;
 const Transport = transport_mod.Transport;
 const NoopTransport = transport_mod.NoopTransport;
@@ -48,6 +50,43 @@ const StateRole = state_role_mod.StateRole;
 const Peer = raw_node_mod.Peer;
 
 const log = std.log.scoped(.raft_zig_raftor);
+
+/// Pluggable storage backend. The memory variant owns the storage inline;
+/// the WAL variant owns a heap-allocated `*WALStorage`. Both expose the
+/// same surface so Raftor is backend-agnostic.
+const StorageBackend = union(enum) {
+    memory: MemoryStorage,
+    wal: *WALStorage,
+
+    fn asStorage(self: *StorageBackend) storage_mod.Storage {
+        return switch (self.*) {
+            .memory => |*m| m.asStorage(),
+            .wal => |ws| ws.asStorage(),
+        };
+    }
+
+    fn asWritableStorage(self: *StorageBackend) storage_mod.WritableStorage {
+        return switch (self.*) {
+            .memory => |*m| m.asWritableStorage(),
+            .wal => |ws| ws.asWritableStorage(),
+        };
+    }
+
+    fn initialState(self: *StorageBackend, allocator: std.mem.Allocator) Error!RaftState {
+        return self.asStorage().initialState(allocator);
+    }
+
+    fn term(self: *StorageBackend, idx: u64) Error!u64 {
+        return self.asStorage().term(idx);
+    }
+
+    fn deinit(self: *StorageBackend, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .memory => |*m| m.deinit(allocator),
+            .wal => |ws| ws.deinit(),
+        }
+    }
+};
 
 pub const NodeStatus = struct {
     id: u64 = 0,
@@ -67,7 +106,7 @@ pub const Raftor = struct {
     config: RaftorConfig,
 
     // Subsystems — order matters for initialization.
-    storage: MemoryStorage,
+    storage: StorageBackend,
     // Owned only when created internally via `create` (single-node).
     // `createWithTransport` leaves this null and borrows externally.
     noop_transport: ?NoopTransport = null,
@@ -135,7 +174,20 @@ pub const Raftor = struct {
     fn initInternal(self: *Raftor, allocator: std.mem.Allocator, config: RaftorConfig, state_machine: StateMachine, transport: Transport) Error!void {
         self.allocator = allocator;
         self.config = config;
-        self.storage = MemoryStorage.init();
+
+        // Choose storage backend: WAL if data_dir is set, else MemoryStorage.
+        if (config.data_dir.len > 0) {
+            const path_unsent = try std.fmt.allocPrint(allocator, "{s}/wal.log", .{config.data_dir});
+            defer allocator.free(path_unsent);
+            const wal_path = try allocator.allocSentinel(u8, path_unsent.len, 0);
+            @memcpy(wal_path[0..path_unsent.len], path_unsent);
+            wal_path[path_unsent.len] = 0;
+            const ws = WALStorage.open(allocator, wal_path) catch return error.OutOfMemory;
+            self.storage = .{ .wal = ws };
+        } else {
+            self.storage = .{ .memory = MemoryStorage.init() };
+        }
+
         self.transport = transport;
         self.proposal_tracker = ProposalTracker.init(allocator);
         self.proposal_queue = ProposalQueue.init(allocator);
@@ -159,7 +211,7 @@ pub const Raftor = struct {
                 allocator.dupe(u64, &.{config.nodeId()}) catch return error.OutOfMemory;
             defer allocator.free(voters);
             const cs = ConfState{ .voters = voters };
-            try self.storage.setRaftState(allocator, .{ .conf_state = cs });
+            try self.storage.asWritableStorage().setConfState(allocator, cs);
         }
 
         // Build RawNode AFTER storage is at its final address.

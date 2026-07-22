@@ -883,6 +883,120 @@ test "wal: open, append, recover" {
     walUnlink(path);
 }
 
+test "wal: compact removes old entries" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_compact.wal";
+    walUnlink(path);
+
+    {
+        var wal = try WAL.open(allocator, path);
+        defer wal.deinit();
+
+        // Append entries 1..5.
+        var i: u64 = 1;
+        while (i <= 5) : (i += 1) {
+            const e = Entry{ .index = i, .term = 1 };
+            try wal.append(&.{e});
+        }
+        try std.testing.expectEqual(@as(u64, 1), wal.firstIndex());
+        try std.testing.expectEqual(@as(u64, 5), wal.lastIndex());
+
+        // Compact past index 3: removes entries 1 and 2.
+        try wal.compact(3);
+        try std.testing.expectEqual(@as(u64, 3), wal.firstIndex());
+        try std.testing.expectEqual(@as(u64, 5), wal.lastIndex());
+
+        // Verify entries 3..5 are readable.
+        const ents = try wal.readEntries(allocator, 3, 6, null);
+        defer {
+            for (ents) |*e| e.deinit(allocator);
+            allocator.free(ents);
+        }
+        try std.testing.expectEqual(@as(usize, 3), ents.len);
+        try std.testing.expectEqual(@as(u64, 3), ents[0].index);
+        try std.testing.expectEqual(@as(u64, 5), ents[2].index);
+
+        // Entries below firstIndex are compacted.
+        try std.testing.expectError(error.Compacted, wal.readEntries(allocator, 1, 3, null));
+    }
+
+    walUnlink(path);
+}
+
+test "wal: WALStorage applyLocalSnapshot compacts" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_snap_compact.wal";
+    walUnlink(path);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+
+        // Append entries 1..4.
+        const ws_iface = ws.asWritableStorage();
+        try ws_iface.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+            .{ .index = 3, .term = 1 },
+            .{ .index = 4, .term = 1 },
+        });
+
+        // Apply local snapshot at index 2 → should compact entries 1..2.
+        const voters = try allocator.dupe(u64, &.{1});
+        var snap = Snapshot{
+            .metadata = .{ .index = 2, .term = 1, .conf_state = .{ .voters = voters } },
+        };
+        defer snap.deinit(allocator);
+
+        try ws_iface.applyLocalSnapshot(allocator, snap);
+
+        // After compact, firstIndex should be 3 (2+1).
+        try std.testing.expectEqual(@as(u64, 3), try ws_iface.firstIndex());
+        try std.testing.expectEqual(@as(u64, 4), try ws_iface.lastIndex());
+    }
+
+    walUnlink(path);
+}
+
+test "wal: restart recovers entries and hardstate via WALStorage" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_restart.wal";
+    walUnlink(path);
+
+    // First session: write entries + hardstate.
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+
+        const iface = ws.asWritableStorage();
+        try iface.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 2 },
+        });
+        try iface.setHardState(.{ .term = 2, .vote = 1, .commit = 2 });
+        try iface.sync();
+    }
+
+    // Second session: reopen and verify recovery.
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+
+        const iface = ws.asWritableStorage();
+        try std.testing.expectEqual(@as(u64, 2), try iface.lastIndex());
+        try std.testing.expectEqual(@as(u64, 2), try iface.term(2));
+
+        const rs = try iface.initialState(allocator);
+        var rs_copy = rs;
+        defer rs_copy.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.term);
+        try std.testing.expectEqual(@as(u64, 1), rs_copy.hard_state.vote);
+        try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.commit);
+    }
+
+    walUnlink(path);
+}
+
 test "wal: WALStorage vtable dispatches correctly" {
     const allocator = std.testing.allocator;
     const path: [:0]const u8 = "/tmp/opencode/wal_test_vtable.wal";
