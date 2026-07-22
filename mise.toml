@@ -1,5 +1,8 @@
 [tools]
 zig = "0.16.0"
+cmake = "4.3.4"
+ninja = "1.13.2"
+actionlint = "1.7.12"
 
 [tasks.build]
 description = "Build raft-zig"
@@ -13,6 +16,14 @@ run = "zig build test --summary all"
 description = "Run all tests with ReleaseSafe optimization"
 run = "zig build test -Doptimize=ReleaseSafe --summary all"
 
+[tasks.test-tsan]
+description = "Run all tests with ThreadSanitizer"
+run = "TSAN_OPTIONS=halt_on_error=1:exitcode=66 zig build test -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe -Dsanitize-thread=true -Dsanitize-c=false --summary all"
+
+[tasks.test-ubsan]
+description = "Run all tests with C undefined behavior detection"
+run = "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 zig build test -Doptimize=Debug -Dsanitize-thread=false -Dsanitize-c=true --summary all"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src examples tests"
@@ -20,6 +31,10 @@ run = "zig fmt build.zig src examples tests"
 [tasks.fmt-check]
 description = "Check Zig formatting"
 run = "zig fmt --check build.zig src examples tests"
+
+[tasks.ci-lint]
+description = "Validate GitHub Actions workflows"
+run = "actionlint"
 
 [tasks.check]
 description = "Run formatting and tests"

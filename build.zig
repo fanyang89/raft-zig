@@ -4,6 +4,13 @@ const manifest = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitizers: Sanitizers = .{
+        .thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer"),
+        .c = if (b.option(bool, "sanitize-c", "Enable full C undefined behavior detection")) |enabled|
+            if (enabled) .full else .off
+        else
+            null,
+    };
 
     const raft_zig_options = b.addOptions();
     raft_zig_options.addOption([]const u8, "version", manifest.version);
@@ -13,10 +20,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    applySanitizers(raft_zig, sanitizers);
     raft_zig.addOptions("raft_zig_options", raft_zig_options);
 
     // grpc-lite RPC backend (optional dependency).
-    const grpc_dep = b.dependency("grpc_lite", .{});
+    const grpc_dep = b.dependency("grpc_lite", .{
+        .target = target,
+        .optimize = optimize,
+        .@"sanitize-thread" = sanitizers.thread orelse false,
+        .@"sanitize-c" = sanitizers.c == .full,
+    });
     const grpc_lite = grpc_dep.module("grpc_lite");
     raft_zig.addImport("grpc_lite", grpc_lite);
 
@@ -31,200 +44,38 @@ pub fn build(b: *std.Build) void {
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
-    const public_api_tests = b.addTest(.{
-        .name = "public-api",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/public_api_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_public_api_tests = b.addRunArtifact(public_api_tests);
-
-    const storage_tests = b.addTest(.{
-        .name = "storage",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/storage_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_storage_tests = b.addRunArtifact(storage_tests);
-
-    const log_tests = b.addTest(.{
-        .name = "log",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/log_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_log_tests = b.addRunArtifact(log_tests);
-
-    const progress_tests = b.addTest(.{
-        .name = "progress",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/progress_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_progress_tests = b.addRunArtifact(progress_tests);
-
-    const quorum_tests = b.addTest(.{
-        .name = "quorum",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/quorum_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_quorum_tests = b.addRunArtifact(quorum_tests);
-
-    const confchange_tests = b.addTest(.{
-        .name = "confchange",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/confchange_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_confchange_tests = b.addRunArtifact(confchange_tests);
-
-    const raft_tests = b.addTest(.{
-        .name = "raft",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raft_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_raft_tests = b.addRunArtifact(raft_tests);
-
-    const raw_node_tests = b.addTest(.{
-        .name = "raw_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raw_node_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_raw_node_tests = b.addRunArtifact(raw_node_tests);
-
-    const raftor_tests = b.addTest(.{
-        .name = "raftor",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raftor_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_raftor_tests = b.addRunArtifact(raftor_tests);
-
-    const multi_node_tests = b.addTest(.{
-        .name = "multi_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/multi_node_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_multi_node_tests = b.addRunArtifact(multi_node_tests);
-
-    const raftor_multi_node_tests = b.addTest(.{
-        .name = "raftor_multi_node",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raftor_multi_node_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_raftor_multi_node_tests = b.addRunArtifact(raftor_multi_node_tests);
-
-    const figure8_tests = b.addTest(.{
-        .name = "figure8",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/figure8_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_figure8_tests = b.addRunArtifact(figure8_tests);
-
-    const snap_tests = b.addTest(.{
-        .name = "raft_snap",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raft_snap_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_snap_tests = b.addRunArtifact(snap_tests);
-
-    const flow_control_tests = b.addTest(.{
-        .name = "raft_flow_control",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raft_flow_control_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_flow_control_tests = b.addRunArtifact(flow_control_tests);
-
-    const paper_tests = b.addTest(.{
-        .name = "raft_paper",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/raft_paper_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_paper_tests = b.addRunArtifact(paper_tests);
-
-    const rpc_tests = b.addTest(.{
-        .name = "rpc",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/rpc_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
-        }),
-    });
-    const run_rpc_tests = b.addRunArtifact(rpc_tests);
-
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
-    test_step.dependOn(&run_public_api_tests.step);
-    test_step.dependOn(&run_storage_tests.step);
-    test_step.dependOn(&run_log_tests.step);
-    test_step.dependOn(&run_progress_tests.step);
-    test_step.dependOn(&run_quorum_tests.step);
-    test_step.dependOn(&run_confchange_tests.step);
-    test_step.dependOn(&run_raft_tests.step);
-    test_step.dependOn(&run_raw_node_tests.step);
-    test_step.dependOn(&run_raftor_tests.step);
-    test_step.dependOn(&run_multi_node_tests.step);
-    test_step.dependOn(&run_raftor_multi_node_tests.step);
-    test_step.dependOn(&run_figure8_tests.step);
-    test_step.dependOn(&run_snap_tests.step);
-    test_step.dependOn(&run_flow_control_tests.step);
-    test_step.dependOn(&run_paper_tests.step);
-    test_step.dependOn(&run_rpc_tests.step);
+    const test_specs = [_]TestSpec{
+        .{ .name = "public-api", .source = "tests/public_api_test.zig" },
+        .{ .name = "storage", .source = "tests/storage_test.zig" },
+        .{ .name = "log", .source = "tests/log_test.zig" },
+        .{ .name = "progress", .source = "tests/progress_test.zig" },
+        .{ .name = "quorum", .source = "tests/quorum_test.zig" },
+        .{ .name = "confchange", .source = "tests/confchange_test.zig" },
+        .{ .name = "raft", .source = "tests/raft_test.zig" },
+        .{ .name = "raw_node", .source = "tests/raw_node_test.zig" },
+        .{ .name = "raftor", .source = "tests/raftor_test.zig" },
+        .{ .name = "multi_node", .source = "tests/multi_node_test.zig" },
+        .{ .name = "raftor_multi_node", .source = "tests/raftor_multi_node_test.zig" },
+        .{ .name = "figure8", .source = "tests/figure8_test.zig" },
+        .{ .name = "raft_snap", .source = "tests/raft_snap_test.zig" },
+        .{ .name = "raft_flow_control", .source = "tests/raft_flow_control_test.zig" },
+        .{ .name = "raft_paper", .source = "tests/raft_paper_test.zig" },
+        .{ .name = "rpc", .source = "tests/rpc_test.zig" },
+    };
+    for (test_specs) |spec| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(spec.source),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        });
+        applySanitizers(module, sanitizers);
+        const tests = b.addTest(.{ .name = spec.name, .root_module = module });
+        const run_tests = b.addRunArtifact(tests);
+        test_step.dependOn(&run_tests.step);
+    }
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
@@ -236,6 +87,26 @@ pub fn build(b: *std.Build) void {
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting");
     const fmt_check_run = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "src", "examples", "tests" });
     fmt_check_step.dependOn(&fmt_check_run.step);
+}
+
+const Sanitizers = struct {
+    thread: ?bool,
+    c: ?std.zig.SanitizeC,
+
+    fn enabled(self: Sanitizers) bool {
+        return self.thread == true or self.c == .full;
+    }
+};
+
+const TestSpec = struct {
+    name: []const u8,
+    source: []const u8,
+};
+
+fn applySanitizers(module: *std.Build.Module, sanitizers: Sanitizers) void {
+    module.sanitize_thread = sanitizers.thread;
+    module.sanitize_c = sanitizers.c;
+    if (sanitizers.enabled()) module.omit_frame_pointer = false;
 }
 
 fn addExample(
@@ -250,6 +121,9 @@ fn addExample(
         .optimize = raft_zig.optimize,
         .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
     });
+    module.sanitize_thread = raft_zig.sanitize_thread;
+    module.sanitize_c = raft_zig.sanitize_c;
+    module.omit_frame_pointer = raft_zig.omit_frame_pointer;
     return b.addExecutable(.{
         .name = name,
         .root_module = module,

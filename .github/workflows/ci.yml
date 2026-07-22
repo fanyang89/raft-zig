@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Check formatting
+        run: mise run fmt-check
+
+      - name: Validate workflows
+        run: mise run ci-lint
+
+  core-test:
+    name: Core (${{ matrix.optimize }})
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize:
+          - Debug
+          - ReleaseSafe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+  sanitizer:
+    name: Sanitizer (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: TSan
+            task: test-tsan
+          - name: UBSan
+            task: test-ubsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Run sanitizer tests
+        run: mise run ${{ matrix.task }}
+
+  required:
+    name: Required
+    if: always()
+    needs:
+      - workflow-lint
+      - core-test
+      - sanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+          CORE_TEST_RESULT: ${{ needs.core-test.result }}
+          SANITIZER_RESULT: ${{ needs.sanitizer.result }}
+        run: |
+          test "$WORKFLOW_LINT_RESULT" = success
+          test "$CORE_TEST_RESULT" = success
+          test "$SANITIZER_RESULT" = success

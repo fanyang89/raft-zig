@@ -24,8 +24,11 @@ layout, build system conventions, and module style follow the author's Zig
 mise run build
 mise run test
 mise run test-release-safe
+mise run test-tsan
+mise run test-ubsan
 mise run fmt
 mise run fmt-check
+mise run ci-lint
 mise run check
 ```
 

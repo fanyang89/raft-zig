@@ -67,15 +67,14 @@ test "rpc: grpc transport self-connect round-trip" {
     // Send a message to ourselves (callUnary is synchronous — blocks until done).
     tp.transport().send(&.{.{ .msg_type = .heartbeat, .to = 1, .from = 1, .term = 1 }});
 
-    // Poll for the inbound message.
-    tp.transport().poll();
-
-    if (received) |*msg| {
-        try std.testing.expectEqual(raft.MessageType.heartbeat, msg.msg_type);
-        var m = msg.*;
-        m.deinit(allocator);
-    } else {
-        // Network timing is inherently flaky in CI; log but don't fail.
-        std.log.warn("rpc round-trip message not received (timing)", .{});
+    for (0..1000) |_| {
+        tp.transport().poll();
+        if (received != null) break;
+        try std.testing.io.sleep(.fromNanoseconds(std.time.ns_per_ms), .awake);
     }
+    try std.testing.expect(received != null);
+
+    var message = received.?;
+    defer message.deinit(allocator);
+    try std.testing.expectEqual(raft.MessageType.heartbeat, message.msg_type);
 }

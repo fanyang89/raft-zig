@@ -158,9 +158,12 @@ test "proposal queue supports concurrent producers and consumption" {
 
     var producers: [producer_count]Producer = undefined;
     var threads: [producer_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
     for (&producers, &threads) |*producer, *thread| {
         producer.* = .{ .queue = &queue, .done = &producers_done };
         thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        started += 1;
     }
 
     var consumed: usize = 0;
@@ -174,6 +177,7 @@ test "proposal queue supports concurrent producers and consumption" {
         }
     }
     for (&threads) |*thread| thread.join();
+    started = 0;
 
     try std.testing.expectEqual(producer_count * items_per_producer, consumed);
     try std.testing.expect(queue.empty());
@@ -206,9 +210,12 @@ test "read index queue supports concurrent producers and consumption" {
 
     var producers: [producer_count]Producer = undefined;
     var threads: [producer_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
     for (&producers, &threads) |*producer, *thread| {
         producer.* = .{ .queue = &queue, .done = &producers_done };
         thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        started += 1;
     }
 
     var consumed: usize = 0;
@@ -221,6 +228,7 @@ test "read index queue supports concurrent producers and consumption" {
         }
     }
     for (&threads) |*thread| thread.join();
+    started = 0;
 
     try std.testing.expectEqual(producer_count * items_per_producer, consumed);
     try std.testing.expect(queue.empty());

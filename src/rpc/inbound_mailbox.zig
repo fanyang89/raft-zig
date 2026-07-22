@@ -102,9 +102,12 @@ test "inbound mailbox supports concurrent producers and draining" {
 
     var producers: [producer_count]Producer = undefined;
     var threads: [producer_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
     for (&producers, &threads, 0..) |*producer, *thread, index| {
         producer.* = .{ .mailbox = &mailbox, .done = &producers_done, .id = index + 1 };
         thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        started += 1;
     }
 
     var received: usize = 0;
@@ -116,6 +119,7 @@ test "inbound mailbox supports concurrent producers and draining" {
         if (messages.len == 0) std.atomic.spinLoopHint();
     }
     for (&threads) |*thread| thread.join();
+    started = 0;
 
     try std.testing.expectEqual(producer_count * messages_per_producer, received);
     try std.testing.expect(mailbox.empty());
