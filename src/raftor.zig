@@ -177,12 +177,10 @@ pub const Raftor = struct {
 
         // Choose storage backend: WAL if data_dir is set, else MemoryStorage.
         if (config.data_dir.len > 0) {
-            const path_unsent = try std.fmt.allocPrint(allocator, "{s}/wal.log", .{config.data_dir});
-            defer allocator.free(path_unsent);
-            const wal_path = try allocator.allocSentinel(u8, path_unsent.len, 0);
-            @memcpy(wal_path[0..path_unsent.len], path_unsent);
-            wal_path[path_unsent.len] = 0;
-            const ws = WALStorage.open(allocator, wal_path) catch return error.OutOfMemory;
+            const wal_dir = try allocator.allocSentinel(u8, config.data_dir.len, 0);
+            @memcpy(wal_dir[0..config.data_dir.len], config.data_dir);
+            defer allocator.free(wal_dir);
+            const ws = WALStorage.open(allocator, wal_dir) catch return error.OutOfMemory;
             self.storage = .{ .wal = ws };
         } else {
             self.storage = .{ .memory = MemoryStorage.init() };

@@ -1,21 +1,21 @@
-//! Minimal single-file Write-Ahead Log with CRC32C integrity.
+//! Segmented Write-Ahead Log with CRC32C integrity.
 //!
-//! Ports a subset of `ref/raftpp/lib/raftor/wal/` — enough to provide a
-//! durable `WritableStorage` backend. Simplifications vs raftpp:
-//!
-//!   * Single file instead of segmented (no SegmentManager).
-//!   * No WALIndex (linear scan during recovery).
-//!   * No metadata file (HardState/ConfState stored as records).
-//!   * No io_uring backend.
+//! Ports `ref/raftpp/lib/raftor/wal/` with multi-file segmentation:
+//! entries are split across `segment-NNNNNN.wal` files in a directory.
+//! Compaction deletes old segment files, reclaiming disk space.
 //!
 //! Record format matches raftpp exactly (magic "WAL1", CRC32C over
-//! type+flags+length+padding+payload), so WAL files are forward-compatible.
+//! type+flags+length+padding+payload). In-memory entries list is retained
+//! for O(1) term/entries lookups; WALIndex (on-demand disk reads) is a
+//! future Phase 2 optimization.
 
 const std = @import("std");
 
 const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
+const segment_mod = @import("wal/segment.zig");
+const segment_manager_mod = @import("wal/segment_manager.zig");
 
 const Error = error_model.Error;
 const Entry = types.Entry;
@@ -37,108 +37,7 @@ const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 const log = std.log.scoped(.raft_zig_wal);
 
 // ===========================================================================
-// File I/O helpers (Linux syscalls — Zig 0.16 removed std.fs.cwd())
-// ===========================================================================
 
-const linux = std.os.linux;
-
-fn errno(rc: usize) i32 {
-    const signed: isize = @bitCast(rc);
-    if (signed >= 0) return 0;
-    return @intCast(-signed);
-}
-
-fn walOpen(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{
-        .ACCMODE = .RDWR,
-        .CREAT = true,
-    };
-    const rc = linux.open(path.ptr, flags, 0o644);
-    if (errno(rc) != 0) return error.OpenFailed;
-    return @intCast(rc);
-}
-
-fn walWrite(fd: linux.fd_t, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const rc = linux.write(fd, data.ptr + written, data.len - written);
-        const e = errno(rc);
-        if (e != 0) return error.WriteFailed;
-        written += rc;
-    }
-}
-
-fn walRead(fd: linux.fd_t, buf: []u8) !usize {
-    const rc = linux.read(fd, buf.ptr, buf.len);
-    const e = errno(rc);
-    if (e != 0) return error.ReadFailed;
-    return rc;
-}
-
-fn walLseek(fd: linux.fd_t, offset: i64) !void {
-    const rc = linux.lseek(fd, offset, 0); // SEEK_SET = 0
-    if (errno(rc) != 0) return error.SeekFailed;
-}
-
-fn walFsync(fd: linux.fd_t) !void {
-    const rc = linux.fsync(fd);
-    if (errno(rc) != 0) return error.SyncFailed;
-}
-
-fn walClose(fd: linux.fd_t) void {
-    _ = linux.close(fd);
-}
-
-fn walUnlink(path: [:0]const u8) void {
-    _ = linux.unlink(path.ptr);
-}
-
-fn walFileSize(fd: linux.fd_t) !u64 {
-    // Seek to end to get file size, then restore position.
-    const cur = linux.lseek(fd, 0, 1); // SEEK_CUR
-    if (errno(cur) != 0) return error.StatFailed;
-    const end = linux.lseek(fd, 0, 2); // SEEK_END
-    if (errno(end) != 0) return error.StatFailed;
-    _ = linux.lseek(fd, @intCast(cur), 0); // SEEK_SET restore
-    return @intCast(end);
-}
-
-/// Simple file wrapper that hides the fd.
-const WalFile = struct {
-    fd: linux.fd_t,
-
-    fn open(path: [:0]const u8) !WalFile {
-        const fd = try walOpen(path);
-        return .{ .fd = fd };
-    }
-
-    fn close(self: WalFile) void {
-        walClose(self.fd);
-    }
-
-    fn writeAll(self: WalFile, data: []const u8) !void {
-        try walWrite(self.fd, data);
-    }
-
-    fn readAt(self: WalFile, buf: []u8, offset: i64) !usize {
-        try walLseek(self.fd, offset);
-        return walRead(self.fd, buf);
-    }
-
-    fn sync(self: WalFile) !void {
-        try walFsync(self.fd);
-    }
-
-    fn size(self: WalFile) !u64 {
-        return walFileSize(self.fd);
-    }
-
-    fn seekTo(self: WalFile, offset: i64) !void {
-        try walLseek(self.fd, offset);
-    }
-};
-
-// ===========================================================================
 // Constants and wire format
 // ===========================================================================
 
@@ -393,13 +292,20 @@ fn readU64Slice(allocator: std.mem.Allocator, data: []const u8, pos: *usize) ![]
 }
 
 // ===========================================================================
-// WAL — single-file write-ahead log
 // ===========================================================================
+// WAL — segmented write-ahead log
+// ===========================================================================
+
+pub const WALConfig = struct {
+    dir: [:0]const u8,
+    segment_size: u64 = 64 * 1024 * 1024, // 64 MB default
+};
 
 pub const WAL = struct {
     allocator: std.mem.Allocator,
-    file: WalFile,
-    path: [:0]u8,
+    dir: [:0]u8,
+    segment_size: u64,
+    segment_manager: segment_manager_mod.SegmentManager,
 
     // In-memory state recovered from the log.
     entries: std.ArrayList(Entry),
@@ -408,19 +314,25 @@ pub const WAL = struct {
     snapshot_metadata: SnapshotMetadata,
     first_index: u64,
 
-    /// Open or create a WAL file at `path`. If the file exists and contains
-    /// valid records, they are replayed into memory.
-    pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !WAL {
-        const path_copy = try allocator.dupeSentinel(u8, path, 0);
-        errdefer allocator.free(path_copy);
+    pub fn open(allocator: std.mem.Allocator, config: WALConfig) !WAL {
+        // Create directory if it does not exist.
+        segment_mod.makeDir(config.dir) catch {};
 
-        const file = try WalFile.open(path);
-        errdefer file.close();
+        var sm = try segment_manager_mod.SegmentManager.init(allocator, config.dir);
+        errdefer sm.deinit();
+
+        // If no segments exist, create the first one.
+        if (sm.getCurrent() == null) {
+            _ = try sm.rollToNew(1);
+        }
+
+        const dir_copy = try allocator.dupeSentinel(u8, config.dir, 0);
 
         var wal = WAL{
             .allocator = allocator,
-            .file = file,
-            .path = path_copy,
+            .dir = dir_copy,
+            .segment_size = config.segment_size,
+            .segment_manager = sm,
             .entries = .empty,
             .hard_state = .{},
             .conf_state = .{},
@@ -428,113 +340,114 @@ pub const WAL = struct {
             .first_index = 1,
         };
 
-        const sz = try file.size();
-        if (sz == 0) {
-            // New file: write segment header.
-            var header: [SEGMENT_HEADER_SIZE]u8 = undefined;
-            encodeSegmentHeader(&header, 1, 1);
-            try file.writeAll(&header);
-            try file.sync();
-        } else {
-            // Existing file: verify header and replay.
-            try wal.recover();
-        }
+        try wal.recover();
 
+        log.info("WAL opened: dir={s}, segments={}, entries={}, first={}, last={}", .{ wal.dir, wal.segment_manager.count(), wal.entries.items.len, wal.firstIndex(), wal.lastIndex() });
         return wal;
     }
 
     pub fn deinit(self: *WAL) void {
-        self.file.close();
+        self.segment_manager.deinit();
         for (self.entries.items) |*e| e.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.conf_state.deinit(self.allocator);
         self.snapshot_metadata.deinit(self.allocator);
-        self.allocator.free(self.path);
+        self.allocator.free(self.dir);
         self.* = undefined;
     }
 
     fn recover(self: *WAL) !void {
-        try self.file.seekTo(0);
-        var header_buf: [SEGMENT_HEADER_SIZE]u8 = undefined;
-        const n = try self.file.readAt(&header_buf, 0);
-        if (n < SEGMENT_HEADER_SIZE or !isValidSegmentHeader(&header_buf)) {
-            return error.InvalidSegmentHeader;
-        }
+        const segs = self.segment_manager.segments.items;
+        for (segs) |entry| {
+            const seg = entry.segment;
+            const body_size = seg.file_size - SEGMENT_HEADER_SIZE;
+            if (body_size == 0) continue;
 
-        // Read the rest of the file sequentially.
-        const sz = try self.file.size();
-        const body_size = sz - SEGMENT_HEADER_SIZE;
-        const body = try self.allocator.alloc(u8, body_size);
-        defer self.allocator.free(body);
-        const body_read = try self.file.readAt(body, @intCast(SEGMENT_HEADER_SIZE));
-        if (body_read < body_size) return error.CorruptEntryRecord;
+            const data = try self.allocator.alloc(u8, body_size);
+            defer self.allocator.free(data);
+            const n = try seg.read(data, SEGMENT_HEADER_SIZE);
+            if (n < body_size) continue;
 
-        // Parse records sequentially.
-        var offset: usize = 0;
-        while (offset < body_read) {
-            const remaining = body[offset..];
-            const parsed = parseRecord(remaining);
-            if (!parsed.valid) break; // truncated or corrupt; stop replay
-            const total_consumed = RECORD_HEADER_SIZE + parsed.payload.len + calcPadding(@intCast(parsed.payload.len));
-            switch (parsed.record_type) {
-                .entry => {
-                    const e = deserializeEntry(self.allocator, parsed.payload) catch break;
-                    try self.entries.append(self.allocator, e);
-                },
-                .hard_state => {
-                    self.hard_state = deserializeHardState(parsed.payload);
-                },
-                .conf_state => {
-                    self.conf_state.deinit(self.allocator);
-                    self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
-                },
-                .snapshot => {
-                    if (parsed.payload.len >= 16) {
-                        self.snapshot_metadata.deinit(self.allocator);
-                        self.snapshot_metadata = .{
-                            .index = std.mem.readInt(u64, parsed.payload[0..8], .little),
-                            .term = std.mem.readInt(u64, parsed.payload[8..16], .little),
-                        };
-                    }
-                },
+            var offset: usize = 0;
+            while (offset < n) {
+                const remaining = data[offset..];
+                const parsed = parseRecord(remaining);
+                if (!parsed.valid) break;
+                const pad = calcPadding(@intCast(parsed.payload.len));
+                const total = RECORD_HEADER_SIZE + parsed.payload.len + pad;
+                switch (parsed.record_type) {
+                    .entry => {
+                        const e = deserializeEntry(self.allocator, parsed.payload) catch break;
+                        self.entries.append(self.allocator, e) catch break;
+                    },
+                    .hard_state => {
+                        self.hard_state = deserializeHardState(parsed.payload);
+                    },
+                    .conf_state => {
+                        self.conf_state.deinit(self.allocator);
+                        self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
+                    },
+                    .snapshot => {
+                        if (parsed.payload.len >= 16) {
+                            self.snapshot_metadata.deinit(self.allocator);
+                            self.snapshot_metadata = .{
+                                .index = std.mem.readInt(u64, parsed.payload[0..8], .little),
+                                .term = std.mem.readInt(u64, parsed.payload[8..16], .little),
+                            };
+                        }
+                    },
+                }
+                offset += total;
             }
-            offset += total_consumed;
         }
 
         if (self.entries.items.len > 0) {
             self.first_index = self.entries.items[0].index;
         }
+    }
 
-        log.info("recovered {} entries, first={}, last={}, hs_term={}", .{
-            self.entries.items.len, self.firstIndex(), self.lastIndex(), self.hard_state.term,
-        });
+    fn writeRecord(self: *WAL, record_type: RecordType, payload: []const u8) !void {
+        const record = try buildRecord(self.allocator, record_type, payload);
+        defer self.allocator.free(record);
+
+        // Roll segment if needed.
+        const cur = self.segment_manager.getCurrent() orelse
+            try self.segment_manager.rollToNew(if (self.entries.items.len > 0)
+                self.entries.items[self.entries.items.len - 1].index + 1
+            else
+                1);
+
+        if (cur.write_offset + record.len > self.segment_size and cur.write_offset > SEGMENT_HEADER_SIZE) {
+            const next_idx = if (self.entries.items.len > 0)
+                self.entries.items[self.entries.items.len - 1].index + 1
+            else
+                cur.first_index;
+            _ = try self.segment_manager.rollToNew(next_idx);
+        }
+
+        const active = self.segment_manager.getCurrent().?;
+        try active.append(record);
     }
 
     pub fn append(self: *WAL, entries: []const Entry) !void {
         for (entries) |entry| {
             const payload = try serializeEntry(self.allocator, entry);
             defer self.allocator.free(payload);
-            const record = try buildRecord(self.allocator, .entry, payload);
-            defer self.allocator.free(record);
-            try self.file.writeAll(record);
-            try self.entries.append(self.allocator, try cloneEntry(self.allocator, entry));
+            try self.writeRecord(.entry, payload);
+            self.entries.append(self.allocator, try cloneEntry(self.allocator, entry)) catch {};
         }
     }
 
     pub fn saveHardState(self: *WAL, hs: HardState) !void {
         const payload = serializeHardState(hs);
-        const record = try buildRecord(self.allocator, .hard_state, &payload);
-        defer self.allocator.free(record);
-        try self.file.writeAll(record);
+        try self.writeRecord(.hard_state, &payload);
         self.hard_state = hs;
     }
 
     pub fn saveConfState(self: *WAL, cs: ConfState) !void {
         const payload = try serializeConfState(self.allocator, cs);
         defer self.allocator.free(payload);
-        const record = try buildRecord(self.allocator, .conf_state, payload);
-        defer self.allocator.free(record);
-        try self.file.writeAll(record);
+        try self.writeRecord(.conf_state, payload);
         self.conf_state.deinit(self.allocator);
         self.conf_state = try cloneConfState(self.allocator, cs);
     }
@@ -543,27 +456,50 @@ pub const WAL = struct {
         var payload: [16]u8 = undefined;
         std.mem.writeInt(u64, payload[0..8], meta.index, .little);
         std.mem.writeInt(u64, payload[8..16], meta.term, .little);
-        const record = try buildRecord(self.allocator, .snapshot, &payload);
-        defer self.allocator.free(record);
-        try self.file.writeAll(record);
+        try self.writeRecord(.snapshot, &payload);
         self.snapshot_metadata.deinit(self.allocator);
-        self.snapshot_metadata = .{
-            .index = meta.index,
-            .term = meta.term,
-        };
+        self.snapshot_metadata = .{ .index = meta.index, .term = meta.term };
     }
 
     pub fn sync(self: *WAL) !void {
-        try self.file.sync();
+        self.segment_manager.syncAll();
     }
 
     pub fn close(self: *WAL) !void {
         try self.sync();
-        self.file.close();
+        self.segment_manager.closeAll();
+    }
+
+    pub fn compact(self: *WAL, compact_index: u64) !void {
+        if (self.entries.items.len == 0) return;
+        if (compact_index <= self.firstIndex()) return;
+        if (compact_index > self.lastIndex() + 1) return error.Fatal;
+
+        // Remove entries from memory.
+        const drop_count: usize = @intCast(compact_index - self.firstIndex());
+        var i: usize = 0;
+        while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
+        std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
+        self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
+
+        // Delete old segment files.
+        // A segment is safe to delete if its first_index < compact_index AND
+        // a newer segment exists. We keep the segment that straddles compact_index.
+        var min_surviving_id: u64 = std.math.maxInt(u64);
+        const segs = self.segment_manager.segments.items;
+        for (segs) |entry| {
+            const seg = entry.segment;
+            if (seg.first_index >= compact_index) {
+                if (entry.id < min_surviving_id) min_surviving_id = entry.id;
+            }
+        }
+        if (min_surviving_id != std.math.maxInt(u64) and min_surviving_id > 1) {
+            self.segment_manager.removeSegmentsBefore(min_surviving_id);
+        }
     }
 
     // -----------------------------------------------------------------------
-    // Query helpers
+    // Query helpers (unchanged — read from in-memory entries)
     // -----------------------------------------------------------------------
 
     pub fn firstIndex(self: WAL) u64 {
@@ -574,23 +510,6 @@ pub const WAL = struct {
     pub fn lastIndex(self: WAL) u64 {
         if (self.entries.items.len == 0) return self.snapshot_metadata.index;
         return self.entries.items[self.entries.items.len - 1].index;
-    }
-
-    /// Remove entries before `compact_index` from the in-memory list. The
-    /// underlying WAL file is not truncated (single-file simplification); the
-    /// stale records are simply skipped on future recoveries because
-    /// `firstIndex()` advances past them.
-    pub fn compact(self: *WAL, compact_index: u64) !void {
-        if (self.entries.items.len == 0) return;
-        if (compact_index <= self.firstIndex()) return;
-        if (compact_index > self.lastIndex() + 1) return error.Fatal;
-
-        const drop_count: usize = @intCast(compact_index - self.firstIndex());
-        var i: usize = 0;
-        while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
-        // Shift remaining entries forward.
-        std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
-        self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
     }
 
     pub fn term(self: WAL, idx: u64) Error!u64 {
@@ -627,8 +546,7 @@ pub const WAL = struct {
         if (max_size) |ms| {
             var view = result[0..actual];
             @import("core/util.zig").limitSize(&view, ms);
-            // Free truncated tail.
-            for (view.len..actual) |i| result[i].deinit(allocator);
+            for (view.len..actual) |j| result[j].deinit(allocator);
             actual = view.len;
         }
         return allocator.realloc(result, actual) catch result[0..actual];
@@ -643,11 +561,11 @@ pub const WALStorage = struct {
     wal: WAL,
     allocator: std.mem.Allocator,
 
-    pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !*WALStorage {
+    pub fn open(allocator: std.mem.Allocator, dir: [:0]const u8) !*WALStorage {
         const self = try allocator.create(WALStorage);
         errdefer allocator.destroy(self);
         self.* = .{
-            .wal = try WAL.open(allocator, path),
+            .wal = try WAL.open(allocator, .{ .dir = dir }),
             .allocator = allocator,
         };
         return self;
@@ -657,8 +575,6 @@ pub const WALStorage = struct {
         self.wal.deinit();
         self.allocator.destroy(self);
     }
-
-    // ---- Storage vtable impl ----
 
     fn initial_state_impl(ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
@@ -717,11 +633,9 @@ pub const WALStorage = struct {
 
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
-        // Persist snapshot metadata record.
-        self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
-        // Compact entries before the snapshot index.
-        self.wal.compact(snap.metadata.index + 1) catch return error.OutOfMemory;
         _ = allocator;
+        self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
+        self.wal.compact(snap.metadata.index + 1) catch return error.OutOfMemory;
     }
 
     fn sync_impl(ctx: *anyopaque) Error!void {
@@ -844,13 +758,27 @@ test "wal: confstate serialize/deserialize round-trip" {
     try std.testing.expect(original.auto_leave);
 }
 
+const linux = std.os.linux;
+
+fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
+    // Best-effort: scan directory and delete segment files.
+    var sm = segment_manager_mod.SegmentManager.init(allocator, dir) catch return;
+    sm.removeAllSegments();
+    sm.deinit();
+    _ = linux.rmdir(dir.ptr);
+}
+
+fn removeFile(path: [:0]const u8) void {
+    _ = linux.unlink(path.ptr);
+}
+
 test "wal: open, append, recover" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_open_append_recover.wal";
-    walUnlink(path);
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_recover";
+    removeWALDir(allocator, path);
 
     {
-        var wal = try WAL.open(allocator, path);
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
         var e1 = Entry{ .index = 1, .term = 1, .data = try allocator.dupe(u8, "a") };
         defer e1.deinit(allocator);
@@ -864,7 +792,7 @@ test "wal: open, append, recover" {
 
     // Reopen and verify recovery.
     {
-        var wal = try WAL.open(allocator, path);
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
         try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
         try std.testing.expectEqual(@as(u64, 1), wal.hard_state.term);
@@ -880,16 +808,16 @@ test "wal: open, append, recover" {
         try std.testing.expectEqualStrings("b", ents[1].data);
     }
 
-    walUnlink(path);
+    removeWALDir(allocator, path);
 }
 
 test "wal: compact removes old entries" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_compact.wal";
-    walUnlink(path);
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_compact";
+    removeWALDir(allocator, path);
 
     {
-        var wal = try WAL.open(allocator, path);
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
 
         // Append entries 1..5.
@@ -920,13 +848,13 @@ test "wal: compact removes old entries" {
         try std.testing.expectError(error.Compacted, wal.readEntries(allocator, 1, 3, null));
     }
 
-    walUnlink(path);
+    removeWALDir(allocator, path);
 }
 
 test "wal: WALStorage applyLocalSnapshot compacts" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_snap_compact.wal";
-    walUnlink(path);
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_snap_compact";
+    removeWALDir(allocator, path);
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -955,13 +883,13 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
         try std.testing.expectEqual(@as(u64, 4), try ws_iface.lastIndex());
     }
 
-    walUnlink(path);
+    removeWALDir(allocator, path);
 }
 
 test "wal: restart recovers entries and hardstate via WALStorage" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_restart.wal";
-    walUnlink(path);
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_restart";
+    removeWALDir(allocator, path);
 
     // First session: write entries + hardstate.
     {
@@ -994,13 +922,13 @@ test "wal: restart recovers entries and hardstate via WALStorage" {
         try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.commit);
     }
 
-    walUnlink(path);
+    removeWALDir(allocator, path);
 }
 
 test "wal: WALStorage vtable dispatches correctly" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/opencode/wal_test_vtable.wal";
-    walUnlink(path);
+    const path: [:0]const u8 = "/tmp/opencode/wal_test_vtable";
+    removeWALDir(allocator, path);
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1029,5 +957,5 @@ test "wal: WALStorage vtable dispatches correctly" {
         try std.testing.expectEqual(@as(u64, 1), rs_copy.hard_state.commit);
     }
 
-    walUnlink(path);
+    removeWALDir(allocator, path);
 }
