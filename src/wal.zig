@@ -37,6 +37,10 @@ const cloneSnapshot = storage_mod.cloneSnapshot;
 
 pub const WalFileSystem = fs_mod.FileSystem;
 pub const WalFileSystemError = fs_mod.Error;
+pub const WalFileHandle = fs_mod.Handle;
+pub const WalOpenMode = fs_mod.OpenMode;
+pub const WalDirListing = fs_mod.DirListing;
+pub const WalDirEntryKind = fs_mod.EntryKind;
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
@@ -505,13 +509,13 @@ pub const WAL = struct {
             var offset: usize = 0;
             while (offset < n) {
                 const remaining = data[offset..];
-                const total = recordTotalSize(remaining) catch |err| switch (err) {
-                    error.IncompleteRecord => {
-                        if (!repairable_tail) return error.CorruptEntryRecord;
-                        try truncateTail(seg, offset);
-                        break;
-                    },
-                    else => return err,
+                const total = recordTotalSize(remaining) catch |err| {
+                    if (!repairable_tail) return switch (err) {
+                        error.IncompleteRecord => error.CorruptEntryRecord,
+                        else => err,
+                    };
+                    try truncateTail(seg, offset);
+                    break;
                 };
                 const parsed = parseRecord(remaining[0..total]);
                 if (!parsed.valid) {
@@ -1760,6 +1764,39 @@ test "wal: recovery truncates a torn active tail" {
         try wal.append(&.{.{ .index = 3, .term = 2, .data = @constCast("recovered") }});
         try wal.sync();
         try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery truncates a corrupt record envelope in the active tail" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-corrupt-tail-envelope";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try wal.sync();
+        try wal.append(&.{.{ .index = 3, .term = 2, .data = @constCast("volatile") }});
+        const location = wal.wal_index.lookup(3).?;
+        const segment = wal.segment_manager.get(location.segment_id).?;
+        var invalid_type: [1]u8 = .{0xff};
+        const rc = linux.pwrite(@intCast(segment.fd.?), &invalid_type, invalid_type.len, @intCast(location.offset + 4));
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        try segment.sync();
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
+        try std.testing.expectEqual(@as(u64, 2), wal.hard_state.commit);
     }
 
     removeWALDir(allocator, path);
