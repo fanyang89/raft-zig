@@ -208,6 +208,10 @@ pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;
 pub const WalFileSystem = wal_mod.WalFileSystem;
 pub const WalFileSystemError = wal_mod.WalFileSystemError;
+pub const WalFileHandle = wal_mod.WalFileHandle;
+pub const WalOpenMode = wal_mod.WalOpenMode;
+pub const WalDirListing = wal_mod.WalDirListing;
+pub const WalDirEntryKind = wal_mod.WalDirEntryKind;
 
 pub const encodeMessage = codec_mod.encodeMessage;
 pub const decodeMessage = codec_mod.decodeMessage;

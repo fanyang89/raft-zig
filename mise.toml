@@ -48,6 +48,10 @@ run = "scripts/run-fuzz.sh fuzz-sim 10K"
 description = "Run Marionette integration smoke tests"
 run = "zig build vopr-smoke --summary all"
 
+[tasks.wal-durability]
+description = "Run Marionette WAL durability tests"
+run = "zig build wal-durability --summary all"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src examples tests"

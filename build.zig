@@ -85,6 +85,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const vopr_smoke_step = b.step("vopr-smoke", "Run Marionette integration smoke tests");
+    const wal_durability_step = b.step("wal-durability", "Run Marionette WAL durability tests");
     if (b.lazyDependency("marionette", .{
         .target = target,
         .optimize = optimize,
@@ -106,6 +107,23 @@ pub fn build(b: *std.Build) void {
         const run_vopr_smoke = b.addRunArtifact(vopr_smoke_tests);
         vopr_smoke_step.dependOn(&run_vopr_smoke.step);
         test_step.dependOn(&run_vopr_smoke.step);
+
+        const wal_durability_module = b.createModule(.{
+            .root_source_file = b.path("tests/vopr/wal_fs_adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "raft_zig", .module = raft_zig },
+                .{ .name = "marionette", .module = marionette_dep.module("marionette") },
+            },
+        });
+        applySanitizers(wal_durability_module, sanitizers);
+        const wal_durability_tests = b.addTest(.{
+            .name = "wal-durability",
+            .root_module = wal_durability_module,
+        });
+        const run_wal_durability = b.addRunArtifact(wal_durability_tests);
+        wal_durability_step.dependOn(&run_wal_durability.step);
     }
 
     const fuzz_smoke_step = b.step("fuzz-smoke", "Run fuzz corpus smoke tests");

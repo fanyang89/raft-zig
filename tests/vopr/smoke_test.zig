@@ -267,4 +267,5 @@ test "Marionette PacketRef transport preserves ownership" {
 
 test {
     _ = @import("cluster_test.zig");
+    _ = @import("wal_fs_adapter.zig");
 }
