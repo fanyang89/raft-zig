@@ -26,6 +26,10 @@ mise run test
 mise run test-release-safe
 mise run test-tsan
 mise run test-ubsan
+mise run fuzz-smoke
+mise run fuzz-codec
+mise run fuzz-wal
+mise run fuzz-confchange
 mise run fmt
 mise run fmt-check
 mise run ci-lint

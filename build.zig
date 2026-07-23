@@ -77,6 +77,28 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
+    const fuzz_smoke_step = b.step("fuzz-smoke", "Run fuzz corpus smoke tests");
+    const fuzz_specs = [_]FuzzSpec{
+        .{ .name = "codec", .source = "src/codec.zig" },
+        .{ .name = "wal", .source = "src/wal.zig" },
+        .{ .name = "confchange", .source = "src/core/util.zig" },
+    };
+    for (fuzz_specs) |spec| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(spec.source),
+            .target = target,
+            .optimize = optimize,
+        });
+        const tests = b.addTest(.{
+            .name = b.fmt("fuzz-{s}", .{spec.name}),
+            .root_module = module,
+        });
+        const run_tests = b.addRunArtifact(tests);
+        const fuzz_step = b.step(b.fmt("fuzz-{s}", .{spec.name}), b.fmt("Fuzz {s}", .{spec.name}));
+        fuzz_step.dependOn(&run_tests.step);
+        fuzz_smoke_step.dependOn(&run_tests.step);
+    }
+
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
 
@@ -99,6 +121,11 @@ const Sanitizers = struct {
 };
 
 const TestSpec = struct {
+    name: []const u8,
+    source: []const u8,
+};
+
+const FuzzSpec = struct {
     name: []const u8,
     source: []const u8,
 };

@@ -23,6 +23,7 @@ const cloneConfState = storage_mod.cloneConfState;
 const codec_magic: u32 = 0x52415046; // "RAPF"
 const codec_version: u32 = 1;
 const header_size: usize = 4 + 4 + 8 + 8 + 8 + 1 + 4; // magic+ver+from+to+req+type+payload_len = 37
+const encoded_entry_min_size: usize = 1 + 8 + 8 + 4 + 4 + 4;
 
 // ===========================================================================
 // Encoder
@@ -53,7 +54,7 @@ pub fn encodeMessage(allocator: std.mem.Allocator, msg: Message) ![]u8 {
     try writeBytes(allocator, &buf, msg.context);
 
     // entries.
-    try writeU32(allocator, &buf, @intCast(msg.entries.len));
+    try writeU32(allocator, &buf, try encodedLength(msg.entries.len));
     for (msg.entries) |e| {
         try buf.append(allocator, @intFromEnum(e.entry_type));
         try writeU64(allocator, &buf, e.term);
@@ -107,7 +108,7 @@ pub fn encodeFramed(
 
     // Message type + payload size.
     try frame.append(allocator, @intFromEnum(msg.msg_type));
-    try writeU32(allocator, &frame, @intCast(payload.len));
+    try writeU32(allocator, &frame, try encodedLength(payload.len));
 
     // Payload.
     try frame.appendSlice(allocator, payload);
@@ -121,6 +122,11 @@ pub fn encodeFramed(
 
 pub const DecodeError = error{
     InvalidMagic,
+    InvalidVersion,
+    InvalidMessageType,
+    InvalidEntryType,
+    MessageTypeMismatch,
+    TrailingData,
     TruncatedMessage,
     OutOfMemory,
 };
@@ -129,32 +135,39 @@ pub const DecodeError = error{
 /// call `deinit`.
 pub fn decodeMessage(allocator: std.mem.Allocator, data: []const u8) !Message {
     var pos: usize = 0;
-    return decodeMessageAt(allocator, data, &pos);
+    const message = try decodeMessageAt(allocator, data, &pos);
+    if (pos != data.len) {
+        var owned = message;
+        owned.deinit(allocator);
+        return error.TrailingData;
+    }
+    return message;
 }
 
 fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) !Message {
-    if (data.len < pos.* + 1 + 8 * 9 + 1 + 8 + 8) return error.TruncatedMessage;
-    var p = pos.*;
+    var decoder = Decoder{ .data = data, .pos = pos.* };
 
-    const msg_type: MessageType = @enumFromInt(data[p]);
-    p += 1;
-    const to = readU64(data, &p);
-    const from = readU64(data, &p);
-    const term = readU64(data, &p);
-    const log_term = readU64(data, &p);
-    const index = readU64(data, &p);
-    const commit = readU64(data, &p);
-    const commit_term = readU64(data, &p);
-    const request_snapshot = readU64(data, &p);
-    const reject = data[p] != 0;
-    p += 1;
-    const reject_hint = readU64(data, &p);
-    const priority = std.mem.readInt(i64, data[p..][0..8], .little);
-    p += 8;
+    const msg_type = checkedEnum(MessageType, try decoder.readByte()) orelse return error.InvalidMessageType;
+    const to = try decoder.readInt(u64);
+    const from = try decoder.readInt(u64);
+    const term = try decoder.readInt(u64);
+    const log_term = try decoder.readInt(u64);
+    const index = try decoder.readInt(u64);
+    const commit = try decoder.readInt(u64);
+    const commit_term = try decoder.readInt(u64);
+    const request_snapshot = try decoder.readInt(u64);
+    const reject = try decoder.readByte() != 0;
+    const reject_hint = try decoder.readInt(u64);
+    const priority = try decoder.readInt(i64);
 
-    const context = try readBytes(allocator, data, &p);
+    const context = try decoder.readBytes(allocator);
+    errdefer if (context.len > 0) allocator.free(context);
 
-    const num_entries = readU32(data, &p);
+    const num_entries = try decoder.readInt(u32);
+    const remaining = decoder.data.len - decoder.pos;
+    if (remaining == 0 or num_entries > (remaining - 1) / encoded_entry_min_size) {
+        return error.TruncatedMessage;
+    }
     var entries = try allocator.alloc(Entry, num_entries);
     var actual_entries: usize = 0;
     errdefer {
@@ -162,15 +175,14 @@ fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) 
         allocator.free(entries);
     }
     for (0..num_entries) |_| {
-        if (data.len < p + 1 + 8 + 8 + 4) return error.TruncatedMessage;
-        const entry_type: EntryType = @enumFromInt(data[p]);
-        p += 1;
-        const e_term = readU64(data, &p);
-        const e_index = readU64(data, &p);
-        const checksum = std.mem.readInt(u32, data[p..][0..4], .little);
-        p += 4;
-        const e_data = try readBytes(allocator, data, &p);
-        const e_ctx = try readBytes(allocator, data, &p);
+        const entry_type = checkedEnum(EntryType, try decoder.readByte()) orelse return error.InvalidEntryType;
+        const e_term = try decoder.readInt(u64);
+        const e_index = try decoder.readInt(u64);
+        const checksum = try decoder.readInt(u32);
+        const e_data = try decoder.readBytes(allocator);
+        errdefer if (e_data.len > 0) allocator.free(e_data);
+        const e_ctx = try decoder.readBytes(allocator);
+        errdefer if (e_ctx.len > 0) allocator.free(e_ctx);
         entries[actual_entries] = .{
             .entry_type = entry_type,
             .term = e_term,
@@ -183,26 +195,25 @@ fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) 
     }
 
     var snapshot: ?Snapshot = null;
-    if (p < data.len) {
-        const has_snap = data[p] != 0;
-        p += 1;
-        if (has_snap) {
-            const snap_index = readU64(data, &p);
-            const snap_term = readU64(data, &p);
-            const snap_conf = try readConfState(allocator, data, &p);
-            const snap_data = try readBytes(allocator, data, &p);
-            snapshot = .{
-                .data = snap_data,
-                .metadata = .{
-                    .index = snap_index,
-                    .term = snap_term,
-                    .conf_state = snap_conf,
-                },
-            };
-        }
+    const has_snap = try decoder.readByte() != 0;
+    if (has_snap) {
+        const snap_index = try decoder.readInt(u64);
+        const snap_term = try decoder.readInt(u64);
+        var snap_conf = try decoder.readConfState(allocator);
+        errdefer snap_conf.deinit(allocator);
+        const snap_data = try decoder.readBytes(allocator);
+        errdefer if (snap_data.len > 0) allocator.free(snap_data);
+        snapshot = .{
+            .data = snap_data,
+            .metadata = .{
+                .index = snap_index,
+                .term = snap_term,
+                .conf_state = snap_conf,
+            },
+        };
     }
 
-    pos.* = p;
+    pos.* = decoder.pos;
     return .{
         .msg_type = msg_type,
         .to = to,
@@ -230,29 +241,22 @@ pub const FramedDecodeResult = struct {
 };
 
 pub fn decodeFramed(allocator: std.mem.Allocator, data: []const u8) !FramedDecodeResult {
-    if (data.len < header_size) return error.TruncatedMessage;
-
-    var pos: usize = 0;
-    const magic = std.mem.readInt(u32, data[pos..][0..4], .little);
-    pos += 4;
+    var decoder = Decoder{ .data = data };
+    const magic = try decoder.readInt(u32);
     if (magic != codec_magic) return error.InvalidMagic;
-    pos += 4; // version
-
-    const from_node = readU64(data, &pos);
-    _ = from_node;
-    const to_node = readU64(data, &pos);
-    _ = to_node;
-    pos += 8; // request_id
-    pos += 1; // msg_type
-    const payload_len = readU32(data, &pos);
-
-    if (data.len < pos + payload_len) return error.TruncatedMessage;
-
-    var msg_pos: usize = pos;
-    const msg = try decodeMessageAt(allocator, data, &msg_pos);
+    if (try decoder.readInt(u32) != codec_version) return error.InvalidVersion;
+    _ = try decoder.readInt(u64); // from_node
+    _ = try decoder.readInt(u64); // to_node
+    _ = try decoder.readInt(u64); // request_id
+    const header_type = checkedEnum(MessageType, try decoder.readByte()) orelse return error.InvalidMessageType;
+    const payload_len = try decoder.readInt(u32);
+    const payload = try decoder.take(payload_len);
+    var msg = try decodeMessage(allocator, payload);
+    errdefer msg.deinit(allocator);
+    if (msg.msg_type != header_type) return error.MessageTypeMismatch;
     return .{
         .message = msg,
-        .bytes_consumed = pos + payload_len,
+        .bytes_consumed = decoder.pos,
     };
 }
 
@@ -273,7 +277,7 @@ fn writeU32(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), val: u32) !vo
 }
 
 fn writeBytes(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), bytes: []const u8) !void {
-    try writeU32(allocator, buf, @intCast(bytes.len));
+    try writeU32(allocator, buf, try encodedLength(bytes.len));
     try buf.appendSlice(allocator, bytes);
 }
 
@@ -286,67 +290,75 @@ fn writeConfState(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), cs: Con
 }
 
 fn writeU64Slice(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), slice: []const u64) !void {
-    try writeU32(allocator, buf, @intCast(slice.len));
+    try writeU32(allocator, buf, try encodedLength(slice.len));
     for (slice) |v| try writeU64(allocator, buf, v);
 }
 
-fn readU64(data: []const u8, pos: *usize) u64 {
-    const val = std.mem.readInt(u64, data[pos.*..][0..8], .little);
-    pos.* += 8;
-    return val;
+fn encodedLength(len: usize) !u32 {
+    return std.math.cast(u32, len) orelse error.MessageTooLarge;
 }
 
-fn readU32(data: []const u8, pos: *usize) u32 {
-    const val = std.mem.readInt(u32, data[pos.*..][0..4], .little);
-    pos.* += 4;
-    return val;
-}
+const Decoder = struct {
+    data: []const u8,
+    pos: usize = 0,
 
-fn readBytes(allocator: std.mem.Allocator, data: []const u8, pos: *usize) ![]u8 {
-    const len = readU32(data, pos);
-    if (data.len < pos.* + len) return error.TruncatedMessage;
-    if (len == 0) {
-        pos.* += 0;
-        return &.{};
+    fn take(self: *Decoder, len: usize) ![]const u8 {
+        const end = std.math.add(usize, self.pos, len) catch return error.TruncatedMessage;
+        if (end > self.data.len) return error.TruncatedMessage;
+        const result = self.data[self.pos..end];
+        self.pos = end;
+        return result;
     }
-    const out = try allocator.dupe(u8, data[pos.* .. pos.* + len]);
-    pos.* += len;
-    return out;
-}
 
-fn readConfState(allocator: std.mem.Allocator, data: []const u8, pos: *usize) !ConfState {
-    const voters = try readU64SliceOwned(allocator, data, pos);
-    errdefer allocator.free(voters);
-    const learners = try readU64SliceOwned(allocator, data, pos);
-    errdefer allocator.free(learners);
-    const voters_outgoing = try readU64SliceOwned(allocator, data, pos);
-    errdefer allocator.free(voters_outgoing);
-    const learners_next = try readU64SliceOwned(allocator, data, pos);
-    errdefer allocator.free(learners_next);
-    const auto_leave = if (pos.* < data.len) blk: {
-        const v = data[pos.*] != 0;
-        pos.* += 1;
-        break :blk v;
-    } else false;
-    return .{
-        .voters = voters,
-        .learners = learners,
-        .voters_outgoing = voters_outgoing,
-        .learners_next = learners_next,
-        .auto_leave = auto_leave,
-    };
-}
-
-fn readU64SliceOwned(allocator: std.mem.Allocator, data: []const u8, pos: *usize) ![]u64 {
-    const len = readU32(data, pos);
-    const count: usize = @intCast(len);
-    if (data.len < pos.* + count * 8) return error.TruncatedMessage;
-    const out = try allocator.alloc(u64, count);
-    for (0..count) |i| {
-        out[i] = std.mem.readInt(u64, data[pos.* + i * 8 ..][0..8], .little);
+    fn readByte(self: *Decoder) !u8 {
+        return (try self.take(1))[0];
     }
-    pos.* += count * 8;
-    return out;
+
+    fn readInt(self: *Decoder, comptime T: type) !T {
+        const size = @divExact(@bitSizeOf(T), 8);
+        return std.mem.readInt(T, (try self.take(size))[0..size], .little);
+    }
+
+    fn readBytes(self: *Decoder, allocator: std.mem.Allocator) ![]u8 {
+        const bytes = try self.take(try self.readInt(u32));
+        return if (bytes.len == 0) &.{} else allocator.dupe(u8, bytes);
+    }
+
+    fn readConfState(self: *Decoder, allocator: std.mem.Allocator) !ConfState {
+        const voters = try self.readU64Slice(allocator);
+        errdefer allocator.free(voters);
+        const learners = try self.readU64Slice(allocator);
+        errdefer allocator.free(learners);
+        const voters_outgoing = try self.readU64Slice(allocator);
+        errdefer allocator.free(voters_outgoing);
+        const learners_next = try self.readU64Slice(allocator);
+        errdefer allocator.free(learners_next);
+        return .{
+            .voters = voters,
+            .learners = learners,
+            .voters_outgoing = voters_outgoing,
+            .learners_next = learners_next,
+            .auto_leave = try self.readByte() != 0,
+        };
+    }
+
+    fn readU64Slice(self: *Decoder, allocator: std.mem.Allocator) ![]u64 {
+        const count: usize = @intCast(try self.readInt(u32));
+        const byte_len = std.math.mul(usize, count, @sizeOf(u64)) catch return error.TruncatedMessage;
+        const bytes = try self.take(byte_len);
+        const result = try allocator.alloc(u64, count);
+        for (result, 0..) |*value, i| {
+            value.* = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+        }
+        return result;
+    }
+};
+
+fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
+    inline for (std.meta.fields(T)) |field| {
+        if (field.value == value) return @enumFromInt(value);
+    }
+    return null;
 }
 
 // ===========================================================================
@@ -463,4 +475,130 @@ test "codec: decodeFramed rejects bad magic" {
     const allocator = std.testing.allocator;
     const bad = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     try std.testing.expectError(error.InvalidMagic, decodeFramed(allocator, &bad));
+}
+
+test "codec: malformed messages return errors" {
+    const allocator = std.testing.allocator;
+    const original = Message{ .msg_type = .append, .to = 2, .from = 1 };
+    const encoded = try encodeMessage(allocator, original);
+    defer allocator.free(encoded);
+
+    var invalid_type = try allocator.dupe(u8, encoded);
+    defer allocator.free(invalid_type);
+    invalid_type[0] = 0xff;
+    try std.testing.expectError(error.InvalidMessageType, decodeMessage(allocator, invalid_type));
+
+    for (0..encoded.len) |prefix_len| {
+        try std.testing.expectError(error.TruncatedMessage, decodeMessage(allocator, encoded[0..prefix_len]));
+    }
+
+    const trailing = try std.mem.concat(allocator, u8, &.{ encoded, "x" });
+    defer allocator.free(trailing);
+    try std.testing.expectError(error.TrailingData, decodeMessage(allocator, trailing));
+}
+
+test "codec: framed decoder respects declared payload" {
+    const allocator = std.testing.allocator;
+    const original = Message{ .msg_type = .append, .to = 2, .from = 1 };
+    var framed = try encodeFramed(allocator, original, 1, 2);
+    defer allocator.free(framed);
+
+    const payload_len = std.mem.readInt(u32, framed[33..37], .little);
+    std.mem.writeInt(u32, framed[33..37], payload_len - 1, .little);
+    try std.testing.expectError(error.TruncatedMessage, decodeFramed(allocator, framed));
+}
+
+test "codec: framed decoder validates version and message type" {
+    const allocator = std.testing.allocator;
+    const original = Message{ .msg_type = .append, .to = 2, .from = 1 };
+
+    var invalid_version = try encodeFramed(allocator, original, 1, 2);
+    defer allocator.free(invalid_version);
+    std.mem.writeInt(u32, invalid_version[4..8], codec_version + 1, .little);
+    try std.testing.expectError(error.InvalidVersion, decodeFramed(allocator, invalid_version));
+
+    var mismatched_type = try encodeFramed(allocator, original, 1, 2);
+    defer allocator.free(mismatched_type);
+    mismatched_type[32] = @intFromEnum(MessageType.heartbeat);
+    try std.testing.expectError(error.MessageTypeMismatch, decodeFramed(allocator, mismatched_type));
+}
+
+test "codec: entry count is bounded by the remaining payload" {
+    const allocator = std.testing.allocator;
+    const original = Message{ .msg_type = .append };
+    var encoded = try encodeMessage(allocator, original);
+    defer allocator.free(encoded);
+
+    const entry_count_offset = 1 + 8 * 8 + 1 + 8 + 8 + 4;
+    std.mem.writeInt(u32, encoded[entry_count_offset..][0..4], std.math.maxInt(u32), .little);
+    try std.testing.expectError(error.TruncatedMessage, decodeMessage(allocator, encoded));
+}
+
+test "fuzz: codec decoders" {
+    try std.testing.fuzz({}, fuzzCodec, .{ .corpus = &.{
+        "",
+        "RAPF",
+        "\xff\xff\xff\xff",
+    } });
+}
+
+fn fuzzCodec(_: void, smith: *std.testing.Smith) !void {
+    const allocator = std.testing.allocator;
+    var input_buffer: [4096]u8 = undefined;
+    const input_len = smith.valueRangeAtMost(u16, 0, input_buffer.len);
+    const input = input_buffer[0..input_len];
+    smith.bytes(input);
+
+    if (decodeMessage(allocator, input)) |decoded_value| {
+        var decoded = decoded_value;
+        defer decoded.deinit(allocator);
+        const canonical = try encodeMessage(allocator, decoded);
+        defer allocator.free(canonical);
+        var round_trip = try decodeMessage(allocator, canonical);
+        defer round_trip.deinit(allocator);
+        const encoded_again = try encodeMessage(allocator, round_trip);
+        defer allocator.free(encoded_again);
+        try std.testing.expectEqualSlices(u8, canonical, encoded_again);
+    } else |_| {}
+
+    if (decodeFramed(allocator, input)) |decoded_value| {
+        var decoded = decoded_value;
+        defer decoded.message.deinit(allocator);
+        try std.testing.expect(decoded.bytes_consumed <= input.len);
+        const canonical = try encodeFramed(
+            allocator,
+            decoded.message,
+            decoded.message.from,
+            decoded.message.to,
+        );
+        defer allocator.free(canonical);
+        var round_trip = try decodeFramed(allocator, canonical);
+        defer round_trip.message.deinit(allocator);
+        try std.testing.expectEqual(canonical.len, round_trip.bytes_consumed);
+    } else |_| {}
+
+    const split = input.len / 2;
+    var entries = [_]Entry{.{
+        .entry_type = smith.value(EntryType),
+        .term = smith.value(u64),
+        .index = smith.value(u64),
+        .checksum = smith.value(u32),
+        .data = @constCast(input[0..split]),
+        .context = @constCast(input[split..]),
+    }};
+    const structured = Message{
+        .msg_type = smith.value(MessageType),
+        .to = smith.value(u64),
+        .from = smith.value(u64),
+        .term = smith.value(u64),
+        .entries = if (smith.value(bool)) entries[0..] else &.{},
+        .context = @constCast(input),
+    };
+    const canonical = try encodeMessage(allocator, structured);
+    defer allocator.free(canonical);
+    var round_trip = try decodeMessage(allocator, canonical);
+    defer round_trip.deinit(allocator);
+    const encoded_again = try encodeMessage(allocator, round_trip);
+    defer allocator.free(encoded_again);
+    try std.testing.expectEqualSlices(u8, canonical, encoded_again);
 }

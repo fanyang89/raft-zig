@@ -207,8 +207,10 @@ const cc_magic = [_]u8{ 'R', 'C', 'C', '2' };
 const cc_version: u8 = 1;
 
 pub fn encodeConfChangeV2(allocator: std.mem.Allocator, cc: ConfChangeV2) ![]u8 {
-    const changes_bytes = cc.changes.len * 9;
-    const total = 4 + 1 + 1 + 2 + changes_bytes + 4 + cc.context.len;
+    const change_count = std.math.cast(u16, cc.changes.len) orelse return error.ConfChangeError;
+    const context_len = std.math.cast(u32, cc.context.len) orelse return error.ConfChangeError;
+    const changes_bytes = std.math.mul(usize, cc.changes.len, 9) catch return error.ConfChangeError;
+    const total = std.math.add(usize, 12 + changes_bytes, cc.context.len) catch return error.ConfChangeError;
     var out = try allocator.alloc(u8, total);
     var pos: usize = 0;
 
@@ -218,7 +220,7 @@ pub fn encodeConfChangeV2(allocator: std.mem.Allocator, cc: ConfChangeV2) ![]u8 
     pos += 1;
     out[pos] = @intFromEnum(cc.transition);
     pos += 1;
-    std.mem.writeInt(u16, out[pos..][0..2], @intCast(cc.changes.len), .little);
+    std.mem.writeInt(u16, out[pos..][0..2], change_count, .little);
     pos += 2;
     for (cc.changes) |c| {
         out[pos] = @intFromEnum(c.change_type);
@@ -226,7 +228,7 @@ pub fn encodeConfChangeV2(allocator: std.mem.Allocator, cc: ConfChangeV2) ![]u8 
         std.mem.writeInt(u64, out[pos..][0..8], c.node_id, .little);
         pos += 8;
     }
-    std.mem.writeInt(u32, out[pos..][0..4], @intCast(cc.context.len), .little);
+    std.mem.writeInt(u32, out[pos..][0..4], context_len, .little);
     pos += 4;
     @memcpy(out[pos..][0..cc.context.len], cc.context);
     return out;
@@ -238,19 +240,20 @@ pub fn decodeConfChangeV2(allocator: std.mem.Allocator, bytes: []const u8) !Conf
     if (bytes[4] != cc_version) return error.ConfChangeParseError;
 
     var pos: usize = 5;
-    const transition: ConfChangeTransition = @enumFromInt(bytes[pos]);
+    const transition = checkedEnum(ConfChangeTransition, bytes[pos]) orelse return error.ConfChangeParseError;
     pos += 1;
     const num_changes = std.mem.readInt(u16, bytes[pos..][0..2], .little);
     pos += 2;
 
-    const expect_after_changes = pos + @as(usize, num_changes) * 9 + 4;
+    const changes_bytes = std.math.mul(usize, num_changes, 9) catch return error.ConfChangeParseError;
+    const expect_after_changes = std.math.add(usize, pos, changes_bytes + 4) catch return error.ConfChangeParseError;
     if (bytes.len < expect_after_changes) return error.ConfChangeParseError;
 
     var changes = try allocator.alloc(ConfChangeSingle, num_changes);
     errdefer allocator.free(changes);
     for (0..num_changes) |i| {
         changes[i] = .{
-            .change_type = @enumFromInt(bytes[pos]),
+            .change_type = checkedEnum(ConfChangeType, bytes[pos]) orelse return error.ConfChangeParseError,
             .node_id = std.mem.readInt(u64, bytes[pos + 1 ..][0..8], .little),
         };
         pos += 9;
@@ -258,14 +261,22 @@ pub fn decodeConfChangeV2(allocator: std.mem.Allocator, bytes: []const u8) !Conf
 
     const context_len = std.mem.readInt(u32, bytes[pos..][0..4], .little);
     pos += 4;
-    if (bytes.len < pos + context_len) return error.ConfChangeParseError;
-    const context = try allocator.dupe(u8, bytes[pos .. pos + context_len]);
+    const end = std.math.add(usize, pos, context_len) catch return error.ConfChangeParseError;
+    if (bytes.len != end) return error.ConfChangeParseError;
+    const context = try allocator.dupe(u8, bytes[pos..end]);
 
     return ConfChangeV2{
         .transition = transition,
         .changes = changes,
         .context = context,
     };
+}
+
+fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
+    inline for (std.meta.fields(T)) |field| {
+        if (field.value == value) return @enumFromInt(value);
+    }
+    return null;
 }
 
 test "encodeConfChangeV2 round-trips through decodeConfChangeV2" {
@@ -302,4 +313,78 @@ test "decodeConfChangeV2 rejects bad magic" {
     const allocator = std.testing.allocator;
     const bad = [_]u8{ 'B', 'A', 'D', 'X', 1, 0, 0, 0, 0, 0, 0, 0 };
     try std.testing.expectError(error.ConfChangeParseError, decodeConfChangeV2(allocator, &bad));
+}
+
+test "decodeConfChangeV2 rejects invalid enums and trailing data" {
+    const allocator = std.testing.allocator;
+    const encoded = try encodeConfChangeV2(allocator, .{});
+    defer allocator.free(encoded);
+
+    var invalid_transition = try allocator.dupe(u8, encoded);
+    defer allocator.free(invalid_transition);
+    invalid_transition[5] = 0xff;
+    try std.testing.expectError(error.ConfChangeParseError, decodeConfChangeV2(allocator, invalid_transition));
+
+    const trailing = try std.mem.concat(allocator, u8, &.{ encoded, "x" });
+    defer allocator.free(trailing);
+    try std.testing.expectError(error.ConfChangeParseError, decodeConfChangeV2(allocator, trailing));
+}
+
+test "fuzz: ConfChangeV2 codec" {
+    try std.testing.fuzz({}, fuzzConfChangeV2, .{ .corpus = &.{
+        "",
+        "RCC2",
+        "RCC2\x01\xff\x00\x00\x00\x00\x00\x00",
+    } });
+}
+
+fn fuzzConfChangeV2(_: void, smith: *std.testing.Smith) !void {
+    const allocator = std.testing.allocator;
+    var input_buffer: [2048]u8 = undefined;
+    const input_len = smith.valueRangeAtMost(u16, 0, input_buffer.len);
+    const input = input_buffer[0..input_len];
+    smith.bytes(input);
+
+    if (decodeConfChangeV2(allocator, input)) |decoded_value| {
+        var decoded = decoded_value;
+        defer decoded.deinit(allocator);
+        const canonical = try encodeConfChangeV2(allocator, decoded);
+        defer allocator.free(canonical);
+        var round_trip = try decodeConfChangeV2(allocator, canonical);
+        defer round_trip.deinit(allocator);
+        try expectConfChangeEqual(decoded, round_trip);
+    } else |_| {}
+
+    var changes: [8]ConfChangeSingle = undefined;
+    const change_count = smith.valueRangeAtMost(u8, 0, changes.len);
+    for (changes[0..change_count]) |*change| {
+        change.* = .{
+            .change_type = smith.value(ConfChangeType),
+            .node_id = smith.value(u64),
+        };
+    }
+    var context_buffer: [64]u8 = undefined;
+    const context_len = smith.valueRangeAtMost(u8, 0, context_buffer.len);
+    const context = context_buffer[0..context_len];
+    smith.bytes(context);
+    const generated = ConfChangeV2{
+        .transition = smith.value(ConfChangeTransition),
+        .changes = changes[0..change_count],
+        .context = context,
+    };
+    const encoded = try encodeConfChangeV2(allocator, generated);
+    defer allocator.free(encoded);
+    var decoded = try decodeConfChangeV2(allocator, encoded);
+    defer decoded.deinit(allocator);
+    try expectConfChangeEqual(generated, decoded);
+}
+
+fn expectConfChangeEqual(expected: ConfChangeV2, actual: ConfChangeV2) !void {
+    try std.testing.expectEqual(expected.transition, actual.transition);
+    try std.testing.expectEqual(expected.changes.len, actual.changes.len);
+    for (expected.changes, actual.changes) |expected_change, actual_change| {
+        try std.testing.expectEqual(expected_change.change_type, actual_change.change_type);
+        try std.testing.expectEqual(expected_change.node_id, actual_change.node_id);
+    }
+    try std.testing.expectEqualSlices(u8, expected.context, actual.context);
 }

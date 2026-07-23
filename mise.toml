@@ -24,6 +24,22 @@ run = "TSAN_OPTIONS=halt_on_error=1:exitcode=66 zig build test -Dtarget=x86_64-l
 description = "Run all tests with C undefined behavior detection"
 run = "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 zig build test -Doptimize=Debug -Dsanitize-thread=false -Dsanitize-c=true --summary all"
 
+[tasks.fuzz-smoke]
+description = "Run fuzz corpus smoke tests"
+run = "zig build fuzz-smoke --summary all"
+
+[tasks.fuzz-codec]
+description = "Fuzz RPC codecs"
+run = "zig build fuzz-codec -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+
+[tasks.fuzz-wal]
+description = "Fuzz WAL decoders"
+run = "zig build fuzz-wal -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+
+[tasks.fuzz-confchange]
+description = "Fuzz configuration change codecs"
+run = "zig build fuzz-confchange -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src examples tests"

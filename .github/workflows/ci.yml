@@ -80,6 +80,43 @@ jobs:
       - name: Run sanitizer tests
         run: mise run ${{ matrix.task }}
 
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - codec
+          - wal
+          - confchange
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Run bounded fuzzing
+        run: zig build fuzz-${{ matrix.target }} -Doptimize=ReleaseSafe --fuzz=100K --summary line
+
+      - name: Upload fuzz failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-${{ matrix.target }}-failure
+          if-no-files-found: ignore
+          path: |
+            crash-*
+            leak-*
+            oom-*
+            timeout-*
+            .zig-cache/f/**
+            .zig-cache/tmp/libfuzzer.log
+
   required:
     name: Required
     if: always()
@@ -87,6 +124,7 @@ jobs:
       - workflow-lint
       - core-test
       - sanitizer
+      - fuzz
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -95,7 +133,9 @@ jobs:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           CORE_TEST_RESULT: ${{ needs.core-test.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
+          FUZZ_RESULT: ${{ needs.fuzz.result }}
         run: |
           test "$WORKFLOW_LINT_RESULT" = success
           test "$CORE_TEST_RESULT" = success
           test "$SANITIZER_RESULT" = success
+          test "$FUZZ_RESULT" = success

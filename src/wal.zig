@@ -73,17 +73,17 @@ fn isValidSegmentHeader(buf: []const u8) bool {
 
 /// Calculate padding to align a record (16-byte header + payload) to 8 bytes.
 fn calcPadding(payload_len: u32) u32 {
-    const total = RECORD_HEADER_SIZE + payload_len;
-    const rem = total % 8;
+    const rem = payload_len % 8;
     return if (rem == 0) 0 else @intCast(8 - rem);
 }
 
 /// Build a single WAL record (header + payload + padding). Caller owns the
 /// returned slice.
 fn buildRecord(allocator: std.mem.Allocator, record_type: RecordType, payload: []const u8) ![]u8 {
-    const length: u32 = @intCast(payload.len);
+    const length = std.math.cast(u32, payload.len) orelse return error.RecordTooLarge;
     const padding = calcPadding(length);
-    const total = RECORD_HEADER_SIZE + payload.len + padding;
+    const payload_end = try std.math.add(usize, RECORD_HEADER_SIZE, payload.len);
+    const total = try std.math.add(usize, payload_end, padding);
     var out = try allocator.alloc(u8, total);
     @memset(out, 0);
 
@@ -134,8 +134,11 @@ fn parseRecord(data: []const u8) ParsedRecord {
     const length = std.mem.readInt(u32, data[8..12], .little);
     const padding = std.mem.readInt(u32, data[12..16], .little);
 
-    const total_needed = RECORD_HEADER_SIZE + length + padding;
+    if (padding > 7 or padding != calcPadding(length)) return .{ .record_type = .entry, .payload = &.{}, .valid = false };
+    const payload_end = std.math.add(usize, RECORD_HEADER_SIZE, length) catch return .{ .record_type = .entry, .payload = &.{}, .valid = false };
+    const total_needed = std.math.add(usize, payload_end, padding) catch return .{ .record_type = .entry, .payload = &.{}, .valid = false };
     if (data.len < total_needed) return .{ .record_type = .entry, .payload = &.{}, .valid = false };
+    const record_type = checkedEnum(RecordType, raw_type) orelse return .{ .record_type = .entry, .payload = &.{}, .valid = false };
 
     // Verify CRC.
     var crc = Crc32Iscsi.init();
@@ -144,12 +147,12 @@ fn parseRecord(data: []const u8) ParsedRecord {
     crc.update(data[6..8]); // reserved
     crc.update(data[8..12]); // length
     crc.update(data[12..16]); // padding
-    crc.update(data[16 .. 16 + length]); // payload
+    crc.update(data[16..payload_end]); // payload
     if (crc.final() != stored_crc) return .{ .record_type = .entry, .payload = &.{}, .valid = false };
 
     return .{
-        .record_type = @enumFromInt(raw_type),
-        .payload = data[16 .. 16 + length],
+        .record_type = record_type,
+        .payload = data[16..payload_end],
         .valid = true,
     };
 }
@@ -162,7 +165,10 @@ fn parseRecord(data: []const u8) ParsedRecord {
 ///   entry_type(1) + term(8) + index(8) + checksum(4) + data_len(4) + data + ctx_len(4) + context
 fn serializeEntry(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
     const header_size: usize = 1 + 8 + 8 + 4 + 4 + 4;
-    const total = header_size + entry.data.len + entry.context.len;
+    const data_len = std.math.cast(u32, entry.data.len) orelse return error.RecordTooLarge;
+    const context_len = std.math.cast(u32, entry.context.len) orelse return error.RecordTooLarge;
+    const data_end = try std.math.add(usize, header_size, entry.data.len);
+    const total = try std.math.add(usize, data_end, entry.context.len);
     var out = try allocator.alloc(u8, total);
     var pos: usize = 0;
     out[pos] = @intFromEnum(entry.entry_type);
@@ -173,11 +179,11 @@ fn serializeEntry(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
     pos += 8;
     std.mem.writeInt(u32, out[pos..][0..4], entry.checksum, .little);
     pos += 4;
-    std.mem.writeInt(u32, out[pos..][0..4], @intCast(entry.data.len), .little);
+    std.mem.writeInt(u32, out[pos..][0..4], data_len, .little);
     pos += 4;
     @memcpy(out[pos .. pos + entry.data.len], entry.data);
     pos += entry.data.len;
-    std.mem.writeInt(u32, out[pos..][0..4], @intCast(entry.context.len), .little);
+    std.mem.writeInt(u32, out[pos..][0..4], context_len, .little);
     pos += 4;
     @memcpy(out[pos .. pos + entry.context.len], entry.context);
     return out;
@@ -186,7 +192,7 @@ fn serializeEntry(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
 fn deserializeEntry(allocator: std.mem.Allocator, data: []const u8) !Entry {
     if (data.len < 1 + 8 + 8 + 4 + 4) return error.EntryParseError;
     var pos: usize = 0;
-    const entry_type: EntryType = @enumFromInt(data[pos]);
+    const entry_type = checkedEnum(EntryType, data[pos]) orelse return error.EntryParseError;
     pos += 1;
     const term = std.mem.readInt(u64, data[pos..][0..8], .little);
     pos += 8;
@@ -196,13 +202,17 @@ fn deserializeEntry(allocator: std.mem.Allocator, data: []const u8) !Entry {
     pos += 4;
     const data_len = std.mem.readInt(u32, data[pos..][0..4], .little);
     pos += 4;
-    if (data.len < pos + data_len + 4) return error.EntryParseError;
-    const entry_data: []u8 = if (data_len > 0) try allocator.dupe(u8, data[pos .. pos + data_len]) else &.{};
+    const data_end = std.math.add(usize, pos, data_len) catch return error.EntryParseError;
+    const context_header_end = std.math.add(usize, data_end, 4) catch return error.EntryParseError;
+    if (data.len < context_header_end) return error.EntryParseError;
+    const entry_data: []u8 = if (data_len > 0) try allocator.dupe(u8, data[pos..data_end]) else &.{};
+    errdefer if (entry_data.len > 0) allocator.free(entry_data);
     pos += data_len;
     const ctx_len = std.mem.readInt(u32, data[pos..][0..4], .little);
     pos += 4;
-    if (data.len < pos + ctx_len) return error.EntryParseError;
-    const context: []u8 = if (ctx_len > 0) try allocator.dupe(u8, data[pos .. pos + ctx_len]) else &.{};
+    const context_end = std.math.add(usize, pos, ctx_len) catch return error.EntryParseError;
+    if (data.len != context_end) return error.EntryParseError;
+    const context: []u8 = if (ctx_len > 0) try allocator.dupe(u8, data[pos..context_end]) else &.{};
     return .{
         .entry_type = entry_type,
         .term = term,
@@ -222,12 +232,20 @@ fn serializeHardState(hs: HardState) [24]u8 {
     return out;
 }
 
-fn deserializeHardState(data: []const u8) HardState {
-    if (data.len < 24) return .{};
+fn deserializeHardState(data: []const u8) !HardState {
+    if (data.len != 24) return error.HardStateParseError;
     return .{
         .term = std.mem.readInt(u64, data[0..8], .little),
         .vote = std.mem.readInt(u64, data[8..16], .little),
         .commit = std.mem.readInt(u64, data[16..24], .little),
+    };
+}
+
+fn deserializeSnapshotMetadata(data: []const u8) !SnapshotMetadata {
+    if (data.len != 16) return error.SnapshotParseError;
+    return .{
+        .index = std.mem.readInt(u64, data[0..8], .little),
+        .term = std.mem.readInt(u64, data[8..16], .little),
     };
 }
 
@@ -248,7 +266,8 @@ fn serializeConfState(allocator: std.mem.Allocator, cs: ConfState) ![]u8 {
 
 fn writeU64Slice(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), slice: []const u64) !void {
     var len_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &len_bytes, @intCast(slice.len), .little);
+    const len = std.math.cast(u32, slice.len) orelse return error.RecordTooLarge;
+    std.mem.writeInt(u32, &len_bytes, len, .little);
     try buf.appendSlice(allocator, &len_bytes);
     for (slice) |v| {
         var v_bytes: [8]u8 = undefined;
@@ -267,7 +286,7 @@ fn deserializeConfState(allocator: std.mem.Allocator, data: []const u8) !ConfSta
     errdefer allocator.free(voters_outgoing);
     const learners_next = try readU64Slice(allocator, data, &pos);
     errdefer allocator.free(learners_next);
-    if (pos >= data.len) return error.ConfStateParseError;
+    if (pos + 1 != data.len) return error.ConfStateParseError;
     return .{
         .voters = voters,
         .learners = learners,
@@ -278,17 +297,27 @@ fn deserializeConfState(allocator: std.mem.Allocator, data: []const u8) !ConfSta
 }
 
 fn readU64Slice(allocator: std.mem.Allocator, data: []const u8, pos: *usize) ![]u64 {
-    if (data.len < pos.* + 4) return error.ConfStateParseError;
+    const header_end = std.math.add(usize, pos.*, 4) catch return error.ConfStateParseError;
+    if (data.len < header_end) return error.ConfStateParseError;
     const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
     pos.* += 4;
     const count: usize = @intCast(len);
-    if (data.len < pos.* + count * 8) return error.ConfStateParseError;
+    const byte_len = std.math.mul(usize, count, 8) catch return error.ConfStateParseError;
+    const end = std.math.add(usize, pos.*, byte_len) catch return error.ConfStateParseError;
+    if (data.len < end) return error.ConfStateParseError;
     const out = try allocator.alloc(u64, count);
     for (0..count) |i| {
         out[i] = std.mem.readInt(u64, data[pos.* + i * 8 ..][0..8], .little);
     }
     pos.* += count * 8;
     return out;
+}
+
+fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
+    inline for (std.meta.fields(T)) |field| {
+        if (field.value == value) return @enumFromInt(value);
+    }
+    return null;
 }
 
 // ===========================================================================
@@ -377,24 +406,23 @@ pub const WAL = struct {
                 const total = RECORD_HEADER_SIZE + parsed.payload.len + pad;
                 switch (parsed.record_type) {
                     .entry => {
-                        const e = deserializeEntry(self.allocator, parsed.payload) catch break;
-                        self.entries.append(self.allocator, e) catch break;
+                        var e = deserializeEntry(self.allocator, parsed.payload) catch break;
+                        self.entries.append(self.allocator, e) catch {
+                            e.deinit(self.allocator);
+                            break;
+                        };
                     },
                     .hard_state => {
-                        self.hard_state = deserializeHardState(parsed.payload);
+                        self.hard_state = deserializeHardState(parsed.payload) catch break;
                     },
                     .conf_state => {
                         self.conf_state.deinit(self.allocator);
                         self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
                     },
                     .snapshot => {
-                        if (parsed.payload.len >= 16) {
-                            self.snapshot_metadata.deinit(self.allocator);
-                            self.snapshot_metadata = .{
-                                .index = std.mem.readInt(u64, parsed.payload[0..8], .little),
-                                .term = std.mem.readInt(u64, parsed.payload[8..16], .little),
-                            };
-                        }
+                        const metadata = deserializeSnapshotMetadata(parsed.payload) catch break;
+                        self.snapshot_metadata.deinit(self.allocator);
+                        self.snapshot_metadata = metadata;
                     },
                 }
                 offset += total;
@@ -734,10 +762,25 @@ test "wal: entry serialize/deserialize round-trip" {
 test "wal: hardstate serialize/deserialize" {
     const original = HardState{ .term = 3, .vote = 7, .commit = 42 };
     const bytes = serializeHardState(original);
-    const decoded = deserializeHardState(&bytes);
+    const decoded = try deserializeHardState(&bytes);
     try std.testing.expectEqual(original.term, decoded.term);
     try std.testing.expectEqual(original.vote, decoded.vote);
     try std.testing.expectEqual(original.commit, decoded.commit);
+}
+
+test "wal: fixed-size payload decoders reject wrong lengths" {
+    try std.testing.expectError(error.HardStateParseError, deserializeHardState(&([_]u8{0} ** 23)));
+    try std.testing.expectError(error.HardStateParseError, deserializeHardState(&([_]u8{0} ** 25)));
+    try std.testing.expectError(error.SnapshotParseError, deserializeSnapshotMetadata(&([_]u8{0} ** 15)));
+    try std.testing.expectError(error.SnapshotParseError, deserializeSnapshotMetadata(&([_]u8{0} ** 17)));
+}
+
+test "wal: maximum record length is rejected without overflow" {
+    var header = [_]u8{0} ** RECORD_HEADER_SIZE;
+    header[4] = @intFromEnum(RecordType.entry);
+    std.mem.writeInt(u32, header[8..12], std.math.maxInt(u32), .little);
+    std.mem.writeInt(u32, header[12..16], 1, .little);
+    try std.testing.expect(!parseRecord(&header).valid);
 }
 
 test "wal: confstate serialize/deserialize round-trip" {
@@ -958,4 +1001,59 @@ test "wal: WALStorage vtable dispatches correctly" {
     }
 
     removeWALDir(allocator, path);
+}
+
+test "fuzz: WAL record and payload decoders" {
+    try std.testing.fuzz({}, fuzzWalDecoders, .{ .corpus = &.{
+        "",
+        "WAL1",
+        "\xff\xff\xff\xff\xff\xff\xff\xff",
+    } });
+}
+
+fn fuzzWalDecoders(_: void, smith: *std.testing.Smith) !void {
+    const allocator = std.testing.allocator;
+    var input_buffer: [4096]u8 = undefined;
+    const input_len = smith.valueRangeAtMost(u16, 0, input_buffer.len);
+    const input = input_buffer[0..input_len];
+    smith.bytes(input);
+
+    checkParsedRecord(allocator, parseRecord(input));
+
+    const record_type = smith.value(RecordType);
+    const record = try buildRecord(allocator, record_type, input);
+    defer allocator.free(record);
+    const parsed = parseRecord(record);
+    try std.testing.expect(parsed.valid);
+    try std.testing.expectEqual(record_type, parsed.record_type);
+    try std.testing.expectEqualSlices(u8, input, parsed.payload);
+    checkParsedRecord(allocator, parsed);
+}
+
+fn checkParsedRecord(allocator: std.mem.Allocator, parsed: ParsedRecord) void {
+    if (!parsed.valid) return;
+    switch (parsed.record_type) {
+        .entry => {
+            if (deserializeEntry(allocator, parsed.payload)) |entry_value| {
+                var entry = entry_value;
+                defer entry.deinit(allocator);
+                const canonical = serializeEntry(allocator, entry) catch return;
+                defer allocator.free(canonical);
+                var round_trip = deserializeEntry(allocator, canonical) catch return;
+                defer round_trip.deinit(allocator);
+            } else |_| {}
+        },
+        .hard_state => _ = deserializeHardState(parsed.payload) catch {},
+        .conf_state => {
+            if (deserializeConfState(allocator, parsed.payload)) |conf_value| {
+                var conf = conf_value;
+                defer conf.deinit(allocator);
+                const canonical = serializeConfState(allocator, conf) catch return;
+                defer allocator.free(canonical);
+                var round_trip = deserializeConfState(allocator, canonical) catch return;
+                defer round_trip.deinit(allocator);
+            } else |_| {}
+        },
+        .snapshot => _ = deserializeSnapshotMetadata(parsed.payload) catch {},
+    }
 }
