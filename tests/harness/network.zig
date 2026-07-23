@@ -45,6 +45,11 @@ pub const Peer = struct {
     }
 };
 
+pub const NetworkOptions = struct {
+    pre_vote: bool = false,
+    check_quorum: bool = false,
+};
+
 pub const Network = struct {
     peers: std.AutoHashMap(u64, *Peer),
     ignored: std.AutoHashMap(MessageType, void),
@@ -508,7 +513,7 @@ fn hashLength(hash: *std.hash.Wyhash, len: usize) void {
     hash.update(std.mem.asBytes(&value));
 }
 
-fn createPeer(id: u64, peer_ids: []const u64) !*Peer {
+fn createPeer(id: u64, peer_ids: []const u64, options: NetworkOptions) !*Peer {
     const peer = try allocator.create(Peer);
     errdefer allocator.destroy(peer);
     peer.storage = MemoryStorage.init();
@@ -524,17 +529,23 @@ fn createPeer(id: u64, peer_ids: []const u64) !*Peer {
     config.election_tick = 10;
     config.heartbeat_tick = 1;
     config.election_timeout_seed = id *% 0xDEAD;
+    config.pre_vote = options.pre_vote;
+    config.check_quorum = options.check_quorum;
     peer.raft = try Raft.init(allocator, config, peer.storage.asStorage());
     return peer;
 }
 
 pub fn newNetwork(peer_ids: []const u64) !Network {
+    return newNetworkWithOptions(peer_ids, .{});
+}
+
+pub fn newNetworkWithOptions(peer_ids: []const u64, options: NetworkOptions) !Network {
     var network = Network.init();
     errdefer network.deinit();
 
     for (peer_ids) |id| {
         if (network.peers.contains(id)) return error.DuplicatePeer;
-        const peer = try createPeer(id, peer_ids);
+        const peer = try createPeer(id, peer_ids, options);
         network.peers.put(id, peer) catch |err| {
             peer.deinit();
             allocator.destroy(peer);

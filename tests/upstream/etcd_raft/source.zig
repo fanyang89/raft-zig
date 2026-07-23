@@ -6,5 +6,20 @@ pub const upstream: manifest.Source = .{
     .revision = "56e32004b1af3a4cb625fbfe5dbca24fb6023d09",
     .license = "Apache-2.0",
     .policy = "Primary baseline; adapt behavior with attribution.",
-    .cases = &.{},
+    .cases = &.{
+        .{
+            .id = "raft_test.go::TestLeaderElectionPreVote",
+            .path = "raft_test.go",
+            .category = "pre-vote",
+            .status = .adapted,
+            .rationale = "Covers successful and quorum-starved pre-vote elections.",
+        },
+        .{
+            .id = "raft_test.go::TestPreVoteFromAnyState",
+            .path = "raft_test.go",
+            .category = "pre-vote",
+            .status = .adapted,
+            .rationale = "Covers pre-vote immutability across all Raft roles.",
+        },
+    },
 };

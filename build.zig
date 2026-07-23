@@ -97,6 +97,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const upstream_network = b.createModule(.{
+        .root_source_file = b.path("tests/harness/network.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+    });
     const upstream_step = b.step("test-upstream", "Run all adapted upstream test suites");
     const upstream_source_steps = [_]*std.Build.Step{
         upstream_step,
@@ -114,6 +120,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "raft_zig", .module = raft_zig },
                 .{ .name = "upstream_manifest", .module = upstream_manifest },
+                .{ .name = "raft_test_network", .module = upstream_network },
             },
         });
         applySanitizers(module, sanitizers);
