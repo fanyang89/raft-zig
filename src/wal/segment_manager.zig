@@ -11,20 +11,6 @@ const segment_mod = @import("segment.zig");
 const Segment = segment_mod.Segment;
 const linux = std.os.linux;
 
-fn errno(rc: usize) i32 {
-    const signed: isize = @bitCast(rc);
-    if (signed >= 0) return 0;
-    return @intCast(-signed);
-}
-
-const linux_dirent64 = extern struct {
-    inode: u64,
-    off: i64,
-    reclen: u16,
-    type: u8,
-    name: [256]u8,
-};
-
 pub const SegmentEntry = struct {
     id: u64,
     segment: *Segment,
@@ -56,23 +42,59 @@ pub const SegmentManager = struct {
     }
 
     fn scanDirectory(self: *SegmentManager) !void {
-        // Scan segment files by trying consecutive IDs: segment-000001.wal,
-        // segment-000002.wal, ... Stop at the first missing one. This avoids
-        // the complexity of getdents64.
-        var sid: u64 = 1;
+        var ids: std.ArrayList(u64) = .empty;
+        defer ids.deinit(self.allocator);
+
+        const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+        const fd: linux.fd_t = while (true) {
+            const rc = linux.open(self.dir.ptr, flags, 0);
+            switch (linux.errno(rc)) {
+                .SUCCESS => break @intCast(rc),
+                .INTR => continue,
+                else => return error.OpenFailed,
+            }
+        };
+        defer _ = linux.close(fd);
+
+        var buffer: [4096]u8 = undefined;
         while (true) {
+            const n = while (true) {
+                const rc = linux.getdents64(fd, &buffer, buffer.len);
+                switch (linux.errno(rc)) {
+                    .SUCCESS => break rc,
+                    .INTR => continue,
+                    else => return error.ReadFailed,
+                }
+            };
+            if (n == 0) break;
+
+            var offset: usize = 0;
+            while (offset < n) {
+                const entry: *align(1) linux.dirent64 = @ptrCast(&buffer[offset]);
+                const name_offset = @offsetOf(linux.dirent64, "name");
+                if (entry.reclen <= name_offset or entry.reclen > n - offset) return error.ReadFailed;
+                const name_ptr: [*]const u8 = &entry.name;
+                const padded_name = name_ptr[0 .. entry.reclen - name_offset];
+                const name_len = std.mem.findScalar(u8, padded_name, 0) orelse return error.ReadFailed;
+                if (entry.type == linux.DT.REG or entry.type == linux.DT.UNKNOWN) {
+                    if (segment_mod.parseSegmentId(name_ptr[0..name_len])) |id| try ids.append(self.allocator, id);
+                }
+                offset += entry.reclen;
+            }
+        }
+
+        std.mem.sort(u64, ids.items, {}, std.sort.asc(u64));
+        try self.segments.ensureUnusedCapacity(self.allocator, ids.items.len);
+        for (ids.items) |sid| {
             const path = try segment_mod.makeFilename(self.allocator, self.dir, sid);
             defer self.allocator.free(path);
-            const seg = Segment.open(self.allocator, path) catch |err| switch (err) {
-                error.FileNotFound => break,
-                else => return err,
-            };
-            self.segments.append(self.allocator, .{ .id = sid, .segment = seg }) catch |err| {
+            const seg = try Segment.open(self.allocator, path);
+            if (seg.segment_id != sid) {
                 seg.destroy();
-                return err;
-            };
+                return error.InvalidSegmentHeader;
+            }
+            self.segments.appendAssumeCapacity(.{ .id = sid, .segment = seg });
             self.current_segment_id = sid;
-            sid += 1;
         }
     }
 

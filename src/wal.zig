@@ -847,6 +847,64 @@ fn removeFile(path: [:0]const u8) void {
     _ = linux.unlink(path.ptr);
 }
 
+fn createEmptyFile(path: [:0]const u8) !void {
+    const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
+    const rc = linux.open(path.ptr, flags, 0o644);
+    if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
+    _ = linux.close(@intCast(rc));
+}
+
+test "wal: segment discovery accepts a compacted prefix" {
+    const allocator = std.testing.allocator;
+    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery";
+    removeWALDir(allocator, dir);
+    try segment_mod.makeDir(dir);
+
+    const metadata_path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery/metadata";
+    try createEmptyFile(metadata_path);
+    defer removeFile(metadata_path);
+
+    const segment2 = try segment_mod.Segment.create(allocator, dir, 2, 10);
+    segment2.destroy();
+    const segment3 = try segment_mod.Segment.create(allocator, dir, 3, 20);
+    segment3.destroy();
+
+    {
+        var manager = try segment_manager_mod.SegmentManager.init(allocator, dir);
+        defer manager.deinit();
+        try std.testing.expectEqual(@as(usize, 2), manager.count());
+        try std.testing.expectEqual(@as(u64, 2), manager.segments.items[0].id);
+        try std.testing.expectEqual(@as(u64, 3), manager.segments.items[1].id);
+        const next = try manager.rollToNew(30);
+        try std.testing.expectEqual(@as(u64, 4), next.segment_id);
+        try manager.syncAll();
+    }
+
+    removeFile(metadata_path);
+    removeWALDir(allocator, dir);
+}
+
+test "wal: segment discovery rejects a mismatched header id" {
+    const allocator = std.testing.allocator;
+    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-id-mismatch";
+    removeWALDir(allocator, dir);
+    try segment_mod.makeDir(dir);
+    defer _ = linux.rmdir(dir.ptr);
+
+    const path = try segment_mod.makeFilename(allocator, dir, 2);
+    defer allocator.free(path);
+    defer removeFile(path);
+
+    const segment = try segment_mod.Segment.create(allocator, dir, 2, 10);
+    var wrong_id: [8]u8 = undefined;
+    std.mem.writeInt(u64, &wrong_id, 9, .little);
+    const rc = linux.pwrite(segment.fd.?, &wrong_id, wrong_id.len, 8);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    segment.destroy();
+
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_manager_mod.SegmentManager.init(allocator, dir));
+}
+
 test "wal: segment rejects truncated header" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-truncated-header";
