@@ -183,8 +183,8 @@ fn encodeHeader(out: *[SEGMENT_HEADER_SIZE]u8, segment_id: u64, first_index: u64
 // Directory helpers
 // ===========================================================================
 
-pub fn makeDir(fs: fs_mod.FileSystem, path: [:0]const u8) !void {
-    _ = try fs.makeDir(path);
+pub fn makeDir(fs: fs_mod.FileSystem, path: [:0]const u8) !bool {
+    return fs.makeDir(path);
 }
 
 pub fn syncDirectory(fs: fs_mod.FileSystem, path: [:0]const u8) !void {

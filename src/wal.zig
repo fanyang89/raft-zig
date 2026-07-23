@@ -384,7 +384,12 @@ pub const WAL = struct {
 
     pub fn open(allocator: std.mem.Allocator, config: WALConfig) !WAL {
         // Create directory if it does not exist.
-        try segment_mod.makeDir(config.fs, config.dir);
+        if (try segment_mod.makeDir(config.fs, config.dir)) {
+            const parent = std.fs.path.dirname(config.dir) orelse ".";
+            const parent_z = try allocator.dupeZ(u8, parent);
+            defer allocator.free(parent_z);
+            try config.fs.syncDir(parent_z);
+        }
 
         var sm = try segment_manager_mod.SegmentManager.init(allocator, config.fs, config.dir);
         var owns_sm = true;
@@ -1229,7 +1234,7 @@ test "wal: segment discovery accepts a compacted prefix" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery";
     removeWALDir(allocator, dir);
-    try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
 
     const metadata_path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery/metadata";
     try createEmptyFile(metadata_path);
@@ -1259,7 +1264,7 @@ test "wal: segment discovery rejects a mismatched header id" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-id-mismatch";
     removeWALDir(allocator, dir);
-    try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 2);
@@ -1280,7 +1285,7 @@ test "wal: segment rejects truncated header" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-truncated-header";
     removeWALDir(allocator, dir);
-    try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 1);
@@ -1298,7 +1303,7 @@ test "wal: segment close is idempotent" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-close";
     removeWALDir(allocator, dir);
-    try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
     const segment = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 1, 1);
