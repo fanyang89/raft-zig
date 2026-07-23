@@ -277,6 +277,7 @@ pub const Raftor = struct {
                     try self.allocator.dupe(u64, &.{self.config.nodeId()});
                 defer self.allocator.free(voters);
                 try self.storage.setConfState(self.allocator, .{ .voters = voters });
+                try self.storage.sync();
             },
             .restart => {
                 if (confStateIsEmpty(state.conf_state)) return error.IncompatibleStorage;
@@ -579,7 +580,7 @@ fn openStorage(allocator: std.mem.Allocator, config: RaftorConfig) Error!Storage
     const wal_dir = try allocator.allocSentinel(u8, config.data_dir.len, 0);
     defer allocator.free(wal_dir);
     @memcpy(wal_dir[0..config.data_dir.len], config.data_dir);
-    return .{ .wal = WALStorage.open(allocator, wal_dir) catch return error.OutOfMemory };
+    return .{ .wal = try WALStorage.open(allocator, wal_dir) };
 }
 
 fn detectStartupMode(allocator: std.mem.Allocator, storage: storage_mod.WritableStorage) Error!StartupMode {

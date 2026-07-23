@@ -345,10 +345,11 @@ pub const WAL = struct {
 
     pub fn open(allocator: std.mem.Allocator, config: WALConfig) !WAL {
         // Create directory if it does not exist.
-        segment_mod.makeDir(config.dir) catch {};
+        try segment_mod.makeDir(config.dir);
 
         var sm = try segment_manager_mod.SegmentManager.init(allocator, config.dir);
-        errdefer sm.deinit();
+        var owns_sm = true;
+        errdefer if (owns_sm) sm.deinit();
 
         // If no segments exist, create the first one.
         if (sm.getCurrent() == null) {
@@ -368,6 +369,8 @@ pub const WAL = struct {
             .snapshot_metadata = .{},
             .first_index = 1,
         };
+        owns_sm = false;
+        errdefer wal.deinit();
 
         try wal.recover();
 
@@ -459,10 +462,13 @@ pub const WAL = struct {
 
     pub fn append(self: *WAL, entries: []const Entry) !void {
         for (entries) |entry| {
+            var cloned = try cloneEntry(self.allocator, entry);
+            errdefer cloned.deinit(self.allocator);
+            try self.entries.ensureUnusedCapacity(self.allocator, 1);
             const payload = try serializeEntry(self.allocator, entry);
             defer self.allocator.free(payload);
             try self.writeRecord(.entry, payload);
-            self.entries.append(self.allocator, try cloneEntry(self.allocator, entry)) catch {};
+            self.entries.appendAssumeCapacity(cloned);
         }
     }
 
@@ -473,11 +479,13 @@ pub const WAL = struct {
     }
 
     pub fn saveConfState(self: *WAL, cs: ConfState) !void {
+        var cloned = try cloneConfState(self.allocator, cs);
+        errdefer cloned.deinit(self.allocator);
         const payload = try serializeConfState(self.allocator, cs);
         defer self.allocator.free(payload);
         try self.writeRecord(.conf_state, payload);
         self.conf_state.deinit(self.allocator);
-        self.conf_state = try cloneConfState(self.allocator, cs);
+        self.conf_state = cloned;
     }
 
     pub fn saveSnapshotMetadata(self: *WAL, meta: SnapshotMetadata) !void {
@@ -490,7 +498,7 @@ pub const WAL = struct {
     }
 
     pub fn sync(self: *WAL) !void {
-        self.segment_manager.syncAll();
+        try self.segment_manager.syncAll();
     }
 
     pub fn close(self: *WAL) !void {
@@ -522,7 +530,7 @@ pub const WAL = struct {
             }
         }
         if (min_surviving_id != std.math.maxInt(u64) and min_surviving_id > 1) {
-            self.segment_manager.removeSegmentsBefore(min_surviving_id);
+            try self.segment_manager.removeSegmentsBefore(min_surviving_id);
         }
     }
 
@@ -589,11 +597,11 @@ pub const WALStorage = struct {
     wal: WAL,
     allocator: std.mem.Allocator,
 
-    pub fn open(allocator: std.mem.Allocator, dir: [:0]const u8) !*WALStorage {
+    pub fn open(allocator: std.mem.Allocator, dir: [:0]const u8) Error!*WALStorage {
         const self = try allocator.create(WALStorage);
         errdefer allocator.destroy(self);
         self.* = .{
-            .wal = try WAL.open(allocator, .{ .dir = dir }),
+            .wal = WAL.open(allocator, .{ .dir = dir }) catch |err| return mapError(err),
             .allocator = allocator,
         };
         return self;
@@ -639,36 +647,38 @@ pub const WALStorage = struct {
     fn append_impl(ctx: *anyopaque, allocator: std.mem.Allocator, to_append: []const Entry) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.append(to_append) catch return error.OutOfMemory;
+        self.wal.append(to_append) catch |err| return mapError(err);
     }
 
     fn set_hard_state_impl(ctx: *anyopaque, hs: HardState) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
-        self.wal.saveHardState(hs) catch return error.OutOfMemory;
+        self.wal.saveHardState(hs) catch |err| return mapError(err);
     }
 
     fn set_conf_state_impl(ctx: *anyopaque, allocator: std.mem.Allocator, cs: ConfState) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.saveConfState(cs) catch return error.OutOfMemory;
+        self.wal.saveConfState(cs) catch |err| return mapError(err);
     }
 
     fn apply_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
+        self.wal.saveSnapshotMetadata(snap.metadata) catch |err| return mapError(err);
     }
 
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.saveSnapshotMetadata(snap.metadata) catch return error.OutOfMemory;
-        self.wal.compact(snap.metadata.index + 1) catch return error.OutOfMemory;
+        self.wal.saveSnapshotMetadata(snap.metadata) catch |err| return mapError(err);
+        self.wal.sync() catch |err| return mapError(err);
+        self.wal.compact(snap.metadata.index + 1) catch |err| return mapError(err);
+        self.wal.sync() catch |err| return mapError(err);
     }
 
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
-        self.wal.sync() catch return error.OutOfMemory;
+        self.wal.sync() catch |err| return mapError(err);
     }
 
     pub const writable_vtable: WritableStorage.VTable = .{
@@ -701,6 +711,28 @@ pub const WALStorage = struct {
         } };
     }
 };
+
+fn mapError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.FileNotFound, error.OpenFailed => error.WalOpenFailed,
+        error.ReadFailed => error.WalReadFailed,
+        error.WriteFailed => error.WalWriteFailed,
+        error.SyncFailed, error.DirectorySyncFailed => error.WalSyncFailed,
+        error.TruncateFailed => error.WalTruncateFailed,
+        error.UnlinkFailed => error.WalDeleteFailed,
+        error.StatFailed => error.WalStatFailed,
+        error.MkdirFailed => error.WalCreateDirectoryFailed,
+        error.InvalidSegmentHeader => error.InvalidSegmentHeader,
+        error.SegmentNotOpen => error.SegmentNotOpen,
+        error.HardStateParseError => error.HardStateParseError,
+        error.ConfStateParseError => error.ConfStateParseError,
+        error.EntryParseError => error.EntryParseError,
+        error.RecordTooLarge => error.MessageTooLarge,
+        error.Fatal => error.Fatal,
+        else => error.CorruptEntryRecord,
+    };
+}
 
 // ===========================================================================
 // Tests
@@ -806,13 +838,78 @@ const linux = std.os.linux;
 fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
     // Best-effort: scan directory and delete segment files.
     var sm = segment_manager_mod.SegmentManager.init(allocator, dir) catch return;
-    sm.removeAllSegments();
+    sm.removeAllSegments() catch {};
     sm.deinit();
     _ = linux.rmdir(dir.ptr);
 }
 
 fn removeFile(path: [:0]const u8) void {
     _ = linux.unlink(path.ptr);
+}
+
+test "wal: segment rejects truncated header" {
+    const allocator = std.testing.allocator;
+    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-truncated-header";
+    removeWALDir(allocator, dir);
+    try segment_mod.makeDir(dir);
+    defer _ = linux.rmdir(dir.ptr);
+
+    const path = try segment_mod.makeFilename(allocator, dir, 1);
+    defer allocator.free(path);
+    defer removeFile(path);
+
+    const segment = try segment_mod.Segment.create(allocator, dir, 1, 1);
+    try segment.truncate(24);
+    segment.destroy();
+
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_mod.Segment.open(allocator, path));
+}
+
+test "wal: segment close is idempotent" {
+    const allocator = std.testing.allocator;
+    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-close";
+    removeWALDir(allocator, dir);
+    try segment_mod.makeDir(dir);
+    defer _ = linux.rmdir(dir.ptr);
+
+    const segment = try segment_mod.Segment.create(allocator, dir, 1, 1);
+    defer {
+        segment.unlink() catch {};
+        segment.destroy();
+    }
+
+    segment.close();
+    segment.close();
+    try std.testing.expectError(error.SegmentNotOpen, segment.sync());
+    try std.testing.expectError(error.SegmentNotOpen, segment.append("record"));
+    try std.testing.expectError(error.SegmentNotOpen, segment.truncate(0));
+    var buf: [1]u8 = undefined;
+    try std.testing.expectError(error.SegmentNotOpen, segment.read(&buf, 0));
+}
+
+test "wal: storage sync propagates a closed segment" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-sync-error";
+    removeWALDir(allocator, path);
+
+    {
+        const storage = try WALStorage.open(allocator, path);
+        defer storage.deinit();
+        storage.wal.segment_manager.getCurrent().?.close();
+        try std.testing.expectError(error.SegmentNotOpen, storage.asWritableStorage().sync());
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: storage preserves I/O error categories" {
+    try std.testing.expectEqual(error.WalOpenFailed, mapError(error.OpenFailed));
+    try std.testing.expectEqual(error.WalReadFailed, mapError(error.ReadFailed));
+    try std.testing.expectEqual(error.WalWriteFailed, mapError(error.WriteFailed));
+    try std.testing.expectEqual(error.WalSyncFailed, mapError(error.SyncFailed));
+    try std.testing.expectEqual(error.WalSyncFailed, mapError(error.DirectorySyncFailed));
+    try std.testing.expectEqual(error.WalTruncateFailed, mapError(error.TruncateFailed));
+    try std.testing.expectEqual(error.WalDeleteFailed, mapError(error.UnlinkFailed));
 }
 
 test "wal: open, append, recover" {

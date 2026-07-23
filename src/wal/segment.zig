@@ -13,10 +13,10 @@ const SEGMENT_HEADER_SIZE: usize = 32;
 const segment_magic: u32 = 0x57414C31; // "WAL1"
 const format_version: u32 = 1;
 
-fn errno(rc: usize) i32 {
+fn errno(rc: usize) linux.E {
     const signed: isize = @bitCast(rc);
-    if (signed >= 0) return 0;
-    return @intCast(-signed);
+    if (signed >= 0) return .SUCCESS;
+    return @enumFromInt(-signed);
 }
 
 fn sysOpen(path: [:0]const u8) !linux.fd_t {
@@ -24,49 +24,94 @@ fn sysOpen(path: [:0]const u8) !linux.fd_t {
     // existing segments; creating files during scanning would leave empty
     // files behind when the header check fails.
     const flags: linux.O = .{ .ACCMODE = .RDWR };
-    const rc = linux.open(path.ptr, flags, 0o644);
-    if (errno(rc) != 0) return error.OpenFailed;
-    return @intCast(rc);
+    while (true) {
+        const rc = linux.open(path.ptr, flags, 0o644);
+        switch (errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .NOENT => return error.FileNotFound,
+            else => return error.OpenFailed,
+        }
+    }
 }
 
 fn sysOpenExclusive(path: [:0]const u8) !linux.fd_t {
     const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true };
-    const rc = linux.open(path.ptr, flags, 0o644);
-    const e = errno(rc);
-    if (e != 0) {
-        log.debug("exclusive open failed: path={s}, errno={}", .{ path, e });
-        return error.OpenFailed;
+    while (true) {
+        const rc = linux.open(path.ptr, flags, 0o644);
+        const e = errno(rc);
+        switch (e) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => {
+                log.debug("exclusive open failed: path={s}, errno={}", .{ path, e });
+                return error.OpenFailed;
+            },
+        }
     }
-    return @intCast(rc);
 }
 
 fn sysPwrite(fd: linux.fd_t, data: []const u8, offset: u64) !void {
-    const rc = linux.pwrite(fd, data.ptr, data.len, @intCast(offset));
-    if (errno(rc) != 0) return error.WriteFailed;
-    if (rc < data.len) return error.WriteFailed;
+    var written: usize = 0;
+    while (written < data.len) {
+        const current_offset = std.math.add(u64, offset, @intCast(written)) catch return error.WriteFailed;
+        const signed_offset = std.math.cast(i64, current_offset) orelse return error.WriteFailed;
+        const rc = linux.pwrite(fd, data[written..].ptr, data.len - written, signed_offset);
+        switch (errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+        if (rc == 0) return error.WriteFailed;
+        written += rc;
+    }
 }
 
 fn sysPread(fd: linux.fd_t, buf: []u8, offset: u64) !usize {
-    const rc = linux.pread(fd, buf.ptr, buf.len, @intCast(offset));
-    if (errno(rc) != 0) return error.ReadFailed;
-    return rc;
+    var read_len: usize = 0;
+    while (read_len < buf.len) {
+        const current_offset = std.math.add(u64, offset, @intCast(read_len)) catch return error.ReadFailed;
+        const signed_offset = std.math.cast(i64, current_offset) orelse return error.ReadFailed;
+        const rc = linux.pread(fd, buf[read_len..].ptr, buf.len - read_len, signed_offset);
+        switch (errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+        if (rc == 0) break;
+        read_len += rc;
+    }
+    return read_len;
 }
 
 fn sysFsync(fd: linux.fd_t) !void {
-    const rc = linux.fsync(fd);
-    if (errno(rc) != 0) return error.SyncFailed;
+    while (true) {
+        const rc = linux.fsync(fd);
+        switch (errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.SyncFailed,
+        }
+    }
 }
 
 fn sysFtruncate(fd: linux.fd_t, len: u64) !void {
-    const rc = linux.ftruncate(fd, len);
-    if (errno(rc) != 0) return error.SyncFailed;
+    const signed_len = std.math.cast(i64, len) orelse return error.TruncateFailed;
+    while (true) {
+        const rc = linux.ftruncate(fd, signed_len);
+        switch (errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.TruncateFailed,
+        }
+    }
 }
 
 fn sysFileSize(fd: linux.fd_t) !u64 {
     const cur = linux.lseek(fd, 0, 1); // SEEK_CUR
-    if (errno(cur) != 0) return error.StatFailed;
+    if (errno(cur) != .SUCCESS) return error.StatFailed;
     const end = linux.lseek(fd, 0, 2); // SEEK_END
-    if (errno(end) != 0) return error.StatFailed;
+    if (errno(end) != .SUCCESS) return error.StatFailed;
     _ = linux.lseek(fd, @intCast(cur), 0); // restore
     return @intCast(end);
 }
@@ -75,8 +120,15 @@ fn sysClose(fd: linux.fd_t) void {
     _ = linux.close(fd);
 }
 
-fn sysUnlink(path: [:0]const u8) void {
-    _ = linux.unlink(path.ptr);
+fn sysUnlink(path: [:0]const u8) !void {
+    while (true) {
+        const rc = linux.unlink(path.ptr);
+        switch (errno(rc)) {
+            .SUCCESS, .NOENT => return,
+            .INTR => continue,
+            else => return error.UnlinkFailed,
+        }
+    }
 }
 
 // ===========================================================================
@@ -84,7 +136,7 @@ fn sysUnlink(path: [:0]const u8) void {
 // ===========================================================================
 
 pub const Segment = struct {
-    fd: linux.fd_t,
+    fd: ?linux.fd_t,
     segment_id: u64,
     first_index: u64,
     write_offset: u64,
@@ -104,6 +156,7 @@ pub const Segment = struct {
         errdefer allocator.free(path);
 
         const fd = try sysOpenExclusive(path);
+        errdefer sysUnlink(path) catch {};
         errdefer sysClose(fd);
 
         // Write segment header.
@@ -132,9 +185,7 @@ pub const Segment = struct {
 
         var header: [SEGMENT_HEADER_SIZE]u8 = undefined;
         const n = try sysPread(fd, &header, 0);
-        // Accept at least 24 bytes (magic+version+segment_id+first_index);
-        // the 8 reserved bytes are optional.
-        if (n < 24) return error.InvalidSegmentHeader;
+        if (n != SEGMENT_HEADER_SIZE) return error.InvalidSegmentHeader;
 
         const magic = std.mem.readInt(u32, header[0..4], .little);
         if (magic != segment_magic) return error.InvalidSegmentHeader;
@@ -162,36 +213,37 @@ pub const Segment = struct {
     }
 
     pub fn destroy(self: *Segment) void {
-        sysClose(self.fd);
+        self.close();
         self.allocator.free(self.path);
         self.allocator.destroy(self);
     }
 
     /// Append data at write_offset. Advances the cursor.
     pub fn append(self: *Segment, data: []const u8) !void {
-        try sysPwrite(self.fd, data, self.write_offset);
+        try sysPwrite(try self.openFd(), data, self.write_offset);
         self.write_offset += data.len;
         if (self.write_offset > self.file_size) self.file_size = self.write_offset;
     }
 
     /// Read `buf.len` bytes at the given offset. Returns actual bytes read.
     pub fn read(self: *Segment, buf: []u8, offset: u64) !usize {
-        return sysPread(self.fd, buf, offset);
+        return sysPread(try self.openFd(), buf, offset);
     }
 
     pub fn sync(self: *Segment) !void {
-        try sysFsync(self.fd);
+        try sysFsync(try self.openFd());
     }
 
     /// Truncate the file to the given offset (removes trailing data).
     pub fn truncate(self: *Segment, offset: u64) !void {
-        try sysFtruncate(self.fd, offset);
+        try sysFtruncate(try self.openFd(), offset);
         self.write_offset = offset;
         self.file_size = offset;
     }
 
     pub fn close(self: *Segment) void {
-        sysClose(self.fd);
+        if (self.fd) |fd| sysClose(fd);
+        self.fd = null;
     }
 
     pub fn isFull(self: *const Segment, threshold: u64) bool {
@@ -199,8 +251,12 @@ pub const Segment = struct {
     }
 
     /// Delete the segment file from disk. Called after destroy.
-    pub fn unlink(self: *const Segment) void {
-        sysUnlink(self.path);
+    pub fn unlink(self: *const Segment) !void {
+        try sysUnlink(self.path);
+    }
+
+    fn openFd(self: *const Segment) !linux.fd_t {
+        return self.fd orelse error.SegmentNotOpen;
     }
 };
 
@@ -244,9 +300,28 @@ fn encodeHeader(out: *[SEGMENT_HEADER_SIZE]u8, segment_id: u64, first_index: u64
 // ===========================================================================
 
 pub fn makeDir(path: [:0]const u8) !void {
-    const rc = linux.mkdir(path.ptr, 0o755);
-    const e = errno(rc);
-    if (e != 0 and e != 17) return error.MkdirFailed; // 17 = EEXIST
+    while (true) {
+        const rc = linux.mkdir(path.ptr, 0o755);
+        switch (errno(rc)) {
+            .SUCCESS, .EXIST => return,
+            .INTR => continue,
+            else => return error.MkdirFailed,
+        }
+    }
+}
+
+pub fn syncDirectory(path: [:0]const u8) !void {
+    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    const fd: linux.fd_t = while (true) {
+        const rc = linux.open(path.ptr, flags, 0);
+        switch (errno(rc)) {
+            .SUCCESS => break @intCast(rc),
+            .INTR => continue,
+            else => return error.DirectorySyncFailed,
+        }
+    };
+    defer sysClose(fd);
+    sysFsync(fd) catch return error.DirectorySyncFailed;
 }
 
 /// Remove all files in a directory (used for test cleanup).

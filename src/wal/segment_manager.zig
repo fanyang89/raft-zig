@@ -33,6 +33,7 @@ pub const SegmentEntry = struct {
 pub const SegmentManager = struct {
     segments: std.ArrayList(SegmentEntry),
     current_segment_id: u64 = 0,
+    directory_dirty: bool = false,
     dir: [:0]u8,
     allocator: std.mem.Allocator,
 
@@ -43,6 +44,7 @@ pub const SegmentManager = struct {
             .dir = dir_copy,
             .allocator = allocator,
         };
+        errdefer sm.deinit();
         try sm.scanDirectory();
         return sm;
     }
@@ -59,12 +61,15 @@ pub const SegmentManager = struct {
         // the complexity of getdents64.
         var sid: u64 = 1;
         while (true) {
-            const path = segment_mod.makeFilename(self.allocator, self.dir, sid) catch break;
+            const path = try segment_mod.makeFilename(self.allocator, self.dir, sid);
             defer self.allocator.free(path);
-            const seg = Segment.open(self.allocator, path) catch break;
-            self.segments.append(self.allocator, .{ .id = sid, .segment = seg }) catch {
+            const seg = Segment.open(self.allocator, path) catch |err| switch (err) {
+                error.FileNotFound => break,
+                else => return err,
+            };
+            self.segments.append(self.allocator, .{ .id = sid, .segment = seg }) catch |err| {
                 seg.destroy();
-                break;
+                return err;
             };
             self.current_segment_id = sid;
             sid += 1;
@@ -80,38 +85,45 @@ pub const SegmentManager = struct {
     }
 
     pub fn rollToNew(self: *SegmentManager, first_index: u64) !*Segment {
-        if (self.getCurrent()) |cur| cur.sync() catch {};
+        if (self.getCurrent()) |cur| try cur.sync();
+        try self.segments.ensureUnusedCapacity(self.allocator, 1);
         const new_id = self.current_segment_id + 1;
         const seg = try Segment.create(self.allocator, self.dir, new_id, first_index);
-        try self.segments.append(self.allocator, .{ .id = new_id, .segment = seg });
+        self.segments.appendAssumeCapacity(.{ .id = new_id, .segment = seg });
         self.current_segment_id = new_id;
+        self.directory_dirty = true;
         return seg;
     }
 
-    pub fn removeSegmentsBefore(self: *SegmentManager, before_id: u64) void {
+    pub fn removeSegmentsBefore(self: *SegmentManager, before_id: u64) !void {
         var i: usize = 0;
         while (i < self.segments.items.len) {
             if (self.segments.items[i].id < before_id) {
-                self.segments.items[i].segment.unlink();
+                try self.segments.items[i].segment.unlink();
                 self.segments.items[i].segment.destroy();
                 _ = self.segments.orderedRemove(i);
+                self.directory_dirty = true;
             } else {
                 i += 1;
             }
         }
     }
 
-    pub fn removeAllSegments(self: *SegmentManager) void {
-        for (self.segments.items) |entry| {
-            entry.segment.unlink();
+    pub fn removeAllSegments(self: *SegmentManager) !void {
+        while (self.segments.items.len > 0) {
+            const entry = self.segments.items[0];
+            try entry.segment.unlink();
             entry.segment.destroy();
+            _ = self.segments.orderedRemove(0);
+            self.directory_dirty = true;
         }
-        self.segments.clearRetainingCapacity();
         self.current_segment_id = 0;
+        try self.syncDirectoryIfDirty();
     }
 
-    pub fn syncAll(self: *SegmentManager) void {
-        for (self.segments.items) |entry| entry.segment.sync() catch {};
+    pub fn syncAll(self: *SegmentManager) !void {
+        for (self.segments.items) |entry| try entry.segment.sync();
+        try self.syncDirectoryIfDirty();
     }
 
     pub fn closeAll(self: *SegmentManager) void {
@@ -134,5 +146,11 @@ pub const SegmentManager = struct {
             if (entry.id == id) return entry.segment;
         }
         return null;
+    }
+
+    fn syncDirectoryIfDirty(self: *SegmentManager) !void {
+        if (!self.directory_dirty) return;
+        try segment_mod.syncDirectory(self.dir);
+        self.directory_dirty = false;
     }
 };

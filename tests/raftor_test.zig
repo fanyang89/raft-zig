@@ -12,6 +12,84 @@ const RaftorConfig = raft.RaftorConfig;
 const MockStateMachine = raft.MockStateMachine;
 const StateRole = raft.StateRole;
 
+const SyncFailingStorage = struct {
+    inner: raft.WritableStorage,
+    fail_sync: bool = false,
+
+    fn cast(ctx: *anyopaque) *SyncFailingStorage {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn initialState(ctx: *anyopaque, alloc: std.mem.Allocator) raft.Error!raft.RaftState {
+        return cast(ctx).inner.initialState(alloc);
+    }
+
+    fn entries(ctx: *anyopaque, alloc: std.mem.Allocator, low: u64, high: u64, max_size: ?u64, request_ctx: raft.GetEntriesContext) raft.Error![]raft.Entry {
+        return cast(ctx).inner.entries(alloc, low, high, max_size, request_ctx);
+    }
+
+    fn term(ctx: *anyopaque, index: u64) raft.Error!u64 {
+        return cast(ctx).inner.term(index);
+    }
+
+    fn firstIndex(ctx: *anyopaque) raft.Error!u64 {
+        return cast(ctx).inner.firstIndex();
+    }
+
+    fn lastIndex(ctx: *anyopaque) raft.Error!u64 {
+        return cast(ctx).inner.lastIndex();
+    }
+
+    fn getSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, request_index: u64, to: u64) raft.Error!raft.Snapshot {
+        return cast(ctx).inner.getSnapshot(alloc, request_index, to);
+    }
+
+    fn append(ctx: *anyopaque, alloc: std.mem.Allocator, values: []const raft.Entry) raft.Error!void {
+        return cast(ctx).inner.append(alloc, values);
+    }
+
+    fn setHardState(ctx: *anyopaque, hard_state: raft.HardState) raft.Error!void {
+        return cast(ctx).inner.setHardState(hard_state);
+    }
+
+    fn setConfState(ctx: *anyopaque, alloc: std.mem.Allocator, conf_state: raft.ConfState) raft.Error!void {
+        return cast(ctx).inner.setConfState(alloc, conf_state);
+    }
+
+    fn applySnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, snapshot: raft.Snapshot) raft.Error!void {
+        return cast(ctx).inner.applySnapshot(alloc, snapshot);
+    }
+
+    fn applyLocalSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, snapshot: raft.Snapshot) raft.Error!void {
+        return cast(ctx).inner.applyLocalSnapshot(alloc, snapshot);
+    }
+
+    fn sync(ctx: *anyopaque) raft.Error!void {
+        const self = cast(ctx);
+        if (self.fail_sync) return error.WalSyncFailed;
+        return self.inner.sync();
+    }
+
+    fn writableStorage(self: *SyncFailingStorage) raft.WritableStorage {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    const vtable: raft.WritableStorage.VTable = .{
+        .initial_state = initialState,
+        .entries = entries,
+        .term = term,
+        .first_index = firstIndex,
+        .last_index = lastIndex,
+        .get_snapshot = getSnapshot,
+        .append = append,
+        .set_hard_state = setHardState,
+        .set_conf_state = setConfState,
+        .apply_snapshot = applySnapshot,
+        .apply_local_snapshot = applyLocalSnapshot,
+        .sync_ = sync,
+    };
+};
+
 fn makeConfig(id: u64) RaftorConfig {
     var rc = RaftorConfig{};
     rc.raft.id = id;
@@ -375,6 +453,60 @@ test "raftor: Ready persistence resumes at the failed phase" {
     try std.testing.expect(try r.tick());
     try std.testing.expectEqual(@as(?raft.ReadyPhase, null), r.getReadyPhase());
     try std.testing.expect(r.isLeader());
+}
+
+test "raftor: bootstrap sync failure aborts creation" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{
+        .inner = storage.asWritableStorage(),
+        .fail_sync = true,
+    };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    try std.testing.expectError(
+        error.WalSyncFailed,
+        Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+            .storage = failing_storage.writableStorage(),
+            .transport = transport.transport(),
+            .state_machine = sm.stateMachine(),
+        }),
+    );
+}
+
+test "raftor: Ready sync failure blocks send and apply" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    failing_storage.fail_sync = true;
+    try r.getRawNode().campaign();
+
+    while (r.getReadyPhase() != raft.ReadyPhase.sync) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    try std.testing.expectError(error.WalSyncFailed, r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.sync, r.getReadyPhase().?);
+    try std.testing.expectEqual(@as(usize, 0), sm.applied.items.len);
+
+    failing_storage.fail_sync = false;
+    while (r.getReadyPhase() != null) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    try std.testing.expectEqual(@as(usize, 1), sm.applied.items.len);
 }
 
 test "raftor: advanced commit survives restart" {
