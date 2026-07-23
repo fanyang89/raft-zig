@@ -70,6 +70,11 @@ pub const WALIndex = struct {
     pub fn setFirstIndex(self: *WALIndex, index: u64) void {
         self.first_index = index;
     }
+
+    pub fn reset(self: *WALIndex, first_index: u64) void {
+        self.entries.clearRetainingCapacity();
+        self.first_index = first_index;
+    }
 };
 
 test "WALIndex inserts and truncates locations" {

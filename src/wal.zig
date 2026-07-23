@@ -363,6 +363,7 @@ pub const WAL = struct {
     segment_size: u64,
     segment_manager: segment_manager_mod.SegmentManager,
     metadata_store: metadata_store_mod.MetadataStore,
+    snapshot_store: snapshot_store_mod.SnapshotStore,
     metadata_dirty: bool,
     wal_index: wal_index_mod.WALIndex,
 
@@ -371,6 +372,7 @@ pub const WAL = struct {
     hard_state: HardState,
     conf_state: ConfState,
     snapshot_metadata: SnapshotMetadata,
+    snapshot: ?Snapshot,
     first_index: u64,
 
     pub fn open(allocator: std.mem.Allocator, config: WALConfig) !WAL {
@@ -383,6 +385,9 @@ pub const WAL = struct {
         var metadata_store = try metadata_store_mod.MetadataStore.init(allocator, config.dir);
         var owns_metadata_store = true;
         errdefer if (owns_metadata_store) metadata_store.deinit();
+        var snapshot_store = try snapshot_store_mod.SnapshotStore.init(allocator, config.dir);
+        var owns_snapshot_store = true;
+        errdefer if (owns_snapshot_store) snapshot_store.deinit();
 
         // If no segments exist, create the first one.
         if (sm.getCurrent() == null) {
@@ -397,16 +402,19 @@ pub const WAL = struct {
             .segment_size = config.segment_size,
             .segment_manager = sm,
             .metadata_store = metadata_store,
+            .snapshot_store = snapshot_store,
             .metadata_dirty = false,
             .wal_index = wal_index_mod.WALIndex.init(allocator),
             .entries = .empty,
             .hard_state = .{},
             .conf_state = .{},
             .snapshot_metadata = .{},
+            .snapshot = null,
             .first_index = 1,
         };
         owns_sm = false;
         owns_metadata_store = false;
+        owns_snapshot_store = false;
         errdefer wal.deinit();
 
         try wal.recover();
@@ -419,11 +427,13 @@ pub const WAL = struct {
     pub fn deinit(self: *WAL) void {
         self.segment_manager.deinit();
         self.metadata_store.deinit();
+        self.snapshot_store.deinit();
         self.wal_index.deinit();
         for (self.entries.items) |*e| e.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.conf_state.deinit(self.allocator);
         self.snapshot_metadata.deinit(self.allocator);
+        if (self.snapshot) |*snapshot| snapshot.deinit(self.allocator);
         self.allocator.free(self.dir);
         self.* = undefined;
     }
@@ -441,6 +451,14 @@ pub const WAL = struct {
             };
             if (metadata.hard_state.len > 0) self.hard_state = try deserializeHardState(metadata.hard_state);
             if (metadata.conf_state.len > 0) self.conf_state = try deserializeConfState(self.allocator, metadata.conf_state);
+            if (metadata.first_segment_id > 0 and self.segment_manager.get(metadata.first_segment_id) == null) return error.MetadataCorrupt;
+            if (metadata.snapshot_index > 0) {
+                const snapshot = self.snapshot_store.load(metadata.snapshot_index, metadata.snapshot_term) catch |err| return switch (err) {
+                    error.FileNotFound => error.MetadataCorrupt,
+                    else => err,
+                };
+                self.snapshot = snapshot;
+            }
         }
 
         const segs = self.segment_manager.segments.items;
@@ -449,6 +467,9 @@ pub const WAL = struct {
             self.wal_index.setFirstIndex(self.first_index);
         }
         for (segs, 0..) |entry, segment_index| {
+            if (persisted_metadata) |metadata| {
+                if (metadata.first_segment_id > 0 and entry.id < metadata.first_segment_id) continue;
+            }
             const seg = entry.segment;
             const body_size = seg.file_size - SEGMENT_HEADER_SIZE;
             if (body_size == 0) continue;
@@ -529,6 +550,7 @@ pub const WAL = struct {
             }
         }
 
+        if (!has_metadata and self.snapshot_metadata.index > 0) return error.MetadataCorrupt;
         if (!has_metadata and self.entries.items.len > 0) {
             self.first_index = self.entries.items[0].index;
             self.wal_index.setFirstIndex(self.first_index);
@@ -629,14 +651,82 @@ pub const WAL = struct {
         self.metadata_dirty = true;
     }
 
-    pub fn saveSnapshotMetadata(self: *WAL, meta: SnapshotMetadata) !void {
-        var payload: [16]u8 = undefined;
-        std.mem.writeInt(u64, payload[0..8], meta.index, .little);
-        std.mem.writeInt(u64, payload[8..16], meta.term, .little);
-        _ = try self.writeRecord(.snapshot, &payload);
-        self.snapshot_metadata.deinit(self.allocator);
-        self.snapshot_metadata = .{ .index = meta.index, .term = meta.term };
-        self.metadata_dirty = true;
+    pub fn applySnapshot(self: *WAL, snapshot: Snapshot) !void {
+        const metadata = snapshot.metadata;
+        if (metadata.index <= self.snapshot_metadata.index) return error.SnapshotOutOfDate;
+        const first_index = std.math.add(u64, metadata.index, 1) catch return error.Fatal;
+        var cloned_snapshot = try cloneSnapshot(self.allocator, snapshot);
+        errdefer cloned_snapshot.deinit(self.allocator);
+        var cloned_conf_state = try cloneConfState(self.allocator, metadata.conf_state);
+        errdefer cloned_conf_state.deinit(self.allocator);
+        var hard_state = self.hard_state;
+        hard_state.term = @max(hard_state.term, metadata.term);
+        hard_state.commit = @max(hard_state.commit, metadata.index);
+
+        const reset_segment = try self.segment_manager.rollToNew(first_index);
+        try self.segment_manager.syncAll();
+        try self.snapshot_store.save(snapshot);
+        try self.persistMetadataState(first_index, reset_segment.segment_id, hard_state, metadata.conf_state, metadata);
+
+        const old_snapshot_metadata = self.snapshot_metadata;
+        if (self.snapshot) |*old| old.deinit(self.allocator);
+        self.snapshot = cloned_snapshot;
+        self.snapshot_metadata = .{ .index = metadata.index, .term = metadata.term };
+        self.conf_state.deinit(self.allocator);
+        self.conf_state = cloned_conf_state;
+        self.hard_state = hard_state;
+        for (self.entries.items) |*entry| entry.deinit(self.allocator);
+        self.entries.clearRetainingCapacity();
+        self.wal_index.reset(first_index);
+        self.first_index = first_index;
+        self.metadata_dirty = false;
+
+        self.segment_manager.removeSegmentsBefore(reset_segment.segment_id) catch |err| {
+            log.warn("failed to remove WAL segments before incoming snapshot: {s}", .{@errorName(err)});
+        };
+        self.segment_manager.syncAll() catch |err| {
+            log.warn("failed to sync WAL directory after incoming snapshot: {s}", .{@errorName(err)});
+        };
+        self.removeOldSnapshot(old_snapshot_metadata);
+    }
+
+    pub fn applyLocalSnapshot(self: *WAL, snapshot: Snapshot) !void {
+        const metadata = snapshot.metadata;
+        if (metadata.index <= self.snapshot_metadata.index or metadata.index < self.first_index) return error.SnapshotOutOfDate;
+        if (metadata.index > self.lastIndex()) return error.Fatal;
+        if (try self.term(metadata.index) != metadata.term) return error.Fatal;
+        const first_index = std.math.add(u64, metadata.index, 1) catch return error.Fatal;
+        var cloned_snapshot = try cloneSnapshot(self.allocator, snapshot);
+        errdefer cloned_snapshot.deinit(self.allocator);
+        var cloned_conf_state = try cloneConfState(self.allocator, metadata.conf_state);
+        errdefer cloned_conf_state.deinit(self.allocator);
+        var hard_state = self.hard_state;
+        hard_state.term = @max(hard_state.term, metadata.term);
+        hard_state.commit = @max(hard_state.commit, metadata.index);
+
+        try self.segment_manager.syncAll();
+        try self.snapshot_store.save(snapshot);
+        try self.persistMetadataState(
+            first_index,
+            try self.firstSegmentIdFor(first_index),
+            hard_state,
+            metadata.conf_state,
+            metadata,
+        );
+
+        const old_snapshot_metadata = self.snapshot_metadata;
+        if (self.snapshot) |*old| old.deinit(self.allocator);
+        self.snapshot = cloned_snapshot;
+        self.snapshot_metadata = .{ .index = metadata.index, .term = metadata.term };
+        self.conf_state.deinit(self.allocator);
+        self.conf_state = cloned_conf_state;
+        self.hard_state = hard_state;
+        self.compactMemory(first_index);
+        self.metadata_dirty = false;
+        self.cleanupCompactedSegments() catch |err| {
+            log.warn("failed to remove WAL segments after local snapshot: {s}", .{@errorName(err)});
+        };
+        self.removeOldSnapshot(old_snapshot_metadata);
     }
 
     pub fn sync(self: *WAL) !void {
@@ -662,15 +752,7 @@ pub const WAL = struct {
 
         try self.segment_manager.syncAll();
         try self.persistMetadata(compact_index);
-
-        // Remove entries from memory.
-        const drop_count: usize = @intCast(compact_index - self.firstIndex());
-        var i: usize = 0;
-        while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
-        std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
-        self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
-        self.wal_index.truncateBefore(compact_index);
-        self.first_index = compact_index;
+        self.compactMemory(compact_index);
         self.metadata_dirty = false;
         try self.cleanupCompactedSegments();
     }
@@ -730,16 +812,58 @@ pub const WAL = struct {
     }
 
     fn persistMetadata(self: *WAL, first_index: u64) !void {
-        const hard_state = serializeHardState(self.hard_state);
-        const conf_state = try serializeConfState(self.allocator, self.conf_state);
+        try self.persistMetadataState(
+            first_index,
+            try self.firstSegmentIdFor(first_index),
+            self.hard_state,
+            self.conf_state,
+            self.snapshot_metadata,
+        );
+    }
+
+    fn persistMetadataState(
+        self: *WAL,
+        first_index: u64,
+        first_segment_id: u64,
+        hard_state_value: HardState,
+        conf_state_value: ConfState,
+        snapshot_metadata_value: SnapshotMetadata,
+    ) !void {
+        const hard_state = serializeHardState(hard_state_value);
+        const conf_state = try serializeConfState(self.allocator, conf_state_value);
         defer self.allocator.free(conf_state);
         try self.metadata_store.save(.{
             .first_index = first_index,
-            .snapshot_index = self.snapshot_metadata.index,
-            .snapshot_term = self.snapshot_metadata.term,
+            .snapshot_index = snapshot_metadata_value.index,
+            .snapshot_term = snapshot_metadata_value.term,
+            .first_segment_id = first_segment_id,
             .hard_state = @constCast(hard_state[0..]),
             .conf_state = conf_state,
         });
+    }
+
+    fn firstSegmentIdFor(self: *WAL, first_index: u64) !u64 {
+        if (first_index <= self.lastIndex()) {
+            return (self.wal_index.lookup(first_index) orelse return error.Fatal).segment_id;
+        }
+        return self.segment_manager.current_segment_id;
+    }
+
+    fn compactMemory(self: *WAL, compact_index: u64) void {
+        const drop_count: usize = @intCast(compact_index - self.firstIndex());
+        var i: usize = 0;
+        while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
+        std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
+        self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
+        self.wal_index.truncateBefore(compact_index);
+        self.first_index = compact_index;
+    }
+
+    fn removeOldSnapshot(self: *WAL, metadata: SnapshotMetadata) void {
+        if (metadata.index == 0 or metadata.index == self.snapshot_metadata.index) return;
+        self.snapshot_store.remove(metadata.index, metadata.term) catch |err| {
+            log.warn("failed to remove superseded WAL snapshot: {s}", .{@errorName(err)});
+        };
     }
 
     fn truncateSuffixFrom(self: *WAL, index: u64) !void {
@@ -827,8 +951,11 @@ pub const WALStorage = struct {
         return self.wal.lastIndex();
     }
 
-    fn get_snapshot_impl(_: *anyopaque, _: std.mem.Allocator, _: u64, _: u64) Error!Snapshot {
-        return error.SnapshotTemporarilyUnavailable;
+    fn get_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, request_index: u64, _: u64) Error!Snapshot {
+        const self: *WALStorage = @ptrCast(@alignCast(ctx));
+        const snapshot = self.wal.snapshot orelse return error.SnapshotTemporarilyUnavailable;
+        if (snapshot.metadata.index < request_index) return error.SnapshotTemporarilyUnavailable;
+        return cloneSnapshot(allocator, snapshot);
     }
 
     fn append_impl(ctx: *anyopaque, allocator: std.mem.Allocator, to_append: []const Entry) Error!void {
@@ -851,20 +978,19 @@ pub const WALStorage = struct {
     fn apply_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.saveSnapshotMetadata(snap.metadata) catch |err| return mapError(err);
+        self.wal.applySnapshot(snap) catch |err| return mapError(err);
     }
 
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
-        self.wal.saveSnapshotMetadata(snap.metadata) catch |err| return mapError(err);
-        self.wal.sync() catch |err| return mapError(err);
-        self.wal.compact(snap.metadata.index + 1) catch |err| return mapError(err);
-        self.wal.sync() catch |err| return mapError(err);
+        self.wal.applyLocalSnapshot(snap) catch |err| return mapError(err);
     }
 
-    fn local_snapshot_impl(_: *anyopaque, _: std.mem.Allocator) Error!?Snapshot {
-        return null;
+    fn local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator) Error!?Snapshot {
+        const self: *WALStorage = @ptrCast(@alignCast(ctx));
+        const snapshot = self.wal.snapshot orelse return null;
+        return try cloneSnapshot(allocator, snapshot);
     }
 
     fn sync_impl(ctx: *anyopaque) Error!void {
@@ -924,6 +1050,7 @@ fn mapError(err: anyerror) Error {
         error.ConfStateParseError => error.ConfStateParseError,
         error.EntryParseError => error.EntryParseError,
         error.RecordTooLarge => error.MessageTooLarge,
+        error.SnapshotOutOfDate => error.SnapshotOutOfDate,
         error.Fatal => error.Fatal,
         else => error.CorruptEntryRecord,
     };
@@ -1389,6 +1516,7 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
         // Apply local snapshot at index 2 → should compact entries 1..2.
         const voters = try allocator.dupe(u64, &.{1});
         var snap = Snapshot{
+            .data = try allocator.dupe(u8, "local-state"),
             .metadata = .{ .index = 2, .term = 1, .conf_state = .{ .voters = voters } },
         };
         defer snap.deinit(allocator);
@@ -1400,6 +1528,104 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
         try std.testing.expectEqual(@as(u64, 4), try ws_iface.lastIndex());
     }
 
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try std.testing.expectEqual(@as(u64, 3), try iface.firstIndex());
+        try std.testing.expectEqual(@as(u64, 4), try iface.lastIndex());
+        try std.testing.expectEqual(@as(u64, 1), try iface.term(2));
+        var snapshot = (try iface.localSnapshot(allocator)).?;
+        defer snapshot.deinit(allocator);
+        try std.testing.expectEqualStrings("local-state", snapshot.data);
+        try std.testing.expectEqualSlices(u64, &.{1}, snapshot.metadata.conf_state.voters);
+        const entries = try iface.entries(allocator, 3, 5, null, .{ .empty = .{ .can_async = false } });
+        defer {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+        try std.testing.expectEqual(@as(usize, 2), entries.len);
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: incoming snapshot replaces the previous log generation" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-incoming-snapshot";
+    removeWALDir(allocator, path);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try iface.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+            .{ .index = 3, .term = 2 },
+            .{ .index = 4, .term = 2, .data = @constCast("obsolete") },
+        });
+        try iface.setHardState(.{ .term = 2, .vote = 1, .commit = 2 });
+        var snapshot = Snapshot{
+            .data = try allocator.dupe(u8, "remote-state"),
+            .metadata = .{
+                .index = 3,
+                .term = 5,
+                .conf_state = .{
+                    .voters = try allocator.dupe(u64, &.{ 1, 2, 3 }),
+                    .learners = try allocator.dupe(u64, &.{4}),
+                },
+            },
+        };
+        defer snapshot.deinit(allocator);
+        try iface.applySnapshot(allocator, snapshot);
+        try std.testing.expectEqual(@as(u64, 4), try iface.firstIndex());
+        try std.testing.expectEqual(@as(u64, 3), try iface.lastIndex());
+    }
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try std.testing.expectEqual(@as(u64, 4), try iface.firstIndex());
+        try std.testing.expectEqual(@as(u64, 3), try iface.lastIndex());
+        try std.testing.expectEqual(@as(u64, 5), try iface.term(3));
+        var snapshot = (try iface.localSnapshot(allocator)).?;
+        defer snapshot.deinit(allocator);
+        try std.testing.expectEqualStrings("remote-state", snapshot.data);
+        try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, snapshot.metadata.conf_state.voters);
+        const state = try iface.initialState(allocator);
+        var owned_state = state;
+        defer owned_state.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 5), owned_state.hard_state.term);
+        try std.testing.expectEqual(@as(u64, 3), owned_state.hard_state.commit);
+        try std.testing.expectEqualSlices(u64, &.{4}, owned_state.conf_state.learners);
+        try iface.append(allocator, &.{.{ .index = 4, .term = 5, .data = @constCast("new") }});
+        try iface.sync();
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery rejects a missing committed snapshot file" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-missing-snapshot";
+    removeWALDir(allocator, path);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try iface.append(allocator, &.{.{ .index = 1, .term = 2 }});
+        var voters = [_]u64{1};
+        try iface.applyLocalSnapshot(allocator, .{
+            .data = @constCast("state"),
+            .metadata = .{ .index = 1, .term = 2, .conf_state = .{ .voters = &voters } },
+        });
+    }
+
+    removeFile("/tmp/raft-zig-wal-test-missing-snapshot/snapshot-1-2.snap");
+    try std.testing.expectError(error.WalMetadataCorrupt, WALStorage.open(allocator, path));
     removeWALDir(allocator, path);
 }
 
@@ -1582,6 +1808,11 @@ test "wal: recovery cleans up every allocation failure" {
         });
         try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
         try wal.sync();
+        var voters = [_]u64{1};
+        try wal.applyLocalSnapshot(.{
+            .data = @constCast("snapshot-state"),
+            .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = &voters } },
+        });
     }
 
     const Recovery = struct {
@@ -1589,6 +1820,8 @@ test "wal: recovery cleans up every allocation failure" {
             var wal = try WAL.open(failing_allocator, .{ .dir = dir, .segment_size = 4096 });
             defer wal.deinit();
             try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
+            try std.testing.expectEqual(@as(u64, 2), wal.firstIndex());
+            try std.testing.expectEqualStrings("snapshot-state", wal.snapshot.?.data);
         }
     };
     try std.testing.checkAllAllocationFailures(allocator, Recovery.run, .{path});

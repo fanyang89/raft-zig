@@ -93,8 +93,8 @@ pub fn removeFiles(allocator: std.mem.Allocator, dir: [:0]const u8) void {
             const name = name_ptr[0..name_len];
             if (isSnapshotFilename(name)) {
                 const path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir, name }, 0) catch return;
-                defer allocator.free(path);
                 unlinkIgnore(path);
+                allocator.free(path);
             }
             offset += entry.reclen;
         }
