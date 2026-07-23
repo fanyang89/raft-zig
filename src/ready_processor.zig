@@ -56,6 +56,8 @@ pub const ReadyPhase = enum {
     apply_committed,
     complete_reads,
     advance,
+    persist_advanced_hard_state,
+    sync_advanced_hard_state,
     send_advanced_messages,
     apply_advanced_committed,
     advance_apply,
@@ -219,6 +221,16 @@ pub const ReadyProcessor = struct {
                     self.fatal_error = err;
                     return err;
                 };
+                pending.phase = .persist_advanced_hard_state;
+            },
+            .persist_advanced_hard_state => {
+                if (pending.light_ready.commit_index != null) {
+                    try self.storage.setHardState(self.raw_node.*.raftConst().hardState());
+                }
+                pending.phase = .sync_advanced_hard_state;
+            },
+            .sync_advanced_hard_state => {
+                if (pending.light_ready.commit_index != null) try self.storage.sync();
                 pending.phase = .send_advanced_messages;
             },
             .send_advanced_messages => {

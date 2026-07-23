@@ -376,3 +376,33 @@ test "raftor: Ready persistence resumes at the failed phase" {
     try std.testing.expectEqual(@as(?raft.ReadyPhase, null), r.getReadyPhase());
     try std.testing.expect(r.isLeader());
 }
+
+test "raftor: advanced commit survives restart" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const dependencies = raft.RaftorDependencies{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    };
+    {
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, dependencies);
+        defer r.destroy();
+        try r.campaign();
+    }
+
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(sm.last_applied_index, state.hard_state.commit);
+
+    var config = makeConfig(1);
+    config.raft.applied = sm.last_applied_index;
+    const restarted = try Raftor.createWithDependencies(allocator, config, .restart, dependencies);
+    defer restarted.destroy();
+    try std.testing.expectEqual(sm.last_applied_index, restarted.getStatus().applied_index);
+}
