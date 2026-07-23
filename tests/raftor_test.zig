@@ -234,6 +234,44 @@ test "raftor: read index completes after apply" {
     try std.testing.expect(read_done);
 }
 
+test "raftor: paged ReadIndex waits for its applied index" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    var config = makeConfig(1);
+    config.raft.max_committed_size_per_ready = 0;
+    const r = try Raftor.create(allocator, config, sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    try r.getRawNode().propose("", "a");
+    try r.getRawNode().propose("", "b");
+    try r.getRawNode().propose("", "c");
+    while (r.getReadyPhase() != raft.ReadyPhase.apply_advanced_committed) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    try std.testing.expectEqual(@as(u64, 4), r.getStatus().commit_index);
+
+    const ReadTester = struct {
+        state_machine: *MockStateMachine,
+        applied_at_completion: ?u64 = null,
+
+        fn cb(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .ok) self.applied_at_completion = self.state_machine.last_applied_index;
+        }
+    };
+    var read = ReadTester{ .state_machine = &sm };
+    try r.readIndex("paged-read", .{ .ctx = &read, .function = ReadTester.cb });
+
+    _ = try r.tick();
+    try std.testing.expect(read.applied_at_completion == null);
+    _ = try r.tick();
+
+    try std.testing.expectEqual(r.getStatus().commit_index, read.applied_at_completion.?);
+    try std.testing.expectEqual(@as(u64, 4), read.applied_at_completion.?);
+}
+
 test "raftor: stop terminates run loop" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();

@@ -57,6 +57,7 @@ const PendingProposal = struct {
 const PendingRead = struct {
     callback: ReadIndexCallback,
     deadline_tick: u64,
+    ready_index: ?u64 = null,
 };
 
 pub const ProposalTracker = struct {
@@ -148,6 +149,26 @@ pub const ProposalTracker = struct {
         const kv = self.reads.fetchRemove(ctx_bytes) orelse return;
         self.allocator.free(kv.key);
         kv.value.callback.invoke(.ok);
+    }
+
+    pub fn markReadReady(self: *ProposalTracker, ctx_bytes: []const u8, index: u64) void {
+        const pending = self.reads.getPtr(ctx_bytes) orelse return;
+        pending.ready_index = if (pending.ready_index) |current| @max(current, index) else index;
+    }
+
+    pub fn completeReadyReads(self: *ProposalTracker, applied_index: u64) void {
+        while (true) {
+            var ready_ctx: ?[]const u8 = null;
+            var it = self.reads.iterator();
+            while (it.next()) |entry| {
+                const ready_index = entry.value_ptr.ready_index orelse continue;
+                if (ready_index <= applied_index) {
+                    ready_ctx = entry.key_ptr.*;
+                    break;
+                }
+            }
+            self.completeRead(ready_ctx orelse return);
+        }
     }
 
     pub fn failRead(self: *ProposalTracker, ctx_bytes: []const u8, err: Error) void {
@@ -296,4 +317,39 @@ test "proposal tracker expire timeouts" {
     tracker.expireTimeouts(150);
     try std.testing.expectEqual(@as(usize, 0), tracker.pendingCount());
     try std.testing.expectEqual(error.Timeout, t.result.?.err);
+}
+
+test "proposal tracker completes ready reads after apply" {
+    const allocator = std.testing.allocator;
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+
+    var read = ReadTester{};
+    try tracker.trackRead("read", read.readCallback(), 0, 0);
+    tracker.markReadReady("read", 5);
+    tracker.completeReadyReads(4);
+    try std.testing.expect(read.result == null);
+    try std.testing.expectEqual(@as(usize, 1), tracker.pendingReadCount());
+
+    tracker.completeReadyReads(5);
+    switch (read.result.?) {
+        .ok => {},
+        .err => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), tracker.pendingReadCount());
+}
+
+test "proposal tracker ignores ready state after read timeout" {
+    const allocator = std.testing.allocator;
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+
+    var read = ReadTester{};
+    try tracker.trackRead("read", read.readCallback(), 0, 1);
+    tracker.expireTimeouts(1);
+    try std.testing.expectEqual(error.Timeout, read.result.?.err);
+
+    tracker.markReadReady("read", 5);
+    tracker.completeReadyReads(5);
+    try std.testing.expectEqual(error.Timeout, read.result.?.err);
 }

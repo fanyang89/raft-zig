@@ -207,7 +207,10 @@ pub const ReadyProcessor = struct {
                 pending.phase = .complete_reads;
             },
             .complete_reads => {
-                for (pending.ready.read_states) |read_state| self.proposal_tracker.completeRead(read_state.request_ctx);
+                for (pending.ready.read_states) |read_state| {
+                    self.proposal_tracker.markReadReady(read_state.request_ctx, read_state.index);
+                }
+                self.proposal_tracker.completeReadyReads(self.applied_index);
                 pending.phase = .advance;
             },
             .advance => {
@@ -308,6 +311,7 @@ pub const ReadyProcessor = struct {
         try self.storage.applySnapshot(self.allocator, snap);
 
         self.applied_index = snap.metadata.index;
+        self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
     fn applyCommittedEntries(self: *ReadyProcessor, entries: []Entry) Error!void {
@@ -322,6 +326,7 @@ pub const ReadyProcessor = struct {
             };
             self.applied_index = entry.index;
         }
+        self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
     fn applyEntry(self: *ReadyProcessor, entry: Entry) Error!void {
