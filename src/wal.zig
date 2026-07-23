@@ -814,7 +814,7 @@ pub const WAL = struct {
     }
 
     pub fn term(self: WAL, idx: u64) Error!u64 {
-        if (idx == self.snapshot_metadata.index and self.snapshot_metadata.index > 0) {
+        if (idx == self.snapshot_metadata.index) {
             return self.snapshot_metadata.term;
         }
         if (idx < self.firstIndex()) return error.Compacted;
@@ -1233,6 +1233,17 @@ fn createEmptyFile(path: [:0]const u8) !void {
     const rc = linux.open(path.ptr, flags, 0o644);
     if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
     _ = linux.close(@intCast(rc));
+}
+
+test "wal: empty storage exposes the initial term" {
+    const allocator = std.testing.allocator;
+    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-initial-term";
+    removeWALDir(allocator, dir);
+    defer removeWALDir(allocator, dir);
+
+    var wal = try WAL.open(allocator, .{ .dir = dir });
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(u64, 0), try wal.term(0));
 }
 
 test "wal: segment discovery accepts a compacted prefix" {
