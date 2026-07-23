@@ -492,6 +492,7 @@ pub const WAL = struct {
             self.wal_index.setFirstIndex(self.first_index);
         }
         if (!has_metadata) self.metadata_dirty = true;
+        if (has_metadata and self.first_index > 1) try self.cleanupCompactedSegments();
     }
 
     fn writeRecord(self: *WAL, record_type: RecordType, payload: []const u8) !RecordLocation {
@@ -606,9 +607,18 @@ pub const WAL = struct {
     }
 
     pub fn compact(self: *WAL, compact_index: u64) !void {
-        if (self.entries.items.len == 0) return;
-        if (compact_index <= self.firstIndex()) return;
+        if (self.entries.items.len == 0) {
+            try self.cleanupCompactedSegments();
+            return;
+        }
+        if (compact_index <= self.firstIndex()) {
+            try self.cleanupCompactedSegments();
+            return;
+        }
         if (compact_index > self.lastIndex() + 1) return error.Fatal;
+
+        try self.segment_manager.syncAll();
+        try self.persistMetadata(compact_index);
 
         // Remove entries from memory.
         const drop_count: usize = @intCast(compact_index - self.firstIndex());
@@ -618,22 +628,8 @@ pub const WAL = struct {
         self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
         self.wal_index.truncateBefore(compact_index);
         self.first_index = compact_index;
-        self.metadata_dirty = true;
-
-        // Delete old segment files.
-        // A segment is safe to delete if its first_index < compact_index AND
-        // a newer segment exists. We keep the segment that straddles compact_index.
-        var min_surviving_id: u64 = std.math.maxInt(u64);
-        const segs = self.segment_manager.segments.items;
-        for (segs) |entry| {
-            const seg = entry.segment;
-            if (seg.first_index >= compact_index) {
-                if (entry.id < min_surviving_id) min_surviving_id = entry.id;
-            }
-        }
-        if (min_surviving_id != std.math.maxInt(u64) and min_surviving_id > 1) {
-            try self.segment_manager.removeSegmentsBefore(min_surviving_id);
-        }
+        self.metadata_dirty = false;
+        try self.cleanupCompactedSegments();
     }
 
     // -----------------------------------------------------------------------
@@ -686,17 +682,21 @@ pub const WAL = struct {
     }
 
     fn syncMetadata(self: *WAL) !void {
+        try self.persistMetadata(self.first_index);
+        self.metadata_dirty = false;
+    }
+
+    fn persistMetadata(self: *WAL, first_index: u64) !void {
         const hard_state = serializeHardState(self.hard_state);
         const conf_state = try serializeConfState(self.allocator, self.conf_state);
         defer self.allocator.free(conf_state);
         try self.metadata_store.save(.{
-            .first_index = self.first_index,
+            .first_index = first_index,
             .snapshot_index = self.snapshot_metadata.index,
             .snapshot_term = self.snapshot_metadata.term,
             .hard_state = @constCast(hard_state[0..]),
             .conf_state = conf_state,
         });
-        self.metadata_dirty = false;
     }
 
     fn truncateSuffixFrom(self: *WAL, index: u64) !void {
@@ -711,6 +711,16 @@ pub const WAL = struct {
         for (self.entries.items[keep_count..]) |*entry| entry.deinit(self.allocator);
         self.entries.shrinkRetainingCapacity(keep_count);
         self.wal_index.truncateFrom(index);
+    }
+
+    fn cleanupCompactedSegments(self: *WAL) !void {
+        const first_surviving_segment_id = if (self.entries.items.len > 0)
+            (self.wal_index.lookup(self.first_index) orelse return error.Fatal).segment_id
+        else
+            self.segment_manager.current_segment_id;
+        if (first_surviving_segment_id == 0) return;
+        try self.segment_manager.removeSegmentsBefore(first_surviving_segment_id);
+        try self.segment_manager.syncAll();
     }
 };
 
@@ -1240,6 +1250,70 @@ test "wal: suffix overwrite is idempotent and restart-safe" {
         try std.testing.expectEqualStrings("new-b", entries[1].data);
         try std.testing.expectEqualStrings("new-c", entries[2].data);
         try std.testing.expectEqual(@as(u64, 2), entries[2].term);
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: compaction deletes only complete prefix segments" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-compact";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1, .data = @constCast("a") },
+            .{ .index = 2, .term = 1, .data = @constCast("b") },
+            .{ .index = 3, .term = 1, .data = @constCast("c") },
+            .{ .index = 4, .term = 1, .data = @constCast("d") },
+            .{ .index = 5, .term = 1, .data = @constCast("e") },
+        });
+        try wal.compact(3);
+        try std.testing.expectEqual(@as(u64, 3), wal.firstIndex());
+        try std.testing.expectEqual(@as(usize, 3), wal.segment_manager.count());
+        try std.testing.expectEqual(@as(u64, 3), wal.segment_manager.segments.items[0].id);
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 3), wal.firstIndex());
+        try std.testing.expectEqual(@as(u64, 5), wal.lastIndex());
+        try std.testing.expectEqual(@as(u64, 3), wal.segment_manager.segments.items[0].id);
+        try wal.append(&.{.{ .index = 6, .term = 2, .data = @constCast("f") }});
+        try wal.sync();
+        try std.testing.expectEqual(@as(u64, 6), wal.segment_manager.current_segment_id);
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: compaction keeps a segment that crosses the boundary" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-straddling-compact";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+            .{ .index = 3, .term = 1 },
+            .{ .index = 4, .term = 1 },
+        });
+        try wal.compact(3);
+        try std.testing.expectEqual(@as(usize, 1), wal.segment_manager.count());
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 3), wal.firstIndex());
+        try std.testing.expectEqual(@as(u64, 4), wal.lastIndex());
+        try std.testing.expectEqual(@as(u64, 1), try wal.term(3));
     }
 
     removeWALDir(allocator, path);
