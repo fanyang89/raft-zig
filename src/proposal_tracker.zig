@@ -60,10 +60,27 @@ const PendingRead = struct {
     ready_index: ?u64 = null,
 };
 
+fn spinLock(mutex: *std.atomic.Mutex) void {
+    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+pub const DetachedCallbacks = struct {
+    proposals: std.StringHashMap(PendingProposal),
+    reads: std.StringHashMap(PendingRead),
+    allocator: std.mem.Allocator,
+
+    pub fn invoke(self: *DetachedCallbacks, proposal_error: Error, read_error: Error) void {
+        invokeProposals(self.allocator, &self.proposals, proposal_error);
+        invokeReads(self.allocator, &self.reads, read_error);
+        self.* = undefined;
+    }
+};
+
 pub const ProposalTracker = struct {
     proposals: std.StringHashMap(PendingProposal),
     reads: std.StringHashMap(PendingRead),
     allocator: std.mem.Allocator,
+    mutex: std.atomic.Mutex = .unlocked,
 
     pub fn init(allocator: std.mem.Allocator) ProposalTracker {
         return .{
@@ -74,6 +91,7 @@ pub const ProposalTracker = struct {
     }
 
     pub fn deinit(self: *ProposalTracker) void {
+        spinLock(&self.mutex);
         // Free owned key bytes.
         var pi = self.proposals.keyIterator();
         while (pi.next()) |k| self.allocator.free(k.*);
@@ -81,83 +99,114 @@ pub const ProposalTracker = struct {
         var ri = self.reads.keyIterator();
         while (ri.next()) |k| self.allocator.free(k.*);
         self.reads.deinit();
+        self.mutex.unlock();
         self.* = undefined;
     }
 
     /// Register a proposal. `ctx_bytes` is duped internally; the caller
     /// retains ownership of the input. `timeout_ticks` of 0 means no timeout.
     pub fn track(self: *ProposalTracker, ctx_bytes: []const u8, callback: ProposalCallback, current_tick: u64, timeout_ticks: u64) !void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
         if (self.proposals.contains(ctx_bytes)) return error.DuplicateRequest;
         const key = try self.allocator.dupe(u8, ctx_bytes);
         errdefer self.allocator.free(key);
         try self.proposals.put(key, .{
             .callback = callback,
-            .deadline_tick = if (timeout_ticks == 0) std.math.maxInt(u64) else current_tick + timeout_ticks,
+            .deadline_tick = if (timeout_ticks == 0) std.math.maxInt(u64) else current_tick +| timeout_ticks,
         });
     }
 
     /// Complete a proposal successfully. The response slice is passed to
     /// the callback and need not survive after the callback returns.
     pub fn complete(self: *ProposalTracker, ctx_bytes: []const u8, response: []const u8) void {
-        const kv = self.proposals.fetchRemove(ctx_bytes) orelse return;
+        spinLock(&self.mutex);
+        const kv = self.proposals.fetchRemove(ctx_bytes) orelse {
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.unlock();
         self.allocator.free(kv.key);
         kv.value.callback.invoke(.{ .ok = response });
     }
 
     /// Fail a proposal with an error.
     pub fn fail(self: *ProposalTracker, ctx_bytes: []const u8, err: Error) void {
-        const kv = self.proposals.fetchRemove(ctx_bytes) orelse return;
+        spinLock(&self.mutex);
+        const kv = self.proposals.fetchRemove(ctx_bytes) orelse {
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.unlock();
         self.allocator.free(kv.key);
         kv.value.callback.invoke(.{ .err = err });
     }
 
     /// Fail every pending proposal (e.g. on leadership loss or shutdown).
     pub fn failAll(self: *ProposalTracker, err: Error) void {
-        var it = self.proposals.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.callback.invoke(.{ .err = err });
-        }
-        // Free keys and clear.
-        var ki = self.proposals.keyIterator();
-        while (ki.next()) |k| self.allocator.free(k.*);
-        self.proposals.clearRetainingCapacity();
+        spinLock(&self.mutex);
+        var detached = self.proposals;
+        self.proposals = std.StringHashMap(PendingProposal).init(self.allocator);
+        self.mutex.unlock();
+        invokeProposals(self.allocator, &detached, err);
     }
 
     /// Fail every pending read.
     pub fn failAllReads(self: *ProposalTracker, err: Error) void {
-        var it = self.reads.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.callback.invoke(.{ .err = err });
-        }
-        var ki = self.reads.keyIterator();
-        while (ki.next()) |k| self.allocator.free(k.*);
-        self.reads.clearRetainingCapacity();
+        spinLock(&self.mutex);
+        var detached = self.reads;
+        self.reads = std.StringHashMap(PendingRead).init(self.allocator);
+        self.mutex.unlock();
+        invokeReads(self.allocator, &detached, err);
+    }
+
+    pub fn detachAll(self: *ProposalTracker) DetachedCallbacks {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        const detached = DetachedCallbacks{
+            .proposals = self.proposals,
+            .reads = self.reads,
+            .allocator = self.allocator,
+        };
+        self.proposals = std.StringHashMap(PendingProposal).init(self.allocator);
+        self.reads = std.StringHashMap(PendingRead).init(self.allocator);
+        return detached;
     }
 
     /// Register a read-index request.
     pub fn trackRead(self: *ProposalTracker, ctx_bytes: []const u8, callback: ReadIndexCallback, current_tick: u64, timeout_ticks: u64) !void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
         if (self.reads.contains(ctx_bytes)) return error.DuplicateRequest;
         const key = try self.allocator.dupe(u8, ctx_bytes);
         errdefer self.allocator.free(key);
         try self.reads.put(key, .{
             .callback = callback,
-            .deadline_tick = if (timeout_ticks == 0) std.math.maxInt(u64) else current_tick + timeout_ticks,
+            .deadline_tick = if (timeout_ticks == 0) std.math.maxInt(u64) else current_tick +| timeout_ticks,
         });
     }
 
     pub fn completeRead(self: *ProposalTracker, ctx_bytes: []const u8) void {
-        const kv = self.reads.fetchRemove(ctx_bytes) orelse return;
+        spinLock(&self.mutex);
+        const kv = self.reads.fetchRemove(ctx_bytes) orelse {
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.unlock();
         self.allocator.free(kv.key);
         kv.value.callback.invoke(.ok);
     }
 
     pub fn markReadReady(self: *ProposalTracker, ctx_bytes: []const u8, index: u64) void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
         const pending = self.reads.getPtr(ctx_bytes) orelse return;
         pending.ready_index = if (pending.ready_index) |current| @max(current, index) else index;
     }
 
     pub fn completeReadyReads(self: *ProposalTracker, applied_index: u64) void {
         while (true) {
+            spinLock(&self.mutex);
             var ready_ctx: ?[]const u8 = null;
             var it = self.reads.iterator();
             while (it.next()) |entry| {
@@ -167,63 +216,103 @@ pub const ProposalTracker = struct {
                     break;
                 }
             }
-            self.completeRead(ready_ctx orelse return);
+            const ctx = ready_ctx orelse {
+                self.mutex.unlock();
+                return;
+            };
+            const kv = self.reads.fetchRemove(ctx).?;
+            self.mutex.unlock();
+            self.allocator.free(kv.key);
+            kv.value.callback.invoke(.ok);
         }
     }
 
     pub fn failRead(self: *ProposalTracker, ctx_bytes: []const u8, err: Error) void {
-        const kv = self.reads.fetchRemove(ctx_bytes) orelse return;
+        spinLock(&self.mutex);
+        const kv = self.reads.fetchRemove(ctx_bytes) orelse {
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.unlock();
         self.allocator.free(kv.key);
         kv.value.callback.invoke(.{ .err = err });
     }
 
-    pub fn pendingCount(self: ProposalTracker) usize {
+    pub fn pendingCount(self: *const ProposalTracker) usize {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
         return self.proposals.count();
     }
 
-    pub fn pendingReadCount(self: ProposalTracker) usize {
+    pub fn pendingReadCount(self: *const ProposalTracker) usize {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
         return self.reads.count();
     }
 
-    pub fn isReadPending(self: ProposalTracker, ctx_bytes: []const u8) bool {
+    pub fn isReadPending(self: *const ProposalTracker, ctx_bytes: []const u8) bool {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
         return self.reads.contains(ctx_bytes);
     }
 
     /// Expire proposals and reads whose deadline has passed.
     pub fn expireTimeouts(self: *ProposalTracker, current_tick: u64) void {
-        // Proposals.
-        var to_remove_p: std.ArrayList([]const u8) = .empty;
-        defer to_remove_p.deinit(self.allocator);
-        var pi = self.proposals.iterator();
-        while (pi.next()) |entry| {
-            if (current_tick >= entry.value_ptr.deadline_tick) {
-                to_remove_p.append(self.allocator, entry.key_ptr.*) catch break;
-            }
+        while (detachExpiredProposal(self, current_tick)) |kv| {
+            self.allocator.free(kv.key);
+            kv.value.callback.invoke(.{ .err = error.Timeout });
         }
-        for (to_remove_p.items) |key| {
-            if (self.proposals.fetchRemove(key)) |kv| {
-                kv.value.callback.invoke(.{ .err = error.Timeout });
-                self.allocator.free(kv.key);
-            }
-        }
-
-        // Reads.
-        var to_remove_r: std.ArrayList([]const u8) = .empty;
-        defer to_remove_r.deinit(self.allocator);
-        var ri = self.reads.iterator();
-        while (ri.next()) |entry| {
-            if (current_tick >= entry.value_ptr.deadline_tick) {
-                to_remove_r.append(self.allocator, entry.key_ptr.*) catch break;
-            }
-        }
-        for (to_remove_r.items) |key| {
-            if (self.reads.fetchRemove(key)) |kv| {
-                kv.value.callback.invoke(.{ .err = error.Timeout });
-                self.allocator.free(kv.key);
-            }
+        while (detachExpiredRead(self, current_tick)) |kv| {
+            self.allocator.free(kv.key);
+            kv.value.callback.invoke(.{ .err = error.Timeout });
         }
     }
 };
+
+fn invokeProposals(allocator: std.mem.Allocator, proposals: *std.StringHashMap(PendingProposal), err: Error) void {
+    while (proposals.count() > 0) {
+        var iterator = proposals.iterator();
+        const entry = iterator.next().?;
+        const removed = proposals.fetchRemove(entry.key_ptr.*).?;
+        allocator.free(removed.key);
+        removed.value.callback.invoke(.{ .err = err });
+    }
+    proposals.deinit();
+}
+
+fn invokeReads(allocator: std.mem.Allocator, reads: *std.StringHashMap(PendingRead), err: Error) void {
+    while (reads.count() > 0) {
+        var iterator = reads.iterator();
+        const entry = iterator.next().?;
+        const removed = reads.fetchRemove(entry.key_ptr.*).?;
+        allocator.free(removed.key);
+        removed.value.callback.invoke(.{ .err = err });
+    }
+    reads.deinit();
+}
+
+fn detachExpiredProposal(self: *ProposalTracker, current_tick: u64) ?std.StringHashMap(PendingProposal).KV {
+    spinLock(&self.mutex);
+    defer self.mutex.unlock();
+    var iterator = self.proposals.iterator();
+    while (iterator.next()) |entry| {
+        if (current_tick >= entry.value_ptr.deadline_tick) return self.proposals.fetchRemove(entry.key_ptr.*);
+    }
+    return null;
+}
+
+fn detachExpiredRead(self: *ProposalTracker, current_tick: u64) ?std.StringHashMap(PendingRead).KV {
+    spinLock(&self.mutex);
+    defer self.mutex.unlock();
+    var iterator = self.reads.iterator();
+    while (iterator.next()) |entry| {
+        if (current_tick >= entry.value_ptr.deadline_tick) return self.reads.fetchRemove(entry.key_ptr.*);
+    }
+    return null;
+}
 
 // ===========================================================================
 // Tests
@@ -385,4 +474,73 @@ test "proposal tracker ignores contexts from an old incarnation" {
     tracker.markReadReady(new_read, 2);
     tracker.completeReadyReads(2);
     try std.testing.expect(read.result != null);
+}
+
+test "proposal tracker detaches batches before invoking callbacks" {
+    const allocator = std.testing.allocator;
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+
+    const State = struct {
+        tracker: *ProposalTracker,
+        callbacks: usize = 0,
+        add_request: bool = false,
+
+        fn callback(ctx: *anyopaque, _: ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.callbacks += 1;
+            if (self.add_request) {
+                self.add_request = false;
+                self.tracker.track("new", .{ .ctx = self, .function = callback }, 0, 0) catch unreachable;
+            }
+            self.tracker.fail("second", error.ProposalDropped);
+        }
+    };
+    var state = State{ .tracker = &tracker, .add_request = true };
+    try tracker.track("first", .{ .ctx = &state, .function = State.callback }, 0, 0);
+    try tracker.track("second", .{ .ctx = &state, .function = State.callback }, 0, 0);
+    tracker.failAll(error.ShuttingDown);
+    try std.testing.expectEqual(@as(usize, 2), state.callbacks);
+    try std.testing.expectEqual(@as(usize, 1), tracker.pendingCount());
+    tracker.failAll(error.ShuttingDown);
+    try std.testing.expectEqual(@as(usize, 3), state.callbacks);
+}
+
+test "proposal tracker completion races batch failure exactly once" {
+    const allocator = std.heap.smp_allocator;
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+    var callbacks = std.atomic.Value(usize).init(0);
+    const Callback = struct {
+        fn invoke(ctx: *anyopaque, _: ProposalResult) void {
+            const count: *std.atomic.Value(usize) = @ptrCast(@alignCast(ctx));
+            _ = count.fetchAdd(1, .monotonic);
+        }
+    };
+    try tracker.track("request", .{ .ctx = &callbacks, .function = Callback.invoke }, 0, 0);
+
+    const Race = struct {
+        fn complete(value: *ProposalTracker) void {
+            value.complete("request", "ok");
+        }
+        fn fail(value: *ProposalTracker) void {
+            value.failAll(error.ShuttingDown);
+        }
+    };
+    const complete_thread = try std.Thread.spawn(.{}, Race.complete, .{&tracker});
+    const fail_thread = try std.Thread.spawn(.{}, Race.fail, .{&tracker});
+    complete_thread.join();
+    fail_thread.join();
+    try std.testing.expectEqual(@as(usize, 1), callbacks.load(.monotonic));
+}
+
+test "proposal tracker timeout deadline saturates" {
+    var tracker = ProposalTracker.init(std.testing.allocator);
+    defer tracker.deinit();
+    var proposal = Tester{};
+    try tracker.track("request", proposal.proposalCallback(), std.math.maxInt(u64) - 2, 10);
+    tracker.expireTimeouts(std.math.maxInt(u64) - 1);
+    try std.testing.expect(proposal.result == null);
+    tracker.expireTimeouts(std.math.maxInt(u64));
+    try std.testing.expectEqual(error.Timeout, proposal.result.?.err);
 }
