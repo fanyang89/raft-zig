@@ -132,6 +132,8 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.ReadIndexCallback;
         _ = raft.ProposalTracker;
         _ = raft.RaftorConfig;
+        _ = raft.StartupMode;
+        _ = raft.RaftorDependencies;
         _ = raft.NodeStatus;
         _ = raft.Raftor;
     }
@@ -162,9 +164,9 @@ test "memory storage vtable wiring is callable" {
     var raw = [_]raft.Entry{.{ .index = 1, .term = 1 }};
     try storage.setEntries(allocator, &raw);
 
-    const writable = storage.asWritableStorage();
+    var writable = storage.asWritableStorage();
     try std.testing.expectEqual(@as(u64, 1), try writable.firstIndex());
 
-    const read_iface = storage.asStorage();
+    const read_iface = writable.asStorage();
     try std.testing.expectEqual(@as(u64, 1), try read_iface.firstIndex());
 }

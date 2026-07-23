@@ -255,7 +255,7 @@ pub const Raft = struct {
             r.commitApplyInternal(config.applied, true);
         }
 
-        r.becomeFollower(0, invalid_id);
+        r.becomeFollower(r.term, invalid_id);
 
         // Post-confchange bookkeeping: figure out whether we're a voter.
         var post_cs = r.postConfChange();

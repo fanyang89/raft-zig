@@ -293,3 +293,61 @@ test "raftor: snapshot rate-limits retries" {
     // Count should NOT increase significantly (at most +1 from interval).
     try std.testing.expect(sm.snapshot_count <= count_after_first_burst + 1);
 }
+
+test "raftor: injected dependencies are borrowed" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    {
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = sm.stateMachine(),
+        });
+        defer r.destroy();
+        try r.campaign();
+        try std.testing.expect(r.isLeader());
+    }
+
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqualSlices(u64, &.{1}, state.conf_state.voters);
+    try transport.transport().send(&.{.{ .msg_type = .heartbeat, .to = 2 }});
+}
+
+test "raftor: startup mode validates and reloads storage" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const dependencies = raft.RaftorDependencies{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    };
+    try std.testing.expectError(
+        error.IncompatibleStorage,
+        Raftor.createWithDependencies(allocator, makeConfig(1), .restart, dependencies),
+    );
+
+    try storage.setRaftState(allocator, .{
+        .hard_state = .{ .term = 7, .vote = 1 },
+        .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+    });
+    try std.testing.expectError(
+        error.IncompatibleStorage,
+        Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, dependencies),
+    );
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, dependencies);
+    defer r.destroy();
+    try std.testing.expectEqual(@as(u64, 7), r.getStatus().term);
+    try std.testing.expectEqual(@as(u64, 1), r.getRawNode().raftConst().vote);
+}

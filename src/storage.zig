@@ -329,6 +329,48 @@ pub const WritableStorage = struct {
     pub fn sync(self: WritableStorage) Error!void {
         return self.vtable.sync_(self.ctx);
     }
+
+    /// The returned read-only view borrows this interface value.
+    pub fn asStorage(self: *WritableStorage) Storage {
+        return .{ .ctx = self, .vtable = &storage_adapter_vtable };
+    }
+};
+
+fn writableStorage(ctx: *anyopaque) *WritableStorage {
+    return @ptrCast(@alignCast(ctx));
+}
+
+fn writableInitialState(ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState {
+    return writableStorage(ctx).initialState(allocator);
+}
+
+fn writableEntries(ctx: *anyopaque, allocator: std.mem.Allocator, low: u64, high: u64, max_size: ?u64, context: GetEntriesContext) Error![]Entry {
+    return writableStorage(ctx).entries(allocator, low, high, max_size, context);
+}
+
+fn writableTerm(ctx: *anyopaque, idx: u64) Error!u64 {
+    return writableStorage(ctx).term(idx);
+}
+
+fn writableFirstIndex(ctx: *anyopaque) Error!u64 {
+    return writableStorage(ctx).firstIndex();
+}
+
+fn writableLastIndex(ctx: *anyopaque) Error!u64 {
+    return writableStorage(ctx).lastIndex();
+}
+
+fn writableSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator, request_index: u64, to: u64) Error!Snapshot {
+    return writableStorage(ctx).getSnapshot(allocator, request_index, to);
+}
+
+const storage_adapter_vtable: Storage.VTable = .{
+    .initial_state = writableInitialState,
+    .entries = writableEntries,
+    .term = writableTerm,
+    .first_index = writableFirstIndex,
+    .last_index = writableLastIndex,
+    .get_snapshot = writableSnapshot,
 };
 
 test "raft state clone is deep" {

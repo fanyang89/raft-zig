@@ -196,6 +196,8 @@ pub const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 
 pub const RaftorConfig = raftor_config_mod.RaftorConfig;
 
+pub const StartupMode = raftor_mod.StartupMode;
+pub const RaftorDependencies = raftor_mod.RaftorDependencies;
 pub const NodeStatus = raftor_mod.NodeStatus;
 pub const Raftor = raftor_mod.Raftor;
 

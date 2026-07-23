@@ -51,19 +51,10 @@ const Peer = raw_node_mod.Peer;
 
 const log = std.log.scoped(.raft_zig_raftor);
 
-/// Pluggable storage backend. The memory variant owns the storage inline;
-/// the WAL variant owns a heap-allocated `*WALStorage`. Both expose the
-/// same surface so Raftor is backend-agnostic.
+/// Storage owned by the convenience constructors.
 const StorageBackend = union(enum) {
     memory: MemoryStorage,
     wal: *WALStorage,
-
-    fn asStorage(self: *StorageBackend) storage_mod.Storage {
-        return switch (self.*) {
-            .memory => |*m| m.asStorage(),
-            .wal => |ws| ws.asStorage(),
-        };
-    }
 
     fn asWritableStorage(self: *StorageBackend) storage_mod.WritableStorage {
         return switch (self.*) {
@@ -72,20 +63,24 @@ const StorageBackend = union(enum) {
         };
     }
 
-    fn initialState(self: *StorageBackend, allocator: std.mem.Allocator) Error!RaftState {
-        return self.asStorage().initialState(allocator);
-    }
-
-    fn term(self: *StorageBackend, idx: u64) Error!u64 {
-        return self.asStorage().term(idx);
-    }
-
     fn deinit(self: *StorageBackend, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .memory => |*m| m.deinit(allocator),
             .wal => |ws| ws.deinit(),
         }
     }
+};
+
+pub const StartupMode = enum {
+    bootstrap,
+    restart,
+};
+
+/// Dependencies are borrowed for the lifetime of the Raftor.
+pub const RaftorDependencies = struct {
+    storage: storage_mod.WritableStorage,
+    transport: Transport,
+    state_machine: StateMachine,
 };
 
 pub const NodeStatus = struct {
@@ -106,7 +101,8 @@ pub const Raftor = struct {
     config: RaftorConfig,
 
     // Subsystems — order matters for initialization.
-    storage: StorageBackend,
+    owned_storage: ?StorageBackend,
+    storage: storage_mod.WritableStorage,
     // Owned only when created internally via `create` (single-node).
     // `createWithTransport` leaves this null and borrows externally.
     noop_transport: ?NoopTransport = null,
@@ -146,8 +142,19 @@ pub const Raftor = struct {
     ) Error!*Raftor {
         const self = try allocator.create(Raftor);
         errdefer allocator.destroy(self);
+
+        self.owned_storage = try openStorage(allocator, config);
+        errdefer if (self.owned_storage) |*storage| storage.deinit(allocator);
         self.noop_transport = NoopTransport.init(allocator);
-        try self.initInternal(allocator, config, state_machine, self.noop_transport.?.transport());
+        errdefer if (self.noop_transport) |*transport| transport.deinit();
+
+        const storage = self.owned_storage.?.asWritableStorage();
+        const startup_mode = try detectStartupMode(allocator, storage);
+        try self.initInternal(allocator, config, startup_mode, .{
+            .storage = storage,
+            .transport = self.noop_transport.?.transport(),
+            .state_machine = state_machine,
+        });
         return self;
     }
 
@@ -161,8 +168,33 @@ pub const Raftor = struct {
     ) Error!*Raftor {
         const self = try allocator.create(Raftor);
         errdefer allocator.destroy(self);
+
+        self.owned_storage = try openStorage(allocator, config);
+        errdefer if (self.owned_storage) |*storage| storage.deinit(allocator);
         self.noop_transport = null;
-        try self.initInternal(allocator, config, state_machine, transport);
+
+        const storage = self.owned_storage.?.asWritableStorage();
+        const startup_mode = try detectStartupMode(allocator, storage);
+        try self.initInternal(allocator, config, startup_mode, .{
+            .storage = storage,
+            .transport = transport,
+            .state_machine = state_machine,
+        });
+        return self;
+    }
+
+    pub fn createWithDependencies(
+        allocator: std.mem.Allocator,
+        config: RaftorConfig,
+        startup_mode: StartupMode,
+        dependencies: RaftorDependencies,
+    ) Error!*Raftor {
+        const self = try allocator.create(Raftor);
+        errdefer allocator.destroy(self);
+
+        self.owned_storage = null;
+        self.noop_transport = null;
+        try self.initInternal(allocator, config, startup_mode, dependencies);
         return self;
     }
 
@@ -172,25 +204,29 @@ pub const Raftor = struct {
         allocator.destroy(self);
     }
 
-    fn initInternal(self: *Raftor, allocator: std.mem.Allocator, config: RaftorConfig, state_machine: StateMachine, transport: Transport) Error!void {
+    fn initInternal(
+        self: *Raftor,
+        allocator: std.mem.Allocator,
+        config: RaftorConfig,
+        startup_mode: StartupMode,
+        dependencies: RaftorDependencies,
+    ) Error!void {
         self.allocator = allocator;
         self.config = config;
+        self.storage = dependencies.storage;
+        self.transport = dependencies.transport;
 
-        // Choose storage backend: WAL if data_dir is set, else MemoryStorage.
-        if (config.data_dir.len > 0) {
-            const wal_dir = try allocator.allocSentinel(u8, config.data_dir.len, 0);
-            @memcpy(wal_dir[0..config.data_dir.len], config.data_dir);
-            defer allocator.free(wal_dir);
-            const ws = WALStorage.open(allocator, wal_dir) catch return error.OutOfMemory;
-            self.storage = .{ .wal = ws };
-        } else {
-            self.storage = .{ .memory = MemoryStorage.init() };
-        }
+        try config.raft.validate();
+        try self.prepareStorage(startup_mode);
 
-        self.transport = transport;
         self.proposal_tracker = ProposalTracker.init(allocator);
         self.proposal_queue = ProposalQueue.init(allocator);
         self.read_index_queue = ReadIndexQueue.init(allocator);
+        errdefer {
+            self.proposal_queue.deinit();
+            self.read_index_queue.deinit();
+            self.proposal_tracker.deinit();
+        }
         self.tick_count = 0;
         self.proposal_sequence = std.atomic.Value(u64).init(0);
         self.running = false;
@@ -199,23 +235,11 @@ pub const Raftor = struct {
         self.last_snapshot_attempt_tick = 0;
         self.last_snapshot_tick = 0;
 
-        // Bootstrap: only seed ConfState if storage is empty (no prior voters).
-        // This prevents overwriting an existing cluster configuration on restart.
-        const existing_state = self.storage.initialState(allocator) catch RaftState{};
-        var es_copy = existing_state;
-        defer es_copy.deinit(allocator);
-        if (es_copy.conf_state.voters.len == 0) {
-            const voters = if (config.initial_peers.len > 0)
-                buildVoterIds(allocator, config) catch return error.OutOfMemory
-            else
-                allocator.dupe(u64, &.{config.nodeId()}) catch return error.OutOfMemory;
-            defer allocator.free(voters);
-            const cs = ConfState{ .voters = voters };
-            try self.storage.asWritableStorage().setConfState(allocator, cs);
-        }
-
         // Build RawNode AFTER storage is at its final address.
-        self.raw_node = try RawNode.init(allocator, config.raft, self.storage.asStorage());
+        var raft_config = config.raft;
+        raft_config.load_state_on_startup = startup_mode == .restart;
+        self.raw_node = try RawNode.init(allocator, raft_config, self.storage.asStorage());
+        errdefer self.raw_node.deinit();
 
         // Register inbound message callback: transport → raw_node.step().
         self.transport.setMessageCallback(.{
@@ -227,14 +251,36 @@ pub const Raftor = struct {
         self.ready_processor = ReadyProcessor.init(
             allocator,
             &self.raw_node,
-            self.storage.asWritableStorage(),
-            state_machine,
+            self.storage,
+            dependencies.state_machine,
             self.transport,
             &self.proposal_tracker,
             config.nodeId(),
             config.checksum_enabled,
             config.raft.applied,
         );
+    }
+
+    fn prepareStorage(self: *Raftor, startup_mode: StartupMode) Error!void {
+        var state = try self.storage.initialState(self.allocator);
+        defer state.deinit(self.allocator);
+
+        switch (startup_mode) {
+            .bootstrap => {
+                if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try self.storage.lastIndex() != 0) {
+                    return error.IncompatibleStorage;
+                }
+                const voters = if (self.config.initial_peers.len > 0)
+                    try buildVoterIds(self.allocator, self.config)
+                else
+                    try self.allocator.dupe(u64, &.{self.config.nodeId()});
+                defer self.allocator.free(voters);
+                try self.storage.setConfState(self.allocator, .{ .voters = voters });
+            },
+            .restart => {
+                if (confStateIsEmpty(state.conf_state)) return error.IncompatibleStorage;
+            },
+        }
     }
 
     fn deinitInternal(self: *Raftor) void {
@@ -244,7 +290,7 @@ pub const Raftor = struct {
         self.proposal_tracker.deinit();
         self.raw_node.deinit();
         if (self.noop_transport) |*nt| nt.deinit();
-        self.storage.deinit(self.allocator);
+        if (self.owned_storage) |*storage| storage.deinit(self.allocator);
     }
 
     /// Inbound message callback. Transfers message ownership to `step()`.
@@ -429,7 +475,7 @@ pub const Raftor = struct {
         defer snap.deinit(self.allocator);
 
         log.info("taking snapshot at index {} term {}", .{ applied_index, applied_term });
-        self.storage.asWritableStorage().applyLocalSnapshot(self.allocator, snap) catch |e| {
+        self.storage.applyLocalSnapshot(self.allocator, snap) catch |e| {
             log.warn("applyLocalSnapshot failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -515,7 +561,28 @@ pub const Raftor = struct {
 // Bootstrap helpers
 // ===========================================================================
 
-const RaftState = storage_mod.RaftState;
+fn openStorage(allocator: std.mem.Allocator, config: RaftorConfig) Error!StorageBackend {
+    if (config.data_dir.len == 0) return .{ .memory = MemoryStorage.init() };
+
+    const wal_dir = try allocator.allocSentinel(u8, config.data_dir.len, 0);
+    defer allocator.free(wal_dir);
+    @memcpy(wal_dir[0..config.data_dir.len], config.data_dir);
+    return .{ .wal = WALStorage.open(allocator, wal_dir) catch return error.OutOfMemory };
+}
+
+fn detectStartupMode(allocator: std.mem.Allocator, storage: storage_mod.WritableStorage) Error!StartupMode {
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try storage.lastIndex() != 0) return .restart;
+    return .bootstrap;
+}
+
+fn confStateIsEmpty(conf_state: ConfState) bool {
+    return conf_state.voters.len == 0 and
+        conf_state.learners.len == 0 and
+        conf_state.voters_outgoing.len == 0 and
+        conf_state.learners_next.len == 0;
+}
 
 fn buildVoterIds(allocator: std.mem.Allocator, config: RaftorConfig) ![]u64 {
     var ids = try allocator.alloc(u64, config.initial_peers.len);
