@@ -16,6 +16,7 @@ const SyncFailingStorage = struct {
     inner: raft.WritableStorage,
     fail_sync: bool = false,
     fail_conf_state: bool = false,
+    fail_incarnation: bool = false,
 
     fn cast(ctx: *anyopaque) *SyncFailingStorage {
         return @ptrCast(@alignCast(ctx));
@@ -72,7 +73,9 @@ const SyncFailingStorage = struct {
     }
 
     fn reserveIncarnation(ctx: *anyopaque) raft.Error!u64 {
-        return cast(ctx).inner.reserveIncarnation();
+        const self = cast(ctx);
+        if (self.fail_incarnation) return error.WalSyncFailed;
+        return self.inner.reserveIncarnation();
     }
 
     fn sync(ctx: *anyopaque) raft.Error!void {
@@ -379,6 +382,29 @@ test "raftor: read index completes after apply" {
     try std.testing.expect(read_done);
 }
 
+test "raftor: duplicate user read contexts use independent internal contexts" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeConfig(1), sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    const ReadTester = struct {
+        completed: usize = 0,
+        fn callback(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .ok) self.completed += 1;
+        }
+    };
+    var first = ReadTester{};
+    var second = ReadTester{};
+    try r.readIndex("same", .{ .ctx = &first, .function = ReadTester.callback });
+    try r.readIndex("same", .{ .ctx = &second, .function = ReadTester.callback });
+    for (0..16) |_| _ = try r.tick();
+    try std.testing.expectEqual(@as(usize, 1), first.completed);
+    try std.testing.expectEqual(@as(usize, 1), second.completed);
+}
+
 test "raftor: paged ReadIndex waits for its applied index" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();
@@ -660,6 +686,29 @@ test "raftor: bootstrap sync failure aborts creation" {
     );
 }
 
+test "raftor: incarnation reservation failure aborts creation" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{
+        .inner = storage.asWritableStorage(),
+        .fail_incarnation = true,
+    };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    try std.testing.expectError(
+        error.WalSyncFailed,
+        Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+            .storage = failing_storage.writableStorage(),
+            .transport = transport.transport(),
+            .state_machine = sm.stateMachine(),
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), storage.incarnation);
+}
+
 test "raftor: Ready sync failure blocks send and apply" {
     var storage = raft.MemoryStorage.init();
     defer storage.deinit(allocator);
@@ -808,11 +857,14 @@ test "raftor: WAL restart restores snapshot before replaying its suffix" {
     config.snapshot_entries_threshold = 0;
 
     var snapshot_index: u64 = 0;
+    var first_incarnation: u64 = 0;
     {
         var machine = DurableStateMachine.init(allocator);
         defer machine.deinit();
         const r = try Raftor.create(allocator, config, machine.stateMachine());
         defer r.destroy();
+        first_incarnation = r.getStatus().incarnation;
+        try std.testing.expectEqual(@as(u64, 1), first_incarnation);
         try r.campaign();
 
         var alpha = ProposalTester{};
@@ -839,12 +891,15 @@ test "raftor: WAL restart restores snapshot before replaying its suffix" {
         try std.testing.expectEqual(@as(usize, 0), failing_machine.state.items.len);
     }
 
+    var restored_incarnation: u64 = 0;
     {
         var restored_machine = DurableStateMachine.init(allocator);
         defer restored_machine.deinit();
         config.raft.applied = std.math.maxInt(u64);
         const r = try Raftor.create(allocator, config, restored_machine.stateMachine());
         defer r.destroy();
+        restored_incarnation = r.getStatus().incarnation;
+        try std.testing.expectEqual(first_incarnation + 2, restored_incarnation);
         try std.testing.expectEqual(@as(usize, 1), restored_machine.restore_count);
         try std.testing.expectEqual(snapshot_index, r.getStatus().applied_index);
         try std.testing.expectEqualStrings("alpha", restored_machine.state.items);
@@ -852,5 +907,43 @@ test "raftor: WAL restart restores snapshot before replaying its suffix" {
         for (0..16) |_| _ = try r.tick();
         try std.testing.expectEqualStrings("alphabeta", restored_machine.state.items);
         try std.testing.expect(r.getStatus().applied_index > snapshot_index);
+
+        var gamma = ProposalTester{};
+        try r.campaign();
+        try r.propose("gamma", gamma.callback());
+        for (0..16) |_| _ = try r.tick();
+        try std.testing.expect(gamma.applied);
+    }
+
+    {
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        var storage = try raft.WALStorage.open(allocator, path_z);
+        defer storage.deinit();
+        const iface = storage.asWritableStorage();
+        const first = try iface.firstIndex();
+        const last = try iface.lastIndex();
+        const entries = try iface.entries(allocator, first, last + 1, null, .{ .empty = .{ .can_async = false } });
+        defer {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+        var saw_beta = false;
+        var saw_gamma = false;
+        for (entries) |entry| {
+            const header = raft.request_context.decode(entry.context) orelse continue;
+            if (std.mem.eql(u8, entry.data, "beta")) {
+                saw_beta = true;
+                try std.testing.expectEqual(first_incarnation, header.incarnation);
+            }
+            if (std.mem.eql(u8, entry.data, "gamma")) {
+                saw_gamma = true;
+                try std.testing.expectEqual(restored_incarnation, header.incarnation);
+            }
+            try std.testing.expectEqual(@as(u64, 1), header.node_id);
+            try std.testing.expectEqual(raft.request_context.Kind.proposal, header.kind);
+        }
+        try std.testing.expect(saw_beta);
+        try std.testing.expect(saw_gamma);
     }
 }

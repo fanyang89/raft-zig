@@ -77,6 +77,8 @@ const RaftApp = struct {
     pool: *raft_adapter.PacketPool,
     node: *raft_adapter.NodeProcess,
     restarted_term: u64 = 0,
+    initial_incarnation: u64 = 0,
+    restarted_incarnation: u64 = 0,
 
     pub fn deinit(self: *RaftApp) void {
         const allocator = self.sim.env.allocator();
@@ -112,6 +114,7 @@ fn initRaft(sim: mar.Sim) !RaftApp {
 fn raftScenario(case: *RaftCase) !void {
     try case.app.node.raftor.?.campaign();
     const term = case.app.node.raftor.?.getStatus().term;
+    case.app.initial_incarnation = case.app.node.raftor.?.getStatus().incarnation;
     try std.testing.expect(term > 0);
     try std.testing.expect(case.app.node.state_machine.last_applied_index > 0);
 
@@ -119,11 +122,13 @@ fn raftScenario(case: *RaftCase) !void {
     try std.testing.expectEqual(@as(?*raft.Raftor, null), case.app.node.raftor);
     try case.app.sim.restartProcess(0);
     case.app.restarted_term = case.app.node.raftor.?.getStatus().term;
+    case.app.restarted_incarnation = case.app.node.raftor.?.getStatus().incarnation;
 }
 
 fn checkRaftRestart(case: *const RaftCase) !void {
     try std.testing.expect(case.app.node.raftor != null);
     try std.testing.expect(case.app.restarted_term > 0);
+    try std.testing.expectEqual(case.app.initial_incarnation + 1, case.app.restarted_incarnation);
     try std.testing.expectEqual(
         case.app.node.state_machine.last_applied_index,
         case.app.node.raftor.?.getStatus().applied_index,

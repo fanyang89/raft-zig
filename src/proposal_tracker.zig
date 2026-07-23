@@ -353,3 +353,36 @@ test "proposal tracker ignores ready state after read timeout" {
     tracker.completeReadyReads(5);
     try std.testing.expectEqual(error.Timeout, read.result.?.err);
 }
+
+test "proposal tracker ignores contexts from an old incarnation" {
+    const allocator = std.testing.allocator;
+    const request_context = @import("request_context.zig");
+    var old_generator = request_context.Generator.init(1, 1);
+    var new_generator = request_context.Generator.init(1, 2);
+    const old_proposal = try old_generator.next(allocator, .proposal, "");
+    defer allocator.free(old_proposal);
+    const new_proposal = try new_generator.next(allocator, .proposal, "");
+    defer allocator.free(new_proposal);
+    const old_read = try old_generator.next(allocator, .read_index, "same");
+    defer allocator.free(old_read);
+    const new_read = try new_generator.next(allocator, .read_index, "same");
+    defer allocator.free(new_read);
+
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+    var proposal = Tester{};
+    try tracker.track(new_proposal, proposal.proposalCallback(), 0, 0);
+    tracker.complete(old_proposal, "old");
+    try std.testing.expect(proposal.result == null);
+    tracker.complete(new_proposal, "new");
+    try std.testing.expectEqualStrings("new", proposal.result.?.ok);
+
+    var read = ReadTester{};
+    try tracker.trackRead(new_read, read.readCallback(), 0, 0);
+    tracker.markReadReady(old_read, 1);
+    tracker.completeReadyReads(1);
+    try std.testing.expect(read.result == null);
+    tracker.markReadReady(new_read, 2);
+    tracker.completeReadyReads(2);
+    try std.testing.expect(read.result != null);
+}

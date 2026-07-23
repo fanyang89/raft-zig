@@ -23,6 +23,7 @@ const state_machine_mod = @import("state_machine.zig");
 const transport_mod = @import("transport.zig");
 const proposal_tracker_mod = @import("proposal_tracker.zig");
 const proposal_queue_mod = @import("proposal_queue.zig");
+const request_context_mod = @import("request_context.zig");
 const ready_processor_mod = @import("ready_processor.zig");
 const raftor_config_mod = @import("raftor_config.zig");
 const state_role_mod = @import("core/state_role.zig");
@@ -92,6 +93,7 @@ pub const NodeStatus = struct {
     commit_index: u64 = 0,
     applied_index: u64 = 0,
     pending_proposals: usize = 0,
+    incarnation: u64 = 0,
 };
 
 /// A complete Raftor instance. Because the internal MemoryStorage's address
@@ -113,9 +115,9 @@ pub const Raftor = struct {
     proposal_queue: ProposalQueue,
     read_index_queue: ReadIndexQueue,
     ready_processor: ReadyProcessor,
+    request_context_generator: request_context_mod.Generator,
 
     tick_count: u64 = 0,
-    proposal_sequence: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     running: bool = false,
     terminal_error: ?Error = null,
 
@@ -219,6 +221,8 @@ pub const Raftor = struct {
 
         try config.raft.validate();
         try self.prepareStorage(startup_mode);
+        const incarnation = try self.storage.reserveIncarnation();
+        self.request_context_generator = request_context_mod.Generator.init(config.nodeId(), incarnation);
         const initial_applied_index = if (startup_mode == .restart)
             try self.restoreLocalSnapshot(dependencies.state_machine, config.raft.applied)
         else
@@ -233,7 +237,6 @@ pub const Raftor = struct {
             self.proposal_tracker.deinit();
         }
         self.tick_count = 0;
-        self.proposal_sequence = std.atomic.Value(u64).init(0);
         self.running = false;
         self.terminal_error = null;
         self.last_snapshot_attempt_index = 0;
@@ -429,10 +432,7 @@ pub const Raftor = struct {
         if (self.terminal_error != null) return error.ShuttingDown;
         const data_copy = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(data_copy);
-        var ctx_buf: [32]u8 = undefined;
-        const sequence = self.proposal_sequence.fetchAdd(1, .monotonic);
-        const ctx = try std.fmt.bufPrint(&ctx_buf, "p{}", .{sequence});
-        const ctx_copy = try self.allocator.dupe(u8, ctx);
+        const ctx_copy = try self.request_context_generator.next(self.allocator, .proposal, "");
         errdefer self.allocator.free(ctx_copy);
         // Push to thread-safe queue; tick() will drain it.
         try self.proposal_queue.push(data_copy, ctx_copy, callback);
@@ -440,7 +440,7 @@ pub const Raftor = struct {
 
     pub fn readIndex(self: *Raftor, ctx: []const u8, callback: proposal_tracker_mod.ReadIndexCallback) !void {
         if (self.terminal_error != null) return error.ShuttingDown;
-        const ctx_copy = try self.allocator.dupe(u8, ctx);
+        const ctx_copy = try self.request_context_generator.next(self.allocator, .read_index, ctx);
         errdefer self.allocator.free(ctx_copy);
         try self.read_index_queue.push(ctx_copy, callback);
     }
@@ -570,6 +570,7 @@ pub const Raftor = struct {
             .commit_index = r.raft_log.committed,
             .applied_index = self.ready_processor.applied_index,
             .pending_proposals = self.proposal_tracker.pendingCount(),
+            .incarnation = self.request_context_generator.incarnation,
         };
     }
 
@@ -723,6 +724,31 @@ test "raftor: getStatus returns correct fields" {
 
     const status = r.getStatus();
     try std.testing.expectEqual(@as(u64, 1), status.id);
+    try std.testing.expectEqual(@as(u64, 1), status.incarnation);
     try std.testing.expectEqual(StateRole.follower, status.role);
     try std.testing.expectEqual(@as(usize, 0), status.pending_proposals);
+}
+
+test "raftor: request context sequence exhaustion does not enqueue" {
+    const allocator = std.testing.allocator;
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeRaftorConfig(1), sm.stateMachine());
+    defer r.destroy();
+    r.request_context_generator.sequence.store(std.math.maxInt(u64), .monotonic);
+
+    const Callback = struct {
+        fn proposal(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+        fn read(_: *anyopaque, _: proposal_tracker_mod.ReadIndexResult) void {}
+    };
+    try std.testing.expectError(
+        error.ContextSequenceExhausted,
+        r.propose("data", .{ .ctx = undefined, .function = Callback.proposal }),
+    );
+    try std.testing.expectError(
+        error.ContextSequenceExhausted,
+        r.readIndex("read", .{ .ctx = undefined, .function = Callback.read }),
+    );
+    try std.testing.expect(r.proposal_queue.empty());
+    try std.testing.expect(r.read_index_queue.empty());
 }
