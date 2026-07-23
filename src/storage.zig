@@ -252,6 +252,7 @@ pub const WritableStorage = struct {
         apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         apply_local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) Error!?Snapshot,
+        reserve_incarnation: *const fn (ctx: *anyopaque) Error!u64,
         sync_: *const fn (ctx: *anyopaque) Error!void,
     };
 
@@ -329,6 +330,10 @@ pub const WritableStorage = struct {
 
     pub fn localSnapshot(self: WritableStorage, allocator: std.mem.Allocator) Error!?Snapshot {
         return self.vtable.local_snapshot(self.ctx, allocator);
+    }
+
+    pub fn reserveIncarnation(self: WritableStorage) Error!u64 {
+        return self.vtable.reserve_incarnation(self.ctx);
     }
 
     pub fn sync(self: WritableStorage) Error!void {

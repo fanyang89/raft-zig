@@ -220,6 +220,7 @@ pub const MemoryStorageCore = struct {
 /// that need cross-thread access must coordinate externally.
 pub const MemoryStorage = struct {
     core: MemoryStorageCore,
+    incarnation: u64 = 0,
 
     pub fn init() MemoryStorage {
         return .{ .core = MemoryStorageCore.init() };
@@ -404,6 +405,11 @@ pub const MemoryStorage = struct {
         return try storage_mod.cloneSnapshot(allocator, self.core.snapshot_data);
     }
 
+    pub fn reserveIncarnation(self: *MemoryStorage) Error!u64 {
+        self.incarnation = std.math.add(u64, self.incarnation, 1) catch return error.IncarnationExhausted;
+        return self.incarnation;
+    }
+
     /// VTable wiring for `asWritableStorage` / `asStorage`.
     fn initial_state_impl(ctx: *anyopaque, allocator: std.mem.Allocator) Error!RaftState {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
@@ -477,6 +483,11 @@ pub const MemoryStorage = struct {
         return self.localSnapshot(allocator);
     }
 
+    fn reserve_incarnation_impl(ctx: *anyopaque) Error!u64 {
+        const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
+        return self.reserveIncarnation();
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
         return self.sync_();
@@ -495,6 +506,7 @@ pub const MemoryStorage = struct {
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
         .local_snapshot = local_snapshot_impl,
+        .reserve_incarnation = reserve_incarnation_impl,
         .sync_ = sync_impl,
     };
 
@@ -678,4 +690,13 @@ test "memory storage get snapshot honors trigger and rebuilds index" {
 
     storage.triggerSnapshotUnavailable();
     try std.testing.expectError(error.SnapshotTemporarilyUnavailable, storage.getSnapshot(allocator, 0, 0));
+}
+
+test "memory storage reserves monotonically increasing incarnations" {
+    var storage = MemoryStorage.init();
+    defer storage.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), try storage.reserveIncarnation());
+    try std.testing.expectEqual(@as(u64, 2), try storage.reserveIncarnation());
+    storage.incarnation = std.math.maxInt(u64);
+    try std.testing.expectError(error.IncarnationExhausted, storage.reserveIncarnation());
 }

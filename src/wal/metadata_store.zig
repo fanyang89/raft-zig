@@ -4,10 +4,11 @@ const linux = std.os.linux;
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
 const metadata_magic: u32 = 0x4D455441;
-const format_version: u32 = 2;
+const format_version: u32 = 3;
 const header_size: usize = 16;
 const content_size_v1: usize = 24;
-const content_size: usize = 32;
+const content_size_v2: usize = 32;
+const content_size: usize = 40;
 const max_metadata_size: usize = 16 * 1024 * 1024;
 
 pub const Metadata = struct {
@@ -15,6 +16,7 @@ pub const Metadata = struct {
     snapshot_index: u64 = 0,
     snapshot_term: u64 = 0,
     first_segment_id: u64 = 0,
+    incarnation: u64 = 0,
     hard_state: []u8 = &.{},
     conf_state: []u8 = &.{},
 
@@ -112,6 +114,7 @@ fn encode(allocator: std.mem.Allocator, metadata: Metadata) ![]u8 {
     std.mem.writeInt(u64, data[24..32], metadata.snapshot_index, .little);
     std.mem.writeInt(u64, data[32..40], metadata.snapshot_term, .little);
     std.mem.writeInt(u64, data[40..48], metadata.first_segment_id, .little);
+    std.mem.writeInt(u64, data[48..56], metadata.incarnation, .little);
 
     var offset: usize = header_size + content_size;
     std.mem.writeInt(u32, data[offset..][0..4], hard_state_len, .little);
@@ -131,7 +134,7 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
     if (data.len < header_size + content_size_v1 + 8) return error.MetadataCorrupt;
     if (std.mem.readInt(u32, data[0..4], .little) != metadata_magic) return error.MetadataCorrupt;
     const version = std.mem.readInt(u32, data[4..8], .little);
-    if (version != 1 and version != format_version) return error.MetadataCorrupt;
+    if (version < 1 or version > format_version) return error.MetadataCorrupt;
     const expected_crc = std.mem.readInt(u32, data[8..12], .little);
     if (Crc32Iscsi.hash(data[12..]) != expected_crc) return error.MetadataCorrupt;
 
@@ -139,12 +142,18 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
         .first_index = std.mem.readInt(u64, data[16..24], .little),
         .snapshot_index = std.mem.readInt(u64, data[24..32], .little),
         .snapshot_term = std.mem.readInt(u64, data[32..40], .little),
-        .first_segment_id = if (version == format_version) std.mem.readInt(u64, data[40..48], .little) else 0,
+        .first_segment_id = if (version >= 2) std.mem.readInt(u64, data[40..48], .little) else 0,
+        .incarnation = if (version >= 3) std.mem.readInt(u64, data[48..56], .little) else 0,
     };
     errdefer result.deinit(allocator);
     if (result.first_index == 0) return error.MetadataCorrupt;
 
-    var offset: usize = header_size + if (version == format_version) content_size else content_size_v1;
+    var offset: usize = header_size + switch (version) {
+        1 => content_size_v1,
+        2 => content_size_v2,
+        3 => content_size,
+        else => unreachable,
+    };
     const hard_state_len = try readLength(data, &offset);
     const hard_state_end = std.math.add(usize, offset, hard_state_len) catch return error.MetadataCorrupt;
     if (hard_state_end > data.len) return error.MetadataCorrupt;
@@ -297,6 +306,7 @@ test "metadata store round-trips and rejects corruption" {
         .snapshot_index = 6,
         .snapshot_term = 3,
         .first_segment_id = 4,
+        .incarnation = 11,
         .hard_state = @constCast("hard"),
         .conf_state = @constCast("conf"),
     });
@@ -305,6 +315,7 @@ test "metadata store round-trips and rejects corruption" {
     defer loaded.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 7), loaded.first_index);
     try std.testing.expectEqual(@as(u64, 4), loaded.first_segment_id);
+    try std.testing.expectEqual(@as(u64, 11), loaded.incarnation);
     try std.testing.expectEqualStrings("hard", loaded.hard_state);
     try std.testing.expectEqualStrings("conf", loaded.conf_state);
 
@@ -319,4 +330,31 @@ test "metadata store round-trips and rejects corruption" {
     defer closeIgnore(fd);
     try writeAll(fd, "corrupt");
     try std.testing.expectError(error.MetadataCorrupt, store.load());
+}
+
+test "metadata store decodes v2 with zero incarnation" {
+    const allocator = std.testing.allocator;
+    const current = try encode(allocator, .{
+        .first_index = 7,
+        .snapshot_index = 6,
+        .snapshot_term = 3,
+        .first_segment_id = 4,
+        .incarnation = 11,
+        .hard_state = @constCast("hard"),
+        .conf_state = @constCast("conf"),
+    });
+    defer allocator.free(current);
+    const legacy = try allocator.alloc(u8, current.len - 8);
+    defer allocator.free(legacy);
+    @memcpy(legacy[0 .. header_size + content_size_v2], current[0 .. header_size + content_size_v2]);
+    @memcpy(legacy[header_size + content_size_v2 ..], current[header_size + content_size ..]);
+    std.mem.writeInt(u32, legacy[4..8], 2, .little);
+    std.mem.writeInt(u32, legacy[8..12], Crc32Iscsi.hash(legacy[12..]), .little);
+
+    var metadata = try decode(allocator, legacy);
+    defer metadata.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), metadata.first_segment_id);
+    try std.testing.expectEqual(@as(u64, 0), metadata.incarnation);
+    try std.testing.expectEqualStrings("hard", metadata.hard_state);
+    try std.testing.expectEqualStrings("conf", metadata.conf_state);
 }

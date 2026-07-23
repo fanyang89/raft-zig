@@ -71,6 +71,10 @@ const SyncFailingStorage = struct {
         return cast(ctx).inner.localSnapshot(alloc);
     }
 
+    fn reserveIncarnation(ctx: *anyopaque) raft.Error!u64 {
+        return cast(ctx).inner.reserveIncarnation();
+    }
+
     fn sync(ctx: *anyopaque) raft.Error!void {
         const self = cast(ctx);
         if (self.fail_sync) return error.WalSyncFailed;
@@ -94,6 +98,7 @@ const SyncFailingStorage = struct {
         .apply_snapshot = applySnapshot,
         .apply_local_snapshot = applyLocalSnapshot,
         .local_snapshot = localSnapshot,
+        .reserve_incarnation = reserveIncarnation,
         .sync_ = sync,
     };
 };

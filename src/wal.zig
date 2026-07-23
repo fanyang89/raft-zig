@@ -374,6 +374,7 @@ pub const WAL = struct {
     snapshot_metadata: SnapshotMetadata,
     snapshot: ?Snapshot,
     first_index: u64,
+    incarnation: u64,
 
     pub fn open(allocator: std.mem.Allocator, config: WALConfig) !WAL {
         // Create directory if it does not exist.
@@ -411,6 +412,7 @@ pub const WAL = struct {
             .snapshot_metadata = .{},
             .snapshot = null,
             .first_index = 1,
+            .incarnation = 0,
         };
         owns_sm = false;
         owns_metadata_store = false;
@@ -444,6 +446,7 @@ pub const WAL = struct {
         const has_metadata = persisted_metadata != null;
         if (persisted_metadata) |metadata| {
             self.first_index = metadata.first_index;
+            self.incarnation = metadata.incarnation;
             self.wal_index.setFirstIndex(metadata.first_index);
             self.snapshot_metadata = .{
                 .index = metadata.snapshot_index,
@@ -462,6 +465,12 @@ pub const WAL = struct {
         }
 
         const segs = self.segment_manager.segments.items;
+        if (!has_metadata) {
+            const pristine = segs.len == 1 and
+                segs[0].id == 1 and
+                segs[0].segment.file_size == SEGMENT_HEADER_SIZE;
+            if (!pristine) return error.MetadataCorrupt;
+        }
         if (!has_metadata and segs.len > 0) {
             self.first_index = segs[0].segment.first_index;
             self.wal_index.setFirstIndex(self.first_index);
@@ -666,7 +675,7 @@ pub const WAL = struct {
         const reset_segment = try self.segment_manager.rollToNew(first_index);
         try self.segment_manager.syncAll();
         try self.snapshot_store.save(snapshot);
-        try self.persistMetadataState(first_index, reset_segment.segment_id, hard_state, metadata.conf_state, metadata);
+        try self.persistMetadataState(first_index, reset_segment.segment_id, hard_state, metadata.conf_state, metadata, self.incarnation);
 
         const old_snapshot_metadata = self.snapshot_metadata;
         if (self.snapshot) |*old| old.deinit(self.allocator);
@@ -712,6 +721,7 @@ pub const WAL = struct {
             hard_state,
             metadata.conf_state,
             metadata,
+            self.incarnation,
         );
 
         const old_snapshot_metadata = self.snapshot_metadata;
@@ -732,6 +742,22 @@ pub const WAL = struct {
     pub fn sync(self: *WAL) !void {
         try self.segment_manager.syncAll();
         if (self.metadata_dirty) try self.syncMetadata();
+    }
+
+    pub fn reserveIncarnation(self: *WAL) !u64 {
+        const incarnation = std.math.add(u64, self.incarnation, 1) catch return error.IncarnationExhausted;
+        try self.segment_manager.syncAll();
+        try self.persistMetadataState(
+            self.first_index,
+            try self.firstSegmentIdFor(self.first_index),
+            self.hard_state,
+            self.conf_state,
+            self.snapshot_metadata,
+            incarnation,
+        );
+        self.incarnation = incarnation;
+        self.metadata_dirty = false;
+        return incarnation;
     }
 
     pub fn close(self: *WAL) !void {
@@ -818,6 +844,7 @@ pub const WAL = struct {
             self.hard_state,
             self.conf_state,
             self.snapshot_metadata,
+            self.incarnation,
         );
     }
 
@@ -828,6 +855,7 @@ pub const WAL = struct {
         hard_state_value: HardState,
         conf_state_value: ConfState,
         snapshot_metadata_value: SnapshotMetadata,
+        incarnation: u64,
     ) !void {
         const hard_state = serializeHardState(hard_state_value);
         const conf_state = try serializeConfState(self.allocator, conf_state_value);
@@ -837,6 +865,7 @@ pub const WAL = struct {
             .snapshot_index = snapshot_metadata_value.index,
             .snapshot_term = snapshot_metadata_value.term,
             .first_segment_id = first_segment_id,
+            .incarnation = incarnation,
             .hard_state = @constCast(hard_state[0..]),
             .conf_state = conf_state,
         });
@@ -993,6 +1022,11 @@ pub const WALStorage = struct {
         return try cloneSnapshot(allocator, snapshot);
     }
 
+    fn reserve_incarnation_impl(ctx: *anyopaque) Error!u64 {
+        const self: *WALStorage = @ptrCast(@alignCast(ctx));
+        return self.wal.reserveIncarnation() catch |err| return mapError(err);
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         self.wal.sync() catch |err| return mapError(err);
@@ -1011,6 +1045,7 @@ pub const WALStorage = struct {
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
         .local_snapshot = local_snapshot_impl,
+        .reserve_incarnation = reserve_incarnation_impl,
         .sync_ = sync_impl,
     };
 
@@ -1044,6 +1079,7 @@ fn mapError(err: anyerror) Error {
         error.RenameFailed => error.WalRenameFailed,
         error.CloseFailed => error.WalCloseFailed,
         error.MetadataCorrupt => error.WalMetadataCorrupt,
+        error.IncarnationExhausted => error.IncarnationExhausted,
         error.InvalidSegmentHeader => error.InvalidSegmentHeader,
         error.SegmentNotOpen => error.SegmentNotOpen,
         error.HardStateParseError => error.HardStateParseError,
@@ -1294,7 +1330,7 @@ test "wal: storage preserves I/O error categories" {
     try std.testing.expectEqual(error.WalDeleteFailed, mapError(error.UnlinkFailed));
 }
 
-test "wal: open, append, recover" {
+test "wal: non-empty WAL without metadata fails closed" {
     const allocator = std.testing.allocator;
     const path: [:0]const u8 = "/tmp/raft-zig-wal-test-recover";
     removeWALDir(allocator, path);
@@ -1314,25 +1350,7 @@ test "wal: open, append, recover" {
 
     metadata_store_mod.removeFiles(allocator, path);
 
-    // Reopen and verify recovery.
-    {
-        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
-        defer wal.deinit();
-        var regenerated_metadata = (try wal.metadata_store.load()).?;
-        defer regenerated_metadata.deinit(allocator);
-        try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
-        try std.testing.expectEqual(@as(u64, 1), wal.hard_state.term);
-        try std.testing.expectEqual(@as(u64, 2), wal.hard_state.commit);
-
-        const ents = try wal.readEntries(allocator, 1, 3, null);
-        defer {
-            for (ents) |*e| e.deinit(allocator);
-            allocator.free(ents);
-        }
-        try std.testing.expectEqual(@as(usize, 2), ents.len);
-        try std.testing.expectEqualStrings("a", ents[0].data);
-        try std.testing.expectEqualStrings("b", ents[1].data);
-    }
+    try std.testing.expectError(error.MetadataCorrupt, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
 
     removeWALDir(allocator, path);
 }
@@ -1663,6 +1681,38 @@ test "wal: restart recovers entries and hardstate via WALStorage" {
         try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.term);
         try std.testing.expectEqual(@as(u64, 1), rs_copy.hard_state.vote);
         try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.commit);
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: incarnation reservation survives metadata rewrites and restart" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-incarnation";
+    removeWALDir(allocator, path);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try std.testing.expectEqual(@as(u64, 1), try iface.reserveIncarnation());
+        try iface.append(allocator, &.{.{ .index = 1, .term = 1 }});
+        try iface.setHardState(.{ .term = 1, .vote = 1, .commit = 1 });
+        try iface.sync();
+        var voters = [_]u64{1};
+        try iface.applyLocalSnapshot(allocator, .{
+            .data = @constCast("state"),
+            .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = &voters } },
+        });
+    }
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        try std.testing.expectEqual(@as(u64, 1), ws.wal.incarnation);
+        try std.testing.expectEqual(@as(u64, 2), try ws.asWritableStorage().reserveIncarnation());
+        ws.wal.incarnation = std.math.maxInt(u64);
+        try std.testing.expectError(error.IncarnationExhausted, ws.asWritableStorage().reserveIncarnation());
     }
 
     removeWALDir(allocator, path);

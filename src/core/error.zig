@@ -56,6 +56,7 @@ pub const Error = error{
     WalRenameFailed,
     WalCloseFailed,
     WalMetadataCorrupt,
+    IncarnationExhausted,
 
     // RaftLog errors.
     ZeroEntriesInSlice,
@@ -156,6 +157,7 @@ pub fn name(e: Error) []const u8 {
         error.WalRenameFailed => "WalRenameFailed",
         error.WalCloseFailed => "WalCloseFailed",
         error.WalMetadataCorrupt => "WalMetadataCorrupt",
+        error.IncarnationExhausted => "IncarnationExhausted",
         error.ZeroEntriesInSlice => "ZeroEntriesInSlice",
         error.StepLocalMsg => "StepLocalMsg",
         error.StepPeerNotFound => "StepPeerNotFound",
