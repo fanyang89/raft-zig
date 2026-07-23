@@ -44,6 +44,10 @@ run = "scripts/run-fuzz.sh fuzz-confchange 100K"
 description = "Fuzz deterministic cluster simulation"
 run = "scripts/run-fuzz.sh fuzz-sim 10K"
 
+[tasks.fuzz-wal-crash]
+description = "Fuzz WAL crash recovery on Marionette SimDisk"
+run = "scripts/run-fuzz.sh fuzz-wal-crash 1K"
+
 [tasks.vopr-smoke]
 description = "Run Marionette integration smoke tests"
 run = "zig build vopr-smoke --summary all"

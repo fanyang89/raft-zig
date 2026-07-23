@@ -609,3 +609,98 @@ test "WAL crash recovery ignores a segment whose directory entry was lost" {
     try std.testing.expectEqual(@as(u64, 2), recovered.lastIndex());
     try std.testing.expectEqual(@as(u64, 2), recovered.hard_state.commit);
 }
+
+test "fuzz: WAL crash recovery preserves the committed prefix" {
+    try std.testing.fuzz({}, fuzzWalCrashRecovery, .{ .corpus = &.{
+        "",
+        "lost-write",
+        "torn-reordered-suffix",
+    } });
+}
+
+fn fuzzWalCrashRecovery(_: void, smith: *std.testing.Smith) !void {
+    const allocator = std.testing.allocator;
+    var fixture = try initSimWal(allocator, smith.value(u64), 512);
+    defer fixture.deinit();
+    var backend = MarionetteWalFs.init(fixture.sim.env.io(), fixture.sim.env.disk);
+    var wal = try raft.WAL.open(allocator, .{
+        .dir = "wal",
+        .segment_size = 1024,
+        .fs = backend.fileSystem(),
+    });
+    var wal_is_open = true;
+    defer if (wal_is_open) wal.deinit();
+
+    var committed: u64 = 0;
+    const rounds = smith.valueRangeAtMost(u8, 1, 6);
+    for (0..rounds) |round| {
+        const stable_index = committed + 1;
+        const stable_term: u64 = @intCast(round + 1);
+        var stable_data: [16]u8 = undefined;
+        smith.bytes(&stable_data);
+        try wal.append(&.{.{ .index = stable_index, .term = stable_term, .data = &stable_data }});
+        try wal.saveHardState(.{ .term = stable_term, .vote = 1, .commit = stable_index });
+        try wal.sync();
+        committed = stable_index;
+
+        if (smith.value(bool)) _ = try wal.reserveIncarnation();
+        if (smith.value(bool) and wal.firstIndex() < committed) {
+            const compact_index = smith.valueRangeAtMost(u64, wal.firstIndex(), committed);
+            try wal.compact(compact_index);
+        }
+        if (smith.value(bool)) {
+            const snapshot_term = try wal.term(committed);
+            var voters = [_]u64{1};
+            try wal.applyLocalSnapshot(.{
+                .data = @constCast("fuzz-snapshot"),
+                .metadata = .{
+                    .index = committed,
+                    .term = snapshot_term,
+                    .conf_state = .{ .voters = &voters },
+                },
+            });
+        }
+
+        var volatile_data: [2048]u8 = undefined;
+        smith.bytes(&volatile_data);
+        try wal.append(&.{.{
+            .index = committed + 1,
+            .term = stable_term + 1,
+            .data = &volatile_data,
+        }});
+        switch (smith.valueRangeAtMost(u8, 0, 2)) {
+            0 => try fixture.sim.control.disk.setFaults(.{
+                .crash_lost_write_rate = .always(),
+                .crash_lost_metadata_rate = .always(),
+            }),
+            1 => try fixture.sim.control.disk.setFaults(.{
+                .crash_torn_write_rate = .always(),
+                .crash_lost_metadata_rate = .always(),
+            }),
+            else => try fixture.sim.control.disk.setFaults(.{
+                .crash_reordered_write_rate = .always(),
+                .crash_lost_metadata_rate = .always(),
+            }),
+        }
+        try fixture.sim.control.disk.crash();
+        wal.deinit();
+        wal_is_open = false;
+        try restartAfterCrash(fixture.sim);
+        try fixture.sim.control.disk.setFaults(.{});
+        wal = try raft.WAL.open(allocator, .{
+            .dir = "wal",
+            .segment_size = 1024,
+            .fs = backend.fileSystem(),
+        });
+        wal_is_open = true;
+        try std.testing.expectEqual(committed, wal.hard_state.commit);
+        try std.testing.expect(wal.firstIndex() <= committed + 1);
+        try std.testing.expect(wal.lastIndex() >= committed);
+        if (wal.firstIndex() <= committed) {
+            _ = try wal.term(committed);
+        } else {
+            try std.testing.expectEqual(committed, wal.snapshot_metadata.index);
+            _ = try wal.term(committed);
+        }
+    }
+}

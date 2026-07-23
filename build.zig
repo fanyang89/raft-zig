@@ -125,6 +125,8 @@ pub fn build(b: *std.Build) void {
         });
         const run_wal_durability = b.addRunArtifact(wal_durability_tests);
         wal_durability_step.dependOn(&run_wal_durability.step);
+        const fuzz_wal_crash_step = b.step("fuzz-wal-crash", "Fuzz WAL crash recovery on Marionette SimDisk");
+        fuzz_wal_crash_step.dependOn(&run_wal_durability.step);
     }
 
     const fuzz_smoke_step = b.step("fuzz-smoke", "Run fuzz corpus smoke tests");
