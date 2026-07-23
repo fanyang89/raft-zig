@@ -13,6 +13,7 @@ const types = @import("core/types.zig");
 
 pub const Error = error_model.Error;
 pub const Entry = types.Entry;
+pub const Message = types.Message;
 pub const Snapshot = types.Snapshot;
 pub const HardState = types.HardState;
 pub const ConfState = types.ConfState;
@@ -80,6 +81,43 @@ pub fn cloneEntry(allocator: std.mem.Allocator, src: Entry) !Entry {
         .data = data,
         .context = context,
         .checksum = src.checksum,
+    };
+}
+
+/// Copy a Message and all nested owned buffers into fresh allocations.
+pub fn cloneMessage(allocator: std.mem.Allocator, src: Message) !Message {
+    var entries = try allocator.alloc(Entry, src.entries.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (entries[0..initialized]) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    for (src.entries) |entry| {
+        entries[initialized] = try cloneEntry(allocator, entry);
+        initialized += 1;
+    }
+
+    var snapshot: ?Snapshot = null;
+    if (src.snapshot) |value| snapshot = try cloneSnapshot(allocator, value);
+    errdefer if (snapshot) |*value| value.deinit(allocator);
+
+    const context: []u8 = if (src.context.len == 0) &.{} else try allocator.dupe(u8, src.context);
+    return .{
+        .msg_type = src.msg_type,
+        .to = src.to,
+        .from = src.from,
+        .term = src.term,
+        .log_term = src.log_term,
+        .index = src.index,
+        .entries = entries,
+        .commit = src.commit,
+        .commit_term = src.commit_term,
+        .snapshot = snapshot,
+        .request_snapshot = src.request_snapshot,
+        .reject = src.reject,
+        .reject_hint = src.reject_hint,
+        .context = context,
+        .priority = src.priority,
     };
 }
 
@@ -334,10 +372,54 @@ test "clone helpers clean up allocation failures" {
             });
             defer cloned.deinit(allocator);
         }
+
+        fn cloneMessageAll(allocator: std.mem.Allocator) !void {
+            var entries = [_]Entry{.{
+                .data = @constCast("entry"),
+                .context = @constCast("entry-context"),
+            }};
+            var cloned = try cloneMessage(allocator, .{
+                .entries = entries[0..],
+                .context = @constCast("message-context"),
+                .snapshot = .{
+                    .data = @constCast("snapshot"),
+                    .metadata = .{
+                        .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+                    },
+                },
+            });
+            defer cloned.deinit(allocator);
+        }
     };
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneEntryAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneSnapshotAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneMessageAll, .{});
+}
+
+test "cloneMessage deeply copies nested buffers" {
+    var entries = [_]Entry{.{
+        .data = @constCast("entry"),
+        .context = @constCast("entry-context"),
+    }};
+    const source = Message{
+        .entries = entries[0..],
+        .context = @constCast("message-context"),
+        .snapshot = .{
+            .data = @constCast("snapshot"),
+            .metadata = .{ .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) } },
+        },
+    };
+    var cloned = try cloneMessage(std.testing.allocator, source);
+    defer cloned.deinit(std.testing.allocator);
+
+    try std.testing.expect(cloned.entries.ptr != source.entries.ptr);
+    try std.testing.expect(cloned.entries[0].data.ptr != source.entries[0].data.ptr);
+    try std.testing.expect(cloned.entries[0].context.ptr != source.entries[0].context.ptr);
+    try std.testing.expect(cloned.context.ptr != source.context.ptr);
+    try std.testing.expect(cloned.snapshot.?.data.ptr != source.snapshot.?.data.ptr);
+    try std.testing.expect(cloned.snapshot.?.metadata.conf_state.voters.ptr != source.snapshot.?.metadata.conf_state.voters.ptr);
+    try std.testing.expectEqualSlices(u8, source.snapshot.?.data, cloned.snapshot.?.data);
 }
 
 test "get entries context canAsync" {

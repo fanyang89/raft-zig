@@ -86,7 +86,7 @@ pub const ProposalTracker = struct {
     /// Register a proposal. `ctx_bytes` is duped internally; the caller
     /// retains ownership of the input. `timeout_ticks` of 0 means no timeout.
     pub fn track(self: *ProposalTracker, ctx_bytes: []const u8, callback: ProposalCallback, current_tick: u64, timeout_ticks: u64) !void {
-        if (self.proposals.contains(ctx_bytes)) return;
+        if (self.proposals.contains(ctx_bytes)) return error.DuplicateRequest;
         const key = try self.allocator.dupe(u8, ctx_bytes);
         errdefer self.allocator.free(key);
         try self.proposals.put(key, .{
@@ -135,7 +135,7 @@ pub const ProposalTracker = struct {
 
     /// Register a read-index request.
     pub fn trackRead(self: *ProposalTracker, ctx_bytes: []const u8, callback: ReadIndexCallback, current_tick: u64, timeout_ticks: u64) !void {
-        if (self.reads.contains(ctx_bytes)) return;
+        if (self.reads.contains(ctx_bytes)) return error.DuplicateRequest;
         const key = try self.allocator.dupe(u8, ctx_bytes);
         errdefer self.allocator.free(key);
         try self.reads.put(key, .{
@@ -221,6 +221,19 @@ const Tester = struct {
     }
 };
 
+const ReadTester = struct {
+    result: ?ReadIndexResult = null,
+
+    fn readCb(ctx: *anyopaque, result: ReadIndexResult) void {
+        const self: *ReadTester = @ptrCast(@alignCast(ctx));
+        self.result = result;
+    }
+
+    fn readCallback(self: *ReadTester) ReadIndexCallback {
+        return .{ .ctx = self, .function = readCb };
+    }
+};
+
 test "proposal tracker track and complete" {
     const allocator = std.testing.allocator;
     var tracker = ProposalTracker.init(allocator);
@@ -234,6 +247,20 @@ test "proposal tracker track and complete" {
     try std.testing.expect(tester.result != null);
     try std.testing.expectEqualStrings("response_data", tester.result.?.ok);
     try std.testing.expectEqual(@as(usize, 0), tracker.pendingCount());
+}
+
+test "proposal tracker rejects duplicate contexts" {
+    const allocator = std.testing.allocator;
+    var tracker = ProposalTracker.init(allocator);
+    defer tracker.deinit();
+
+    var proposal = Tester{};
+    try tracker.track("proposal", proposal.proposalCallback(), 0, 0);
+    try std.testing.expectError(error.DuplicateRequest, tracker.track("proposal", proposal.proposalCallback(), 0, 0));
+
+    var read = ReadTester{};
+    try tracker.trackRead("read", read.readCallback(), 0, 0);
+    try std.testing.expectError(error.DuplicateRequest, tracker.trackRead("read", read.readCallback(), 0, 0));
 }
 
 test "proposal tracker fail and failAll" {

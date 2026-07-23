@@ -48,14 +48,14 @@ pub const ProposalQueue = struct {
         self.items.deinit(self.allocator);
     }
 
-    pub fn push(self: *ProposalQueue, data: []u8, ctx: []u8, callback: ProposalCallback) void {
+    pub fn push(self: *ProposalQueue, data: []u8, ctx: []u8, callback: ProposalCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        self.items.append(self.allocator, .{
+        try self.items.append(self.allocator, .{
             .data = data,
             .ctx = ctx,
             .callback = callback,
-        }) catch {};
+        });
     }
 
     pub fn tryPop(self: *ProposalQueue) ?ProposalItem {
@@ -88,10 +88,10 @@ pub const ReadIndexQueue = struct {
         self.items.deinit(self.allocator);
     }
 
-    pub fn push(self: *ReadIndexQueue, ctx: []u8, callback: ReadIndexCallback) void {
+    pub fn push(self: *ReadIndexQueue, ctx: []u8, callback: ReadIndexCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        self.items.append(self.allocator, .{ .ctx = ctx, .callback = callback }) catch {};
+        try self.items.append(self.allocator, .{ .ctx = ctx, .callback = callback });
     }
 
     pub fn tryPop(self: *ReadIndexQueue) ?ReadIndexItem {
@@ -119,7 +119,7 @@ test "proposal queue push and tryPop" {
     };
     const data = try std.testing.allocator.dupe(u8, "hello");
     const ctx = try std.testing.allocator.dupe(u8, "ctx1");
-    q.push(data, ctx, .{ .ctx = undefined, .function = Cb.cb });
+    try q.push(data, ctx, .{ .ctx = undefined, .function = Cb.cb });
 
     const item = q.tryPop().?;
     try std.testing.expectEqualStrings("hello", item.data);
@@ -150,7 +150,7 @@ test "proposal queue supports concurrent producers and consumption" {
             for (0..items_per_producer) |_| {
                 const data = allocator.dupe(u8, "data") catch @panic("OOM");
                 const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
-                self.queue.push(data, ctx, .{ .ctx = self.queue, .function = Cb.callback });
+                self.queue.push(data, ctx, .{ .ctx = self.queue, .function = Cb.callback }) catch unreachable;
             }
             _ = self.done.fetchAdd(1, .release);
         }
@@ -202,7 +202,7 @@ test "read index queue supports concurrent producers and consumption" {
         fn run(self: *@This()) void {
             for (0..items_per_producer) |_| {
                 const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
-                self.queue.push(ctx, .{ .ctx = self.queue, .function = Cb.callback });
+                self.queue.push(ctx, .{ .ctx = self.queue, .function = Cb.callback }) catch unreachable;
             }
             _ = self.done.fetchAdd(1, .release);
         }

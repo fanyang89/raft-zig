@@ -79,7 +79,7 @@ fn createCluster() !Cluster {
 /// Drive one event-loop cycle: tick all raftors, then poll the network.
 fn tickCluster(c: *Cluster) !void {
     for (c.raftors) |r| _ = try r.tick();
-    _ = c.net.pollAll();
+    _ = try c.net.pollAll();
 }
 
 fn countLeaders(c: *Cluster) usize {

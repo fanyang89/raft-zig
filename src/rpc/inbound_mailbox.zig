@@ -16,6 +16,7 @@ fn spinLock(m: *std.atomic.Mutex) void {
 pub const InboundMailbox = struct {
     mutex: std.atomic.Mutex = .unlocked,
     inbox: std.ArrayList(Message),
+    head: usize = 0,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) InboundMailbox {
@@ -25,16 +26,35 @@ pub const InboundMailbox = struct {
     pub fn deinit(self: *InboundMailbox) void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        for (self.inbox.items) |*m| m.deinit(self.allocator);
+        for (self.inbox.items[self.head..]) |*m| m.deinit(self.allocator);
         self.inbox.deinit(self.allocator);
     }
 
-    /// Push a message from the grpc handler thread. Takes ownership of the
-    /// message's heap-allocated fields.
-    pub fn push(self: *InboundMailbox, msg: Message) void {
+    /// Push a message from the grpc handler thread. Ownership transfers only
+    /// when this function succeeds.
+    pub fn push(self: *InboundMailbox, msg: Message) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        self.inbox.append(self.allocator, msg) catch {};
+        if (self.head >= 64 and self.head >= self.inbox.items.len - self.head) {
+            const pending = self.inbox.items.len - self.head;
+            std.mem.copyForwards(Message, self.inbox.items[0..pending], self.inbox.items[self.head..]);
+            self.inbox.shrinkRetainingCapacity(pending);
+            self.head = 0;
+        }
+        try self.inbox.append(self.allocator, msg);
+    }
+
+    pub fn pop(self: *InboundMailbox) ?Message {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        if (self.head == self.inbox.items.len) return null;
+        const message = self.inbox.items[self.head];
+        self.head += 1;
+        if (self.head == self.inbox.items.len) {
+            self.inbox.clearRetainingCapacity();
+            self.head = 0;
+        }
+        return message;
     }
 
     /// Drain all pending messages. Returns an owned slice; caller must call
@@ -42,13 +62,17 @@ pub const InboundMailbox = struct {
     pub fn drain(self: *InboundMailbox) ![]Message {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.inbox.toOwnedSlice(self.allocator);
+        if (self.head == 0) return self.inbox.toOwnedSlice(self.allocator);
+        const messages = try self.allocator.dupe(Message, self.inbox.items[self.head..]);
+        self.inbox.clearRetainingCapacity();
+        self.head = 0;
+        return messages;
     }
 
     pub fn empty(self: *InboundMailbox) bool {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.inbox.items.len == 0;
+        return self.head == self.inbox.items.len;
     }
 };
 
@@ -59,8 +83,8 @@ test "inbound mailbox push and drain" {
 
     try std.testing.expect(mb.empty());
 
-    mb.push(.{ .msg_type = .append, .to = 1, .from = 2, .term = 1 });
-    mb.push(.{ .msg_type = .heartbeat, .to = 1, .from = 3, .term = 1 });
+    try mb.push(.{ .msg_type = .append, .to = 1, .from = 2, .term = 1 });
+    try mb.push(.{ .msg_type = .heartbeat, .to = 1, .from = 3, .term = 1 });
     try std.testing.expect(!mb.empty());
 
     const msgs = try mb.drain();
@@ -70,6 +94,30 @@ test "inbound mailbox push and drain" {
     }
     try std.testing.expectEqual(@as(usize, 2), msgs.len);
     try std.testing.expectEqual(types.MessageType.append, msgs[0].msg_type);
+    try std.testing.expect(mb.empty());
+}
+
+test "inbound mailbox compacts consumed prefix" {
+    const allocator = std.testing.allocator;
+    var mb = InboundMailbox.init(allocator);
+    defer mb.deinit();
+
+    for (0..128) |index| try mb.push(.{ .msg_type = .append, .index = index });
+    for (0..96) |index| {
+        var message = mb.pop().?;
+        defer message.deinit(allocator);
+        try std.testing.expectEqual(index, message.index);
+    }
+
+    try mb.push(.{ .msg_type = .append, .index = 128 });
+    try std.testing.expectEqual(@as(usize, 0), mb.head);
+    try std.testing.expectEqual(@as(usize, 33), mb.inbox.items.len);
+
+    for (96..129) |index| {
+        var message = mb.pop().?;
+        defer message.deinit(allocator);
+        try std.testing.expectEqual(index, message.index);
+    }
     try std.testing.expect(mb.empty());
 }
 
@@ -94,7 +142,7 @@ test "inbound mailbox supports concurrent producers and draining" {
                     .from = self.id,
                     .to = 1,
                     .index = index,
-                });
+                }) catch unreachable;
             }
             _ = self.done.fetchAdd(1, .release);
         }

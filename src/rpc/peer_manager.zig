@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const grpc = @import("grpc_lite");
+const Error = @import("../core/error.zig").Error;
 
 pub const PeerInfo = struct {
     id: u64,
@@ -36,13 +37,15 @@ pub const PeerManager = struct {
         self.peers.deinit();
     }
 
-    pub fn addPeer(self: *PeerManager, id: u64, addr: []const u8) !void {
-        if (self.peers.contains(id)) return;
+    pub fn addPeer(self: *PeerManager, id: u64, addr: []const u8) !bool {
+        if (self.peers.contains(id)) return false;
         const addr_copy = try self.allocator.dupe(u8, addr);
+        errdefer self.allocator.free(addr_copy);
         try self.peers.put(id, .{
             .id = id,
             .addr = addr_copy,
         });
+        return true;
     }
 
     pub fn removePeer(self: *PeerManager, id: u64) void {
@@ -73,10 +76,7 @@ pub const PeerManager = struct {
         // Create a new Channel.
         const ch = try self.allocator.create(grpc.Channel);
         errdefer self.allocator.destroy(ch);
-        ch.* = grpc.Channel.init(self.allocator, info.addr, .{}) catch {
-            self.allocator.destroy(ch);
-            return null;
-        };
+        ch.* = try grpc.Channel.init(self.allocator, info.addr, .{});
         info.channel = ch;
         info.connected = true;
         return ch;
@@ -84,16 +84,29 @@ pub const PeerManager = struct {
 
     /// Send a unary RPC to the peer. Fire-and-forget: the response is
     /// checked for status but the body is discarded.
-    pub fn send(self: *PeerManager, id: u64, method: []const u8, payload: []const u8) void {
-        const ch = self.getOrCreateChannel(id) catch return orelse return;
-        var res = ch.callUnary(self.allocator, method, payload, .{
+    pub fn send(self: *PeerManager, id: u64, method: []const u8, payload: []const u8) Error!void {
+        const ch = self.getOrCreateChannel(id) catch |err| return mapTransportError(err);
+        const channel = ch orelse return error.ConnectionClosed;
+        var res = channel.callUnary(self.allocator, method, payload, .{
             .timeout_ns = 200 * std.time.ns_per_ms,
-        }) catch return;
+        }) catch |err| return mapTransportError(err);
         defer res.deinit();
-        // Fire-and-forget: we don't care about the response body.
+        if (!res.status.isOk()) return mapStatus(res.status.code);
     }
 
     pub fn count(self: PeerManager) usize {
         return self.peers.count();
     }
 };
+
+fn mapTransportError(err: anyerror) Error {
+    return if (err == error.OutOfMemory) error.OutOfMemory else error.ConnectionClosed;
+}
+
+fn mapStatus(code: grpc.StatusCode) Error {
+    return switch (code) {
+        .deadline_exceeded => error.Timeout,
+        .data_loss, .invalid_argument => error.PayloadParseFailed,
+        else => error.ConnectionClosed,
+    };
+}

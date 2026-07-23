@@ -139,7 +139,7 @@ pub const ReadyProcessor = struct {
         }
 
         // 5. Send messages (from rd.light — pre-advance messages).
-        if (rd.light.messages.len > 0) self.transport.send(rd.light.messages);
+        self.sendMessages(rd.light.messages);
 
         // 6. Apply committed entries from rd.light.
         if (rd.light.committed_entries.len > 0) try self.applyCommittedEntries(rd.light.committed_entries);
@@ -159,7 +159,7 @@ pub const ReadyProcessor = struct {
         defer light_rd.deinit(self.allocator);
 
         // Send messages from advance's light ready.
-        if (light_rd.messages.len > 0) self.transport.send(light_rd.messages);
+        self.sendMessages(light_rd.messages);
 
         // Apply committed entries from advance's light ready.
         if (light_rd.committed_entries.len > 0) try self.applyCommittedEntries(light_rd.committed_entries);
@@ -172,6 +172,18 @@ pub const ReadyProcessor = struct {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    fn sendMessages(self: *ReadyProcessor, messages: []const Message) void {
+        for (messages) |*message| {
+            self.transport.send(message[0..1]) catch |err| {
+                log.warn("failed to send Raft message to {}: {s}", .{ message.to, @errorName(err) });
+                self.raw_node.*.reportUnreachable(message.to) catch {};
+                if (message.msg_type == .snapshot) {
+                    self.raw_node.*.reportSnapshot(message.to, .failure) catch {};
+                }
+            };
+        }
+    }
 
     fn checkLeadershipChange(self: *ReadyProcessor, rd: Ready) void {
         if (rd.ss) |ss| {
@@ -265,7 +277,21 @@ pub const ReadyProcessor = struct {
                     return e;
                 };
                 defer applied_cs.deinit(self.allocator);
-                self.storage.setConfState(self.allocator, applied_cs) catch {};
+                self.storage.setConfState(self.allocator, applied_cs) catch |err| {
+                    log.warn("failed to persist configuration: {s}", .{@errorName(err)});
+                    self.fatal_error = err;
+                };
+                for (cc.changes) |change| switch (change.change_type) {
+                    .add_node, .add_learner_node => _ = self.transport.addPeer(change.node_id, cc.context) catch |err| {
+                        log.warn("failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
+                        self.fatal_error = err;
+                        continue;
+                    },
+                    .remove_node => self.transport.removePeer(change.node_id) catch |err| {
+                        log.warn("failed to remove transport peer {}: {s}", .{ change.node_id, @errorName(err) });
+                        self.fatal_error = err;
+                    },
+                };
             },
         }
     }

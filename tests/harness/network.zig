@@ -123,7 +123,7 @@ pub const Network = struct {
         }
         try cloned.ensureTotalCapacity(allocator, messages.len);
         for (messages) |message| {
-            cloned.appendAssumeCapacity(try cloneMessage(allocator, message));
+            cloned.appendAssumeCapacity(try raft.cloneMessage(allocator, message));
         }
         try self.pending.ensureUnusedCapacity(allocator, cloned.items.len);
         for (cloned.items) |message| self.pending.appendAssumeCapacity(message);
@@ -184,7 +184,7 @@ pub const Network = struct {
 
     pub fn stepLocal(self: *Network, target: u64, input: Message) !void {
         const peer = self.peers.get(target) orelse return error.UnknownPeer;
-        var message = try cloneMessage(allocator, input);
+        var message = try raft.cloneMessage(allocator, input);
         defer message.deinit(allocator);
         peer.raft.step(&message) catch |err| switch (err) {
             error.ProposalDropped, error.RequestSnapshotDropped => {},
@@ -406,44 +406,6 @@ fn isTransientConvergenceError(err: anyerror) bool {
         error.ProgressNotConverged,
         => true,
         else => false,
-    };
-}
-
-fn cloneMessage(alloc: std.mem.Allocator, src: Message) !Message {
-    var entries = try alloc.alloc(raft.Entry, src.entries.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (entries[0..initialized]) |*entry| entry.deinit(alloc);
-        alloc.free(entries);
-    }
-    for (src.entries) |entry| {
-        entries[initialized] = try raft.cloneEntry(alloc, entry);
-        initialized += 1;
-    }
-
-    var snapshot: ?raft.Snapshot = null;
-    if (src.snapshot) |value| snapshot = try raft.cloneSnapshot(alloc, value);
-    errdefer if (snapshot) |*value| value.deinit(alloc);
-
-    const context: []u8 = if (src.context.len == 0) &.{} else try alloc.dupe(u8, src.context);
-    errdefer if (context.len != 0) alloc.free(context);
-
-    return .{
-        .msg_type = src.msg_type,
-        .to = src.to,
-        .from = src.from,
-        .term = src.term,
-        .log_term = src.log_term,
-        .index = src.index,
-        .entries = entries,
-        .commit = src.commit,
-        .commit_term = src.commit_term,
-        .snapshot = snapshot,
-        .request_snapshot = src.request_snapshot,
-        .reject = src.reject,
-        .reject_hint = src.reject_hint,
-        .context = context,
-        .priority = src.priority,
     };
 }
 

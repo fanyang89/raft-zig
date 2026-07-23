@@ -102,9 +102,9 @@ fn destroyCluster(comptime n: usize, net: *LoopbackNetwork, nodes: *[n]Node) voi
 /// Callback invoked by LoopbackTransport when a message arrives. Forwards
 /// the message to the node's RawNode. Ownership of the Message's heap-
 /// allocated fields transfers to `step()`, which calls `defer m.deinit()`.
-fn messageCallback(ctx: *anyopaque, msg: Message) void {
+fn messageCallback(ctx: *anyopaque, msg: Message) raft.Error!void {
     const node: *Node = @ptrCast(@alignCast(ctx));
-    node.raw_node.step(msg) catch {};
+    return node.raw_node.step(msg);
 }
 
 /// Drive one full event-loop cycle across all nodes:
@@ -125,17 +125,17 @@ fn tickCluster(net: *raft.LoopbackNetwork, nodes: *[3]Node) !void {
             if (rd.light.committed_entries.len > 0) {
                 // Apply to storage (simulated).
             }
-            if (rd.light.messages.len > 0) nd.transport.transport().send(rd.light.messages);
+            if (rd.light.messages.len > 0) try nd.transport.transport().send(rd.light.messages);
 
             var light = try nd.raw_node.advance(rd);
             defer light.deinit(allocator);
-            if (light.messages.len > 0) nd.transport.transport().send(light.messages);
+            if (light.messages.len > 0) try nd.transport.transport().send(light.messages);
             nd.raw_node.advanceApply();
         }
     }
 
     // 3. Deliver messages.
-    _ = net.pollAll();
+    _ = try net.pollAll();
 }
 
 fn countLeaders(nodes: *[3]Node) usize {

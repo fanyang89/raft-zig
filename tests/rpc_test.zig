@@ -13,7 +13,7 @@ test "rpc: inbound mailbox push and drain" {
     var mb = raft.InboundMailbox.init(allocator);
     defer mb.deinit();
 
-    mb.push(.{ .msg_type = .heartbeat, .to = 1, .from = 2, .term = 1 });
+    try mb.push(.{ .msg_type = .heartbeat, .to = 1, .from = 2, .term = 1 });
     try std.testing.expect(!mb.empty());
 
     const msgs = try mb.drain();
@@ -29,8 +29,8 @@ test "rpc: peer manager add and remove" {
     var pm = raft.PeerManager.init(allocator);
     defer pm.deinit();
 
-    try pm.addPeer(1, "127.0.0.1:9001");
-    try pm.addPeer(2, "127.0.0.1:9002");
+    try std.testing.expect(try pm.addPeer(1, "127.0.0.1:9001"));
+    try std.testing.expect(try pm.addPeer(2, "127.0.0.1:9002"));
     try std.testing.expectEqual(@as(usize, 2), pm.count());
     try std.testing.expect(pm.hasPeer(1));
     try std.testing.expect(pm.hasPeer(2));
@@ -62,13 +62,13 @@ test "rpc: grpc transport self-connect round-trip" {
     defer tp.destroy();
 
     // Add ourselves as a peer.
-    tp.transport().addPeer(1, "127.0.0.1:19100");
+    try std.testing.expect(try tp.transport().addPeer(1, "127.0.0.1:19100"));
 
     // Set callback to record received messages.
     var received: ?raft.Message = null;
     const Cb = struct {
         ptr: *?raft.Message,
-        fn invoke(ctx: *anyopaque, msg: raft.Message) void {
+        fn invoke(ctx: *anyopaque, msg: raft.Message) raft.Error!void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.ptr.* = msg;
         }
@@ -77,10 +77,10 @@ test "rpc: grpc transport self-connect round-trip" {
     tp.transport().setMessageCallback(.{ .ctx = &cb_obj, .function = Cb.invoke });
 
     // Send a message to ourselves (callUnary is synchronous — blocks until done).
-    tp.transport().send(&.{.{ .msg_type = .heartbeat, .to = 1, .from = 1, .term = 1 }});
+    try tp.transport().send(&.{.{ .msg_type = .heartbeat, .to = 1, .from = 1, .term = 1 }});
 
     for (0..1000) |_| {
-        tp.transport().poll();
+        _ = try tp.transport().pollOne();
         if (received != null) break;
         try std.testing.io.sleep(.fromNanoseconds(std.time.ns_per_ms), .awake);
     }

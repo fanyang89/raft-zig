@@ -102,28 +102,28 @@ pub const GrpcLiteTransport = struct {
     /// Runs on grpc-lite's libuv thread — must not touch raft state.
     fn handleMessage(
         context: ?*anyopaque,
-        allocator: std.mem.Allocator,
+        response_allocator: std.mem.Allocator,
         _: *grpc.ServerContext,
         request: []const u8,
     ) !grpc.UnaryResponse {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(context.?));
-        const msg = codec_mod.decodeMessage(allocator, request) catch {
+        var msg = codec_mod.decodeMessage(self.allocator, request) catch {
             log.warn("failed to decode inbound message ({} bytes)", .{request.len});
-            return grpc.UnaryResponse.ok(allocator, &.{});
+            return grpc.UnaryResponse.ok(response_allocator, &.{});
         };
-        self.mailbox.push(msg);
-        return grpc.UnaryResponse.ok(allocator, &.{});
+        self.mailbox.push(msg) catch |err| {
+            msg.deinit(self.allocator);
+            return err;
+        };
+        return grpc.UnaryResponse.ok(response_allocator, &.{});
     }
 
     /// Drain inbound messages and deliver to the callback.
-    pub fn poll(self: *GrpcLiteTransport) void {
-        if (self.mailbox.empty()) return;
-        const cb = self.callback orelse return;
-        const msgs = self.mailbox.drain() catch return;
-        defer self.allocator.free(msgs);
-        for (msgs) |msg| {
-            cb.invoke(msg);
-        }
+    pub fn pollOne(self: *GrpcLiteTransport) Error!bool {
+        const cb = self.callback orelse return false;
+        const msg = self.mailbox.pop() orelse return false;
+        try cb.invoke(msg);
+        return true;
     }
 
     // ---- Transport vtable impl ----
@@ -131,34 +131,34 @@ pub const GrpcLiteTransport = struct {
     fn startImpl(_: *anyopaque) Error!void {}
     fn stopImpl(_: *anyopaque) void {}
 
-    fn addPeerImpl(ctx: *anyopaque, id: u64, addr: []const u8) void {
+    fn addPeerImpl(ctx: *anyopaque, id: u64, addr: []const u8) Error!bool {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(ctx));
-        self.peer_manager.addPeer(id, addr) catch {};
+        return self.peer_manager.addPeer(id, addr);
     }
 
-    fn removePeerImpl(ctx: *anyopaque, id: u64) void {
+    fn removePeerImpl(ctx: *anyopaque, id: u64) Error!void {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(ctx));
         self.peer_manager.removePeer(id);
     }
 
-    fn sendImpl(ctx: *anyopaque, messages: []const Message) void {
+    fn sendImpl(ctx: *anyopaque, messages: []const Message) Error!void {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(ctx));
         for (messages) |msg| {
             if (msg.to == 0) continue;
-            const bytes = codec_mod.encodeMessage(self.allocator, msg) catch continue;
+            const bytes = codec_mod.encodeMessage(self.allocator, msg) catch |err| return mapCodecError(err);
             defer self.allocator.free(bytes);
-            self.peer_manager.send(msg.to, raft_method_path, bytes);
+            try self.peer_manager.send(msg.to, raft_method_path, bytes);
         }
     }
 
-    fn setMessageCallbackImpl(ctx: *anyopaque, cb: MessageCallback) void {
+    fn setMessageCallbackImpl(ctx: *anyopaque, cb: ?MessageCallback) void {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(ctx));
         self.callback = cb;
     }
 
-    fn pollImpl(ctx: *anyopaque) void {
+    fn pollOneImpl(ctx: *anyopaque) Error!bool {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(ctx));
-        self.poll();
+        return self.pollOne();
     }
 
     pub const vtable: Transport.VTable = .{
@@ -168,10 +168,18 @@ pub const GrpcLiteTransport = struct {
         .remove_peer = removePeerImpl,
         .send = sendImpl,
         .set_message_callback = setMessageCallbackImpl,
-        .poll = pollImpl,
+        .poll_one = pollOneImpl,
     };
 
     pub fn transport(self: *GrpcLiteTransport) Transport {
         return .{ .ctx = self, .vtable = &vtable };
     }
 };
+
+fn mapCodecError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.MessageTooLarge => error.MessageTooLarge,
+        else => error.PayloadParseFailed,
+    };
+}
