@@ -50,7 +50,7 @@ fn initCluster(sim: mar.Sim) !Cluster {
         config.raft.heartbeat_tick = 1;
         config.raft.election_timeout_seed = id * 997;
         config.initial_peers = peers;
-        node.* = try adapter.NodeProcess.create(allocator, config, endpoint, pool);
+        node.* = try adapter.NodeProcess.create(allocator, sim.env, config, endpoint, pool);
         try sim.registerProcess(@intCast(id - 1), node.*.lifecycle());
         initialized += 1;
     }
@@ -75,10 +75,39 @@ fn drive(case: *Case, rounds: usize) !void {
     }
 }
 
+fn driveUntilAppliedConverges(case: *Case, max_rounds: usize, minimum_completed_proposals: usize) !void {
+    for (0..max_rounds) |_| {
+        try drive(case, 1);
+        var applied_index: ?u64 = null;
+        var converged = true;
+        for (case.app.nodes) |node| {
+            const raftor = node.raftor orelse {
+                converged = false;
+                break;
+            };
+            const status = raftor.getStatus();
+            if (status.applied_index != status.commit_index) {
+                converged = false;
+                break;
+            }
+            if (applied_index) |expected| {
+                if (status.applied_index != expected) {
+                    converged = false;
+                    break;
+                }
+            } else {
+                applied_index = status.applied_index;
+            }
+        }
+        if (converged and case.app.completed_proposals >= minimum_completed_proposals) return;
+    }
+    return error.ClusterDidNotConverge;
+}
+
 fn scenario(case: *Case) !void {
     try case.app.nodes[0].raftor.?.campaign();
     try drive(case, 30);
-    const leader = findLeader(&case.app) orelse return error.LeaderNotElected;
+    const leader = try requireLeader(&case.app);
 
     try leader.propose("before-partition", .{ .ctx = &case.app, .function = proposalCallback });
     _ = try leader.tick();
@@ -96,7 +125,7 @@ fn scenario(case: *Case) !void {
     }
     const minority = [_]mar.NodeId{minority_index};
     try case.control().network.partition(&majority, &minority);
-    const current_leader = findLeader(&case.app) orelse return error.LeaderNotElected;
+    const current_leader = try requireLeader(&case.app);
     try current_leader.propose("during-partition", .{ .ctx = &case.app, .function = proposalCallback });
     _ = try current_leader.tick();
     try drive(case, 20);
@@ -104,7 +133,7 @@ fn scenario(case: *Case) !void {
     try case.app.sim.killProcess(minority_index);
     try case.app.sim.restartProcess(minority_index);
     try case.control().network.heal();
-    try drive(case, 200);
+    try driveUntilAppliedConverges(case, 1_000, 1);
     case.app.minimum_completed_proposals = 1;
     case.app.minimum_terminated_proposals = 2;
 }
@@ -115,6 +144,35 @@ fn findLeader(cluster: *Cluster) ?*raft.Raftor {
         if (raftor.isLeader()) return raftor;
     }
     return null;
+}
+
+fn requireLeader(cluster: *Cluster) !*raft.Raftor {
+    return findLeader(cluster) orelse error.LeaderNotElected;
+}
+
+fn electLeader(case: *Case, max_attempts: usize) !*raft.Raftor {
+    var attempts: usize = 0;
+    while (findLeader(&case.app) == null and attempts < max_attempts) : (attempts += 1) {
+        try case.app.nodes[0].raftor.?.campaign();
+        try drive(case, 50);
+    }
+    return requireLeader(&case.app);
+}
+
+fn proposeUntilCompleted(case: *Case, data: []const u8, max_attempts: usize) !usize {
+    const required_completed = case.app.completed_proposals + 1;
+    var attempts: usize = 0;
+    while (case.app.completed_proposals < required_completed and attempts < max_attempts) : (attempts += 1) {
+        const leader = findLeader(&case.app) orelse {
+            _ = try electLeader(case, max_attempts - attempts);
+            continue;
+        };
+        try leader.propose(data, .{ .ctx = &case.app, .function = proposalCallback });
+        _ = try leader.tick();
+        try drive(case, 100);
+    }
+    if (case.app.completed_proposals < required_completed) return error.ProposalDidNotCommit;
+    return required_completed;
 }
 
 fn findLeaderIndex(cluster: *Cluster) ?mar.NodeId {
@@ -143,20 +201,30 @@ fn assertSafety(cluster: *const Cluster) !void {
 }
 
 fn assertCommittedPrefix(left: *adapter.NodeProcess, right: *adapter.NodeProcess) !void {
-    var left_state = try left.storage.initialState(left.allocator);
+    const left_storage = (left.storage orelse return).asWritableStorage();
+    const right_storage = (right.storage orelse return).asWritableStorage();
+    var left_state = try left_storage.initialState(left.allocator);
     defer left_state.deinit(left.allocator);
-    var right_state = try right.storage.initialState(right.allocator);
+    var right_state = try right_storage.initialState(right.allocator);
     defer right_state.deinit(right.allocator);
     const common_commit = @min(left_state.hard_state.commit, right_state.hard_state.commit);
     if (common_commit == 0) return;
 
-    const left_first = left.storage.core.firstIndex();
-    const right_first = right.storage.core.firstIndex();
+    const left_first = try left_storage.firstIndex();
+    const right_first = try right_storage.firstIndex();
     const first = @max(left_first, right_first);
     if (first > common_commit) return;
-    for (first..common_commit + 1) |index| {
-        const left_entry = left.storage.core.entries.items[index - left_first];
-        const right_entry = right.storage.core.entries.items[index - right_first];
+    const left_entries = try left_storage.entries(left.allocator, first, common_commit + 1, null, raft.GetEntriesContext.empty_(false));
+    defer {
+        for (left_entries) |*entry| entry.deinit(left.allocator);
+        left.allocator.free(left_entries);
+    }
+    const right_entries = try right_storage.entries(right.allocator, first, common_commit + 1, null, raft.GetEntriesContext.empty_(false));
+    defer {
+        for (right_entries) |*entry| entry.deinit(right.allocator);
+        right.allocator.free(right_entries);
+    }
+    for (left_entries, right_entries) |left_entry, right_entry| {
         if (left_entry.term != right_entry.term or left_entry.entry_type != right_entry.entry_type) return error.CommittedLogMismatch;
         if (!std.mem.eql(u8, left_entry.data, right_entry.data)) return error.CommittedLogMismatch;
     }
@@ -164,8 +232,8 @@ fn assertCommittedPrefix(left: *adapter.NodeProcess, right: *adapter.NodeProcess
 
 fn checkConvergence(case: *const Case) !void {
     try assertSafety(&case.app);
-    try std.testing.expect(case.app.completed_proposals >= case.app.minimum_completed_proposals);
-    try std.testing.expect(case.app.completed_proposals + case.app.failed_proposals >= case.app.minimum_terminated_proposals);
+    if (case.app.completed_proposals < case.app.minimum_completed_proposals) return error.ProposalDidNotCommit;
+    if (case.app.completed_proposals + case.app.failed_proposals < case.app.minimum_terminated_proposals) return error.ProposalDidNotTerminate;
     const expected = case.app.nodes[0].state_machine.applied.items;
     for (case.app.nodes[1..]) |node| {
         const actual = node.state_machine.applied.items;
@@ -190,8 +258,12 @@ fn chaosScenario(case: *Case) !void {
             1 => {
                 try drive(case, 1);
             },
-            2 => if (case.app.nodes[node_index].raftor != null) {
-                _ = try case.app.nodes[node_index].transport.transport().pollOne();
+            2 => if (case.app.nodes[node_index].raftor) |node| {
+                if (node.getReadyPhase() != null) {
+                    _ = try node.processReadyStep();
+                } else {
+                    _ = try case.app.nodes[node_index].transport.transport().pollOne();
+                }
             },
             3 => if (case.app.nodes[node_index].raftor) |node| {
                 _ = try node.processReadyStep();
@@ -209,7 +281,7 @@ fn chaosScenario(case: *Case) !void {
                 try case.control().network.partition(&majority, &minority);
             },
             5 => try case.control().network.heal(),
-            6 => if (aliveCount(&case.app) > 1 and case.app.nodes[node_index].raftor != null) {
+            6 => if (node_index != 0 and aliveCount(&case.app) > 1 and case.app.nodes[node_index].raftor != null) {
                 try case.app.sim.killProcess(@intCast(node_index));
             },
             7 => if (case.app.nodes[node_index].raftor == null) {
@@ -228,17 +300,40 @@ fn chaosScenario(case: *Case) !void {
     }
 
     try case.app.sim.transitionToLiveness(&.{ 0, 1, 2 });
-    var attempts: usize = 0;
-    while (findLeader(&case.app) == null and attempts < 10) : (attempts += 1) {
-        try case.app.nodes[0].raftor.?.campaign();
-        try drive(case, 20);
+    _ = try electLeader(case, 10);
+    const required_completed = try proposeUntilCompleted(case, "final-marker", 10);
+    try driveUntilAppliedConverges(case, 1_000, required_completed);
+    case.app.minimum_completed_proposals = required_completed;
+}
+
+fn powerLossScenario(case: *Case) !void {
+    try case.app.nodes[0].raftor.?.campaign();
+    try drive(case, 30);
+    const first_leader = try requireLeader(&case.app);
+    try first_leader.propose("before-power-loss", .{ .ctx = &case.app, .function = proposalCallback });
+    _ = try first_leader.tick();
+    try driveUntilAppliedConverges(case, 1_000, 1);
+
+    var process_index: usize = node_count;
+    while (process_index > 0) {
+        process_index -= 1;
+        try case.app.sim.killProcess(@intCast(process_index));
     }
-    const leader = findLeader(&case.app) orelse return error.LeaderNotElected;
-    const completed_before = case.app.completed_proposals;
-    try leader.propose("final-marker", .{ .ctx = &case.app, .function = proposalCallback });
-    _ = try leader.tick();
-    try drive(case, 300);
-    case.app.minimum_completed_proposals = completed_before + 1;
+    try case.control().disk.setFaults(.{
+        .crash_lost_write_rate = .always(),
+        .crash_lost_metadata_rate = .always(),
+    });
+    try case.control().disk.crash();
+    try case.control().disk.restart();
+    try case.control().disk.setFaults(.{});
+    for (0..node_count) |index| try case.app.sim.restartProcess(@intCast(index));
+
+    try case.control().network.heal();
+    _ = try electLeader(case, 10);
+    const required_completed = try proposeUntilCompleted(case, "after-power-loss", 10);
+    try driveUntilAppliedConverges(case, 1_000, required_completed);
+    case.app.minimum_completed_proposals = required_completed;
+    case.app.minimum_terminated_proposals = 2;
 }
 
 fn aliveCount(cluster: *const Cluster) usize {
@@ -287,6 +382,18 @@ test "Marionette full-stack Raft seed sweep" {
         .simulate = simulate_options,
         .init = initCluster,
         .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "Marionette WAL cluster survives whole-disk power loss" {
+    try mar.expectSimPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xD15C,
+        .tick_ns = mar.default_tick_ns,
+        .simulate = simulate_options,
+        .init = initCluster,
+        .scenario = powerLossScenario,
         .checks = &checks,
     });
 }

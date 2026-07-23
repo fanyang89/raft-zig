@@ -105,7 +105,7 @@ fn initRaft(sim: mar.Sim) !RaftApp {
     config.raft.election_tick = 10;
     config.raft.heartbeat_tick = 1;
     config.raft.election_timeout_seed = 1;
-    const node = try raft_adapter.NodeProcess.create(allocator, config, endpoints[0], pool);
+    const node = try raft_adapter.NodeProcess.create(allocator, sim.env, config, endpoints[0], pool);
     errdefer node.destroy();
     try sim.registerProcess(0, node.lifecycle());
     return .{ .sim = sim, .pool = pool, .node = node };

@@ -1,6 +1,7 @@
 const std = @import("std");
 const mar = @import("marionette");
 const raft = @import("raft_zig");
+const MarionetteWalFs = @import("marionette_wal_fs.zig").MarionetteWalFs;
 
 pub const PacketRef = struct {
     id: u64,
@@ -111,13 +112,15 @@ pub const SimTransport = struct {
 pub const NodeProcess = struct {
     allocator: std.mem.Allocator,
     config: raft.RaftorConfig,
-    storage: raft.MemoryStorage,
+    wal_fs: MarionetteWalFs,
+    storage: ?*raft.WALStorage = null,
     state_machine: raft.MockStateMachine,
     transport: SimTransport,
     raftor: ?*raft.Raftor = null,
 
     pub fn create(
         allocator: std.mem.Allocator,
+        env: mar.Env,
         config: raft.RaftorConfig,
         endpoint: mar.Endpoint(PacketRef),
         pool: *PacketPool,
@@ -126,13 +129,12 @@ pub const NodeProcess = struct {
         self.* = .{
             .allocator = allocator,
             .config = config,
-            .storage = raft.MemoryStorage.init(),
+            .wal_fs = MarionetteWalFs.init(env.io(), env.disk),
             .state_machine = raft.MockStateMachine.init(allocator),
             .transport = SimTransport.init(endpoint, pool),
         };
         errdefer {
             self.state_machine.deinit();
-            self.storage.deinit(allocator);
             allocator.destroy(self);
         }
         try self.start(.bootstrap);
@@ -142,7 +144,6 @@ pub const NodeProcess = struct {
     pub fn destroy(self: *NodeProcess) void {
         self.kill();
         self.state_machine.deinit();
-        self.storage.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -151,19 +152,33 @@ pub const NodeProcess = struct {
     }
 
     pub fn start(self: *NodeProcess, startup_mode: raft.StartupMode) !void {
-        if (self.raftor != null) return error.AlreadyStarted;
+        if (self.raftor != null or self.storage != null) return error.AlreadyStarted;
+        var dir_buffer: [64]u8 = undefined;
+        const dir = try std.fmt.bufPrintZ(&dir_buffer, "raft-vopr-node-{}", .{self.config.nodeId()});
+        const storage = try raft.WALStorage.openWithFs(self.allocator, dir, self.wal_fs.fileSystem());
+        self.storage = storage;
+        errdefer {
+            storage.deinit();
+            self.storage = null;
+        }
         var config = self.config;
         config.raft.applied = self.state_machine.last_applied_index;
         self.raftor = try raft.Raftor.createWithDependencies(self.allocator, config, startup_mode, .{
-            .storage = self.storage.asWritableStorage(),
+            .storage = storage.asWritableStorage(),
             .transport = self.transport.transport(),
             .state_machine = self.state_machine.stateMachine(),
         });
     }
 
     pub fn kill(self: *NodeProcess) void {
-        if (self.raftor) |node| node.destroy();
-        self.raftor = null;
+        if (self.raftor) |node| {
+            node.destroy();
+            self.raftor = null;
+        }
+        if (self.storage) |storage| storage.deinit();
+        self.storage = null;
+        self.state_machine.deinit();
+        self.state_machine = raft.MockStateMachine.init(self.allocator);
     }
 
     fn onKill(ctx: *anyopaque) void {
@@ -173,6 +188,7 @@ pub const NodeProcess = struct {
 
     fn restart(ctx: *anyopaque, env: mar.Env) anyerror!void {
         const self: *NodeProcess = @ptrCast(@alignCast(ctx));
+        self.wal_fs = MarionetteWalFs.init(env.io(), env.disk);
         try self.start(.restart);
         try env.record("raft_vopr.node restart={} applied={}", .{ self.config.nodeId(), self.state_machine.last_applied_index });
     }
