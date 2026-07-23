@@ -164,6 +164,25 @@ fn parseRecord(data: []const u8) ParsedRecord {
     };
 }
 
+fn recordTotalSize(data: []const u8) !usize {
+    if (data.len < RECORD_HEADER_SIZE) return error.IncompleteRecord;
+    const raw_type = data[4];
+    if (checkedEnum(RecordType, raw_type) == null) return error.CorruptEntryRecord;
+    const length = std.mem.readInt(u32, data[8..12], .little);
+    const padding = std.mem.readInt(u32, data[12..16], .little);
+    if (padding > 7 or padding != calcPadding(length)) return error.CorruptEntryRecord;
+    const payload_end = std.math.add(usize, RECORD_HEADER_SIZE, length) catch return error.CorruptEntryRecord;
+    const total = std.math.add(usize, payload_end, padding) catch return error.CorruptEntryRecord;
+    if (total > data.len) return error.IncompleteRecord;
+    return total;
+}
+
+fn truncateTail(segment: *segment_mod.Segment, body_offset: usize) !void {
+    const file_offset = std.math.add(u64, SEGMENT_HEADER_SIZE, body_offset) catch return error.TruncateFailed;
+    try segment.truncate(file_offset);
+    try segment.sync();
+}
+
 // ===========================================================================
 // Entry / HardState / ConfState serialization
 // ===========================================================================
@@ -428,33 +447,54 @@ pub const WAL = struct {
             self.first_index = segs[0].segment.first_index;
             self.wal_index.setFirstIndex(self.first_index);
         }
-        for (segs) |entry| {
+        for (segs, 0..) |entry, segment_index| {
             const seg = entry.segment;
             const body_size = seg.file_size - SEGMENT_HEADER_SIZE;
             if (body_size == 0) continue;
 
-            const data = try self.allocator.alloc(u8, body_size);
+            const body_len = std.math.cast(usize, body_size) orelse return error.ReadFailed;
+            const data = try self.allocator.alloc(u8, body_len);
             defer self.allocator.free(data);
             const n = try seg.read(data, SEGMENT_HEADER_SIZE);
-            if (n < body_size) continue;
+            if (n != body_len) return error.ReadFailed;
+            const repairable_tail = has_metadata and segment_index == segs.len - 1;
 
             var offset: usize = 0;
             while (offset < n) {
                 const remaining = data[offset..];
-                const parsed = parseRecord(remaining);
-                if (!parsed.valid) break;
-                const pad = calcPadding(@intCast(parsed.payload.len));
-                const total = RECORD_HEADER_SIZE + parsed.payload.len + pad;
+                const total = recordTotalSize(remaining) catch |err| switch (err) {
+                    error.IncompleteRecord => {
+                        if (!repairable_tail) return error.CorruptEntryRecord;
+                        try truncateTail(seg, offset);
+                        break;
+                    },
+                    else => return err,
+                };
+                const parsed = parseRecord(remaining[0..total]);
+                if (!parsed.valid) {
+                    if (!repairable_tail) return error.CorruptEntryRecord;
+                    try truncateTail(seg, offset);
+                    break;
+                }
                 switch (parsed.record_type) {
                     .entry => {
-                        var e = deserializeEntry(self.allocator, parsed.payload) catch break;
+                        var e = deserializeEntry(self.allocator, parsed.payload) catch |err| return switch (err) {
+                            error.OutOfMemory => error.OutOfMemory,
+                            else => error.EntryParseError,
+                        };
                         if (e.index < self.first_index) {
                             e.deinit(self.allocator);
                             offset += total;
                             continue;
                         }
-                        try self.entries.ensureUnusedCapacity(self.allocator, 1);
-                        try self.wal_index.ensureUnusedCapacity(1);
+                        self.entries.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                            e.deinit(self.allocator);
+                            return err;
+                        };
+                        self.wal_index.ensureUnusedCapacity(1) catch |err| {
+                            e.deinit(self.allocator);
+                            return err;
+                        };
                         self.wal_index.insertAssumeCapacity(e.index, .{
                             .segment_id = entry.id,
                             .offset = SEGMENT_HEADER_SIZE + offset,
@@ -467,17 +507,18 @@ pub const WAL = struct {
                         self.entries.appendAssumeCapacity(e);
                     },
                     .hard_state => {
-                        if (!has_metadata) self.hard_state = deserializeHardState(parsed.payload) catch break;
+                        if (!has_metadata) self.hard_state = try deserializeHardState(parsed.payload);
                     },
                     .conf_state => {
                         if (!has_metadata) {
+                            const conf_state = try deserializeConfState(self.allocator, parsed.payload);
                             self.conf_state.deinit(self.allocator);
-                            self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
+                            self.conf_state = conf_state;
                         }
                     },
                     .snapshot => {
                         if (!has_metadata) {
-                            const metadata = deserializeSnapshotMetadata(parsed.payload) catch break;
+                            const metadata = try deserializeSnapshotMetadata(parsed.payload);
                             self.snapshot_metadata.deinit(self.allocator);
                             self.snapshot_metadata = metadata;
                         }
@@ -492,6 +533,7 @@ pub const WAL = struct {
             self.wal_index.setFirstIndex(self.first_index);
         }
         if (!has_metadata) self.metadata_dirty = true;
+        if (self.lastIndex() < self.hard_state.commit) return error.Fatal;
         if (has_metadata and self.first_index > 1) try self.cleanupCompactedSegments();
     }
 
@@ -641,7 +683,7 @@ pub const WAL = struct {
     }
 
     pub fn lastIndex(self: WAL) u64 {
-        if (self.entries.items.len == 0) return self.snapshot_metadata.index;
+        if (self.entries.items.len == 0) return @max(self.snapshot_metadata.index, self.first_index -| 1);
         return self.entries.items[self.entries.items.len - 1].index;
     }
 
@@ -1390,6 +1432,159 @@ test "wal: restart recovers entries and hardstate via WALStorage" {
         try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.commit);
     }
 
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery truncates a torn active tail" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-torn-tail";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try wal.sync();
+        try wal.append(&.{.{ .index = 3, .term = 1, .data = @constCast("torn") }});
+        const current = wal.segment_manager.getCurrent().?;
+        try current.truncate(current.file_size - 5);
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
+        try wal.append(&.{.{ .index = 3, .term = 2, .data = @constCast("recovered") }});
+        try wal.sync();
+        try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery rejects corruption in a middle segment" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-middle-corruption";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1, .data = @constCast("a") },
+            .{ .index = 2, .term = 1, .data = @constCast("b") },
+            .{ .index = 3, .term = 1, .data = @constCast("c") },
+        });
+        try wal.sync();
+        const first = wal.segment_manager.get(1).?;
+        var corrupt: [1]u8 = .{0xff};
+        const rc = linux.pwrite(first.fd.?, &corrupt, corrupt.len, SEGMENT_HEADER_SIZE);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        try first.sync();
+    }
+
+    try std.testing.expectError(error.CorruptEntryRecord, WAL.open(allocator, .{ .dir = path, .segment_size = 80 }));
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery rejects a committed suffix loss" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-committed-loss";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+            .{ .index = 3, .term = 1 },
+        });
+        try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 3 });
+        try wal.sync();
+        const location = wal.wal_index.lookup(3).?;
+        const segment = wal.segment_manager.get(location.segment_id).?;
+        try segment.truncate(location.offset);
+        try segment.sync();
+    }
+
+    try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery rejects an entry index gap" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-entry-gap";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{.{ .index = 1, .term = 1 }});
+        try wal.sync();
+
+        const payload = try serializeEntry(allocator, .{ .index = 3, .term = 1 });
+        defer allocator.free(payload);
+        const record = try buildRecord(allocator, .entry, payload);
+        defer allocator.free(record);
+        try wal.segment_manager.getCurrent().?.append(record);
+        try wal.segment_manager.syncAll();
+    }
+
+    try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery rejects a duplicate entry index" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-entry-duplicate";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{.{ .index = 1, .term = 1 }});
+        try wal.sync();
+
+        const payload = try serializeEntry(allocator, .{ .index = 1, .term = 2 });
+        defer allocator.free(payload);
+        const record = try buildRecord(allocator, .entry, payload);
+        defer allocator.free(record);
+        try wal.segment_manager.getCurrent().?.append(record);
+        try wal.segment_manager.syncAll();
+    }
+
+    try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
+    removeWALDir(allocator, path);
+}
+
+test "wal: recovery cleans up every allocation failure" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-recovery-oom";
+    removeWALDir(allocator, path);
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1, .data = @constCast("a") },
+            .{ .index = 2, .term = 1, .data = @constCast("b") },
+        });
+        try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try wal.sync();
+    }
+
+    const Recovery = struct {
+        fn run(failing_allocator: std.mem.Allocator, dir: [:0]const u8) !void {
+            var wal = try WAL.open(failing_allocator, .{ .dir = dir, .segment_size = 4096 });
+            defer wal.deinit();
+            try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Recovery.run, .{path});
     removeWALDir(allocator, path);
 }
 
