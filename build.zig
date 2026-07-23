@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "raft_flow_control", .source = "tests/raft_flow_control_test.zig" },
         .{ .name = "raft_paper", .source = "tests/raft_paper_test.zig" },
         .{ .name = "rpc", .source = "tests/rpc_test.zig" },
+        .{ .name = "simulation", .source = "tests/simulation_test.zig" },
     };
     for (test_specs) |spec| {
         const module = b.createModule(.{
@@ -104,6 +105,22 @@ pub fn build(b: *std.Build) void {
         fuzz_step.dependOn(&run_tests.step);
         fuzz_smoke_step.dependOn(&run_tests.step);
     }
+
+    const simulation_fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/simulation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+    });
+    applySanitizers(simulation_fuzz_module, sanitizers);
+    const simulation_fuzz_tests = b.addTest(.{
+        .name = "fuzz-sim",
+        .root_module = simulation_fuzz_module,
+    });
+    const run_simulation_fuzz = b.addRunArtifact(simulation_fuzz_tests);
+    const simulation_fuzz_step = b.step("fuzz-sim", "Fuzz deterministic cluster simulation");
+    simulation_fuzz_step.dependOn(&run_simulation_fuzz.step);
+    fuzz_smoke_step.dependOn(&run_simulation_fuzz.step);
 
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);

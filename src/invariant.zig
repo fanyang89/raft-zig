@@ -123,7 +123,7 @@ pub fn checkRaft(raft: anytype) ?Violation {
                 .actual = progress.next_idx,
             };
         }
-        if (progress.matched > last_index) return .{
+        if (raft.state == .leader and progress.matched > last_index) return .{
             .kind = .progress_match_exceeds_log,
             .peer_id = id,
             .expected = last_index,

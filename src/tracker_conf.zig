@@ -75,11 +75,18 @@ pub const TrackerConfiguration = struct {
 
     /// Build a wire-format ConfState. Caller owns the resulting slices.
     pub fn toConfState(self: TrackerConfiguration, allocator: std.mem.Allocator) !ConfState {
+        const voters = try collectSorted(allocator, self.voters.incoming.voters);
+        errdefer allocator.free(voters);
+        const learners = try collectSorted(allocator, self.learners);
+        errdefer allocator.free(learners);
+        const voters_outgoing = try collectSorted(allocator, self.voters.outgoing.voters);
+        errdefer allocator.free(voters_outgoing);
+        const learners_next = try collectSorted(allocator, self.learners_next);
         return .{
-            .voters = try collectSorted(allocator, self.voters.incoming.voters),
-            .learners = try collectSorted(allocator, self.learners),
-            .voters_outgoing = try collectSorted(allocator, self.voters.outgoing.voters),
-            .learners_next = try collectSorted(allocator, self.learners_next),
+            .voters = voters,
+            .learners = learners,
+            .voters_outgoing = voters_outgoing,
+            .learners_next = learners_next,
             .auto_leave = self.auto_leave,
         };
     }
@@ -142,4 +149,19 @@ test "tracker configuration clear resets everything" {
     try std.testing.expect(tc.learners.count() == 0);
     try std.testing.expect(tc.learners_next.count() == 0);
     try std.testing.expect(!tc.auto_leave);
+}
+
+test "toConfState cleans up allocation failures" {
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator, conf: *const TrackerConfiguration) !void {
+            var state = try conf.toConfState(allocator);
+            defer state.deinit(allocator);
+        }
+    };
+
+    var conf = try TrackerConfiguration.fromVotersLearners(std.testing.allocator, &.{ 1, 2 }, &.{3});
+    defer conf.deinit();
+    try conf.voters.outgoing.add(4);
+    try conf.learners_next.put(4, {});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{&conf});
 }

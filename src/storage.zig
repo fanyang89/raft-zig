@@ -38,19 +38,28 @@ pub const RaftState = struct {
 
 /// Copy a ConfState's slices into freshly owned allocations.
 pub fn cloneConfState(allocator: std.mem.Allocator, src: ConfState) !ConfState {
+    const voters: []u64 = if (src.voters.len == 0) &.{} else try allocator.dupe(u64, src.voters);
+    errdefer if (voters.len != 0) allocator.free(voters);
+    const learners: []u64 = if (src.learners.len == 0) &.{} else try allocator.dupe(u64, src.learners);
+    errdefer if (learners.len != 0) allocator.free(learners);
+    const voters_outgoing: []u64 = if (src.voters_outgoing.len == 0) &.{} else try allocator.dupe(u64, src.voters_outgoing);
+    errdefer if (voters_outgoing.len != 0) allocator.free(voters_outgoing);
+    const learners_next: []u64 = if (src.learners_next.len == 0) &.{} else try allocator.dupe(u64, src.learners_next);
     return .{
-        .voters = try allocator.dupe(u64, src.voters),
-        .learners = try allocator.dupe(u64, src.learners),
-        .voters_outgoing = try allocator.dupe(u64, src.voters_outgoing),
-        .learners_next = try allocator.dupe(u64, src.learners_next),
+        .voters = voters,
+        .learners = learners,
+        .voters_outgoing = voters_outgoing,
+        .learners_next = learners_next,
         .auto_leave = src.auto_leave,
     };
 }
 
 /// Copy a Snapshot (data + metadata.conf_state) into fresh allocations.
 pub fn cloneSnapshot(allocator: std.mem.Allocator, src: Snapshot) !Snapshot {
+    const data: []u8 = if (src.data.len == 0) &.{} else try allocator.dupe(u8, src.data);
+    errdefer if (data.len != 0) allocator.free(data);
     return .{
-        .data = try allocator.dupe(u8, src.data),
+        .data = data,
         .metadata = .{
             .index = src.metadata.index,
             .term = src.metadata.term,
@@ -61,12 +70,15 @@ pub fn cloneSnapshot(allocator: std.mem.Allocator, src: Snapshot) !Snapshot {
 
 /// Copy an Entry (data + context buffers) into fresh allocations.
 pub fn cloneEntry(allocator: std.mem.Allocator, src: Entry) !Entry {
+    const data: []u8 = if (src.data.len == 0) &.{} else try allocator.dupe(u8, src.data);
+    errdefer if (data.len != 0) allocator.free(data);
+    const context: []u8 = if (src.context.len == 0) &.{} else try allocator.dupe(u8, src.context);
     return .{
         .entry_type = src.entry_type,
         .term = src.term,
         .index = src.index,
-        .data = try allocator.dupe(u8, src.data),
-        .context = try allocator.dupe(u8, src.context),
+        .data = data,
+        .context = context,
         .checksum = src.checksum,
     };
 }
@@ -296,6 +308,36 @@ test "raft state clone is deep" {
     defer copy.deinit(allocator);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, copy.conf_state.voters);
     try std.testing.expect(copy.conf_state.voters.ptr != original.conf_state.voters.ptr);
+}
+
+test "clone helpers clean up allocation failures" {
+    const Helpers = struct {
+        fn cloneEntryAll(allocator: std.mem.Allocator) !void {
+            var cloned = try cloneEntry(allocator, .{
+                .data = @constCast("data"),
+                .context = @constCast("context"),
+            });
+            defer cloned.deinit(allocator);
+        }
+
+        fn cloneSnapshotAll(allocator: std.mem.Allocator) !void {
+            var cloned = try cloneSnapshot(allocator, .{
+                .data = @constCast("snapshot"),
+                .metadata = .{
+                    .conf_state = .{
+                        .voters = @constCast(&[_]u64{ 1, 2 }),
+                        .learners = @constCast(&[_]u64{3}),
+                        .voters_outgoing = @constCast(&[_]u64{4}),
+                        .learners_next = @constCast(&[_]u64{5}),
+                    },
+                },
+            });
+            defer cloned.deinit(allocator);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneEntryAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneSnapshotAll, .{});
 }
 
 test "get entries context canAsync" {

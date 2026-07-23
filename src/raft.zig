@@ -1485,6 +1485,7 @@ pub const Raft = struct {
         errdefer ids.deinit(self.allocator);
         var it = self.progress_tracker.progress.map.keyIterator();
         while (it.next()) |k| try ids.append(self.allocator, k.*);
+        std.mem.sort(u64, ids.items, {}, std.sort.asc(u64));
         return ids.toOwnedSlice(self.allocator);
     }
 

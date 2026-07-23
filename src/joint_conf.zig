@@ -106,8 +106,7 @@ pub const JointConfiguration = struct {
         return self.outgoing.isEmpty() and self.incoming.count() == 1;
     }
 
-    /// Caller owns the returned slice. Order is unspecified (matches raftpp's
-    /// set union semantics).
+    /// Caller owns the returned sorted slice.
     pub fn ids(self: JointConfiguration) ![]u64 {
         var out = try self.allocator.alloc(u64, self.incoming.count() + self.outgoing.count());
         errdefer self.allocator.free(out);
@@ -128,6 +127,7 @@ pub const JointConfiguration = struct {
             out[n] = k.*;
             n += 1;
         }
+        std.mem.sort(u64, out[0..n], {}, std.sort.asc(u64));
         // Shrink the allocation to the actual element count so callers can
         // free with the returned length.
         return self.allocator.realloc(out, n) catch out[0..n];
@@ -205,7 +205,5 @@ test "joint ids unions incoming and outgoing without duplicates" {
     defer jc.deinit();
     const got = try jc.ids();
     defer allocator.free(got);
-    // Sort to make the assertion order-independent.
-    std.mem.sort(u64, got, {}, std.sort.asc(u64));
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, got);
 }
