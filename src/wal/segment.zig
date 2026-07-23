@@ -5,138 +5,19 @@
 //! It knows nothing about Raft records — that's the WAL layer's job.
 
 const std = @import("std");
-const linux = std.os.linux;
-
-const log = std.log.scoped(.raft_zig_wal);
+const fs_mod = @import("fs.zig");
 
 const SEGMENT_HEADER_SIZE: usize = 32;
 const segment_magic: u32 = 0x57414C31; // "WAL1"
 const format_version: u32 = 1;
-
-fn errno(rc: usize) linux.E {
-    const signed: isize = @bitCast(rc);
-    if (signed >= 0) return .SUCCESS;
-    return @enumFromInt(-signed);
-}
-
-fn sysOpen(path: [:0]const u8) !linux.fd_t {
-    // Open for read+write, do NOT create. scanDirectory uses this to find
-    // existing segments; creating files during scanning would leave empty
-    // files behind when the header check fails.
-    const flags: linux.O = .{ .ACCMODE = .RDWR };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0o644);
-        switch (errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            .NOENT => return error.FileNotFound,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn sysOpenExclusive(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0o644);
-        const e = errno(rc);
-        switch (e) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => {
-                log.debug("exclusive open failed: path={s}, errno={}", .{ path, e });
-                return error.OpenFailed;
-            },
-        }
-    }
-}
-
-fn sysPwrite(fd: linux.fd_t, data: []const u8, offset: u64) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const current_offset = std.math.add(u64, offset, @intCast(written)) catch return error.WriteFailed;
-        const signed_offset = std.math.cast(i64, current_offset) orelse return error.WriteFailed;
-        const rc = linux.pwrite(fd, data[written..].ptr, data.len - written, signed_offset);
-        switch (errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        written += rc;
-    }
-}
-
-fn sysPread(fd: linux.fd_t, buf: []u8, offset: u64) !usize {
-    var read_len: usize = 0;
-    while (read_len < buf.len) {
-        const current_offset = std.math.add(u64, offset, @intCast(read_len)) catch return error.ReadFailed;
-        const signed_offset = std.math.cast(i64, current_offset) orelse return error.ReadFailed;
-        const rc = linux.pread(fd, buf[read_len..].ptr, buf.len - read_len, signed_offset);
-        switch (errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) break;
-        read_len += rc;
-    }
-    return read_len;
-}
-
-fn sysFsync(fd: linux.fd_t) !void {
-    while (true) {
-        const rc = linux.fsync(fd);
-        switch (errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.SyncFailed,
-        }
-    }
-}
-
-fn sysFtruncate(fd: linux.fd_t, len: u64) !void {
-    const signed_len = std.math.cast(i64, len) orelse return error.TruncateFailed;
-    while (true) {
-        const rc = linux.ftruncate(fd, signed_len);
-        switch (errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.TruncateFailed,
-        }
-    }
-}
-
-fn sysFileSize(fd: linux.fd_t) !u64 {
-    const cur = linux.lseek(fd, 0, 1); // SEEK_CUR
-    if (errno(cur) != .SUCCESS) return error.StatFailed;
-    const end = linux.lseek(fd, 0, 2); // SEEK_END
-    if (errno(end) != .SUCCESS) return error.StatFailed;
-    _ = linux.lseek(fd, @intCast(cur), 0); // restore
-    return @intCast(end);
-}
-
-fn sysClose(fd: linux.fd_t) void {
-    _ = linux.close(fd);
-}
-
-fn sysUnlink(path: [:0]const u8) !void {
-    while (true) {
-        const rc = linux.unlink(path.ptr);
-        switch (errno(rc)) {
-            .SUCCESS, .NOENT => return,
-            .INTR => continue,
-            else => return error.UnlinkFailed,
-        }
-    }
-}
 
 // ===========================================================================
 // Segment
 // ===========================================================================
 
 pub const Segment = struct {
-    fd: ?linux.fd_t,
+    fd: ?fs_mod.Handle,
+    fs: fs_mod.FileSystem,
     segment_id: u64,
     first_index: u64,
     write_offset: u64,
@@ -148,6 +29,7 @@ pub const Segment = struct {
     /// Writes the 32-byte segment header. The file is opened O_CREAT|O_EXCL.
     pub fn create(
         allocator: std.mem.Allocator,
+        fs: fs_mod.FileSystem,
         dir: [:0]const u8,
         segment_id: u64,
         first_index: u64,
@@ -155,18 +37,19 @@ pub const Segment = struct {
         const path = try makeFilename(allocator, dir, segment_id);
         errdefer allocator.free(path);
 
-        const fd = try sysOpenExclusive(path);
-        errdefer sysUnlink(path) catch {};
-        errdefer sysClose(fd);
+        const fd = try fs.open(path, .create_exclusive);
+        errdefer fs.unlink(path) catch {};
+        errdefer fs.close(fd) catch {};
 
         // Write segment header.
         var header: [SEGMENT_HEADER_SIZE]u8 = undefined;
         encodeHeader(&header, segment_id, first_index);
-        try sysPwrite(fd, &header, 0);
+        try fs.pwriteAll(fd, &header, 0);
 
         const self = try allocator.create(Segment);
         self.* = .{
             .fd = fd,
+            .fs = fs,
             .segment_id = segment_id,
             .first_index = first_index,
             .write_offset = SEGMENT_HEADER_SIZE,
@@ -179,12 +62,12 @@ pub const Segment = struct {
 
     /// Open an existing segment file, read its header, and determine
     /// write_offset from the file size.
-    pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !*Segment {
-        const fd = try sysOpen(path);
-        errdefer sysClose(fd);
+    pub fn open(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, path: [:0]const u8) !*Segment {
+        const fd = try fs.open(path, .read_write);
+        errdefer fs.close(fd) catch {};
 
         var header: [SEGMENT_HEADER_SIZE]u8 = undefined;
-        const n = try sysPread(fd, &header, 0);
+        const n = try fs.preadAll(fd, &header, 0);
         if (n != SEGMENT_HEADER_SIZE) return error.InvalidSegmentHeader;
 
         const magic = std.mem.readInt(u32, header[0..4], .little);
@@ -194,7 +77,7 @@ pub const Segment = struct {
 
         const segment_id = std.mem.readInt(u64, header[8..16], .little);
         const first_index = std.mem.readInt(u64, header[16..24], .little);
-        const size = try sysFileSize(fd);
+        const size = try fs.fileSize(fd);
 
         const path_copy = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(path_copy);
@@ -202,6 +85,7 @@ pub const Segment = struct {
         const self = try allocator.create(Segment);
         self.* = .{
             .fd = fd,
+            .fs = fs,
             .segment_id = segment_id,
             .first_index = first_index,
             .write_offset = size,
@@ -220,29 +104,29 @@ pub const Segment = struct {
 
     /// Append data at write_offset. Advances the cursor.
     pub fn append(self: *Segment, data: []const u8) !void {
-        try sysPwrite(try self.openFd(), data, self.write_offset);
+        try self.fs.pwriteAll(try self.openFd(), data, self.write_offset);
         self.write_offset += data.len;
         if (self.write_offset > self.file_size) self.file_size = self.write_offset;
     }
 
     /// Read `buf.len` bytes at the given offset. Returns actual bytes read.
     pub fn read(self: *Segment, buf: []u8, offset: u64) !usize {
-        return sysPread(try self.openFd(), buf, offset);
+        return self.fs.preadAll(try self.openFd(), buf, offset);
     }
 
     pub fn sync(self: *Segment) !void {
-        try sysFsync(try self.openFd());
+        try self.fs.syncFile(try self.openFd());
     }
 
     /// Truncate the file to the given offset (removes trailing data).
     pub fn truncate(self: *Segment, offset: u64) !void {
-        try sysFtruncate(try self.openFd(), offset);
+        try self.fs.truncate(try self.openFd(), offset);
         self.write_offset = offset;
         self.file_size = offset;
     }
 
     pub fn close(self: *Segment) void {
-        if (self.fd) |fd| sysClose(fd);
+        if (self.fd) |fd| self.fs.close(fd) catch {};
         self.fd = null;
     }
 
@@ -252,10 +136,10 @@ pub const Segment = struct {
 
     /// Delete the segment file from disk. Called after destroy.
     pub fn unlink(self: *const Segment) !void {
-        try sysUnlink(self.path);
+        try self.fs.unlink(self.path);
     }
 
-    fn openFd(self: *const Segment) !linux.fd_t {
+    fn openFd(self: *const Segment) !fs_mod.Handle {
         return self.fd orelse error.SegmentNotOpen;
     }
 };
@@ -299,29 +183,12 @@ fn encodeHeader(out: *[SEGMENT_HEADER_SIZE]u8, segment_id: u64, first_index: u64
 // Directory helpers
 // ===========================================================================
 
-pub fn makeDir(path: [:0]const u8) !void {
-    while (true) {
-        const rc = linux.mkdir(path.ptr, 0o755);
-        switch (errno(rc)) {
-            .SUCCESS, .EXIST => return,
-            .INTR => continue,
-            else => return error.MkdirFailed,
-        }
-    }
+pub fn makeDir(fs: fs_mod.FileSystem, path: [:0]const u8) !void {
+    _ = try fs.makeDir(path);
 }
 
-pub fn syncDirectory(path: [:0]const u8) !void {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const fd: linux.fd_t = while (true) {
-        const rc = linux.open(path.ptr, flags, 0);
-        switch (errno(rc)) {
-            .SUCCESS => break @intCast(rc),
-            .INTR => continue,
-            else => return error.DirectorySyncFailed,
-        }
-    };
-    defer sysClose(fd);
-    sysFsync(fd) catch return error.DirectorySyncFailed;
+pub fn syncDirectory(fs: fs_mod.FileSystem, path: [:0]const u8) !void {
+    try fs.syncDir(path);
 }
 
 /// Remove all files in a directory (used for test cleanup).

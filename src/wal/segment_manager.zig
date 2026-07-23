@@ -7,9 +7,9 @@
 
 const std = @import("std");
 const segment_mod = @import("segment.zig");
+const fs_mod = @import("fs.zig");
 
 const Segment = segment_mod.Segment;
-const linux = std.os.linux;
 
 pub const SegmentEntry = struct {
     id: u64,
@@ -22,13 +22,15 @@ pub const SegmentManager = struct {
     directory_dirty: bool = false,
     dir: [:0]u8,
     allocator: std.mem.Allocator,
+    fs: fs_mod.FileSystem,
 
-    pub fn init(allocator: std.mem.Allocator, dir: [:0]const u8) !SegmentManager {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !SegmentManager {
         const dir_copy = try allocator.dupeSentinel(u8, dir, 0);
         var sm = SegmentManager{
             .segments = .empty,
             .dir = dir_copy,
             .allocator = allocator,
+            .fs = fs,
         };
         errdefer sm.deinit();
         try sm.scanDirectory();
@@ -45,42 +47,11 @@ pub const SegmentManager = struct {
         var ids: std.ArrayList(u64) = .empty;
         defer ids.deinit(self.allocator);
 
-        const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-        const fd: linux.fd_t = while (true) {
-            const rc = linux.open(self.dir.ptr, flags, 0);
-            switch (linux.errno(rc)) {
-                .SUCCESS => break @intCast(rc),
-                .INTR => continue,
-                else => return error.OpenFailed,
-            }
-        };
-        defer _ = linux.close(fd);
-
-        var buffer: [4096]u8 = undefined;
-        while (true) {
-            const n = while (true) {
-                const rc = linux.getdents64(fd, &buffer, buffer.len);
-                switch (linux.errno(rc)) {
-                    .SUCCESS => break rc,
-                    .INTR => continue,
-                    else => return error.ReadFailed,
-                }
-            };
-            if (n == 0) break;
-
-            var offset: usize = 0;
-            while (offset < n) {
-                const entry: *align(1) linux.dirent64 = @ptrCast(&buffer[offset]);
-                const name_offset = @offsetOf(linux.dirent64, "name");
-                if (entry.reclen <= name_offset or entry.reclen > n - offset) return error.ReadFailed;
-                const name_ptr: [*]const u8 = &entry.name;
-                const padded_name = name_ptr[0 .. entry.reclen - name_offset];
-                const name_len = std.mem.findScalar(u8, padded_name, 0) orelse return error.ReadFailed;
-                if (entry.type == linux.DT.REG or entry.type == linux.DT.UNKNOWN) {
-                    if (segment_mod.parseSegmentId(name_ptr[0..name_len])) |id| try ids.append(self.allocator, id);
-                }
-                offset += entry.reclen;
-            }
+        var listing = try self.fs.listDir(self.allocator, self.dir);
+        defer listing.deinit();
+        for (listing.entries.items) |entry| {
+            if (entry.kind != .file and entry.kind != .unknown) continue;
+            if (segment_mod.parseSegmentId(entry.name)) |id| try ids.append(self.allocator, id);
         }
 
         std.mem.sort(u64, ids.items, {}, std.sort.asc(u64));
@@ -88,7 +59,7 @@ pub const SegmentManager = struct {
         for (ids.items) |sid| {
             const path = try segment_mod.makeFilename(self.allocator, self.dir, sid);
             defer self.allocator.free(path);
-            const seg = try Segment.open(self.allocator, path);
+            const seg = try Segment.open(self.allocator, self.fs, path);
             if (seg.segment_id != sid) {
                 seg.destroy();
                 return error.InvalidSegmentHeader;
@@ -110,7 +81,7 @@ pub const SegmentManager = struct {
         if (self.getCurrent()) |cur| try cur.sync();
         try self.segments.ensureUnusedCapacity(self.allocator, 1);
         const new_id = self.current_segment_id + 1;
-        const seg = try Segment.create(self.allocator, self.dir, new_id, first_index);
+        const seg = try Segment.create(self.allocator, self.fs, self.dir, new_id, first_index);
         self.segments.appendAssumeCapacity(.{ .id = new_id, .segment = seg });
         self.current_segment_id = new_id;
         self.directory_dirty = true;
@@ -188,7 +159,7 @@ pub const SegmentManager = struct {
 
     fn syncDirectoryIfDirty(self: *SegmentManager) !void {
         if (!self.directory_dirty) return;
-        try segment_mod.syncDirectory(self.dir);
+        try segment_mod.syncDirectory(self.fs, self.dir);
         self.directory_dirty = false;
     }
 };
