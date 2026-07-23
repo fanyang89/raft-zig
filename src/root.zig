@@ -212,6 +212,7 @@ pub const WalFileHandle = wal_mod.WalFileHandle;
 pub const WalOpenMode = wal_mod.WalOpenMode;
 pub const WalDirListing = wal_mod.WalDirListing;
 pub const WalDirEntryKind = wal_mod.WalDirEntryKind;
+pub const linuxWalFileSystem = wal_mod.linuxWalFileSystem;
 
 pub const encodeMessage = codec_mod.encodeMessage;
 pub const decodeMessage = codec_mod.decodeMessage;

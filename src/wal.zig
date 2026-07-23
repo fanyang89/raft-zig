@@ -41,6 +41,7 @@ pub const WalFileHandle = fs_mod.Handle;
 pub const WalOpenMode = fs_mod.OpenMode;
 pub const WalDirListing = fs_mod.DirListing;
 pub const WalDirEntryKind = fs_mod.EntryKind;
+pub const linuxWalFileSystem = fs_mod.linuxFileSystem;
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
