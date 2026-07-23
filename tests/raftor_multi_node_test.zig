@@ -15,6 +15,13 @@ const MockStateMachine = raft.MockStateMachine;
 const LoopbackNetwork = raft.LoopbackNetwork;
 const StateRole = raft.StateRole;
 
+var isolated_node = std.atomic.Value(u64).init(0);
+
+fn dropIsolatedNode(from: u64, to: u64, _: raft.MessageType) bool {
+    const isolated = isolated_node.load(.acquire);
+    return isolated != 0 and (from == isolated or to == isolated);
+}
+
 fn makeConfig(id: u64) RaftorConfig {
     var rc = RaftorConfig{};
     rc.raft.id = id;
@@ -38,6 +45,10 @@ const Cluster = struct {
 };
 
 fn createCluster() !Cluster {
+    return createClusterWithCheckQuorum(false);
+}
+
+fn createClusterWithCheckQuorum(check_quorum: bool) !Cluster {
     const net = try LoopbackNetwork.create(allocator);
 
     const sms = try allocator.create([3]MockStateMachine);
@@ -64,6 +75,7 @@ fn createCluster() !Cluster {
     for (1..4) |i| {
         const idx = i - 1;
         var config = makeConfig(@intCast(i));
+        config.raft.check_quorum = check_quorum;
         config.initial_peers = peers;
         raftors[idx] = try Raftor.createWithTransport(
             allocator,
@@ -159,4 +171,57 @@ test "raftor multi-node: leader election with transport message routing" {
 
     // A leader should eventually emerge via natural election timeout.
     try std.testing.expectEqual(@as(usize, 1), countLeaders(&cluster));
+}
+
+test "raftor multi-node: leadership loss terminates tracked requests" {
+    var cluster = try createClusterWithCheckQuorum(true);
+    defer cluster.destroy();
+    isolated_node.store(0, .release);
+    defer isolated_node.store(0, .release);
+
+    try cluster.raftors[0].campaign();
+    var rounds: usize = 0;
+    while (rounds < 40 and countLeaders(&cluster) == 0) : (rounds += 1) try tickCluster(&cluster);
+    var leader: ?*Raftor = null;
+    for (cluster.raftors) |raftor| {
+        if (raftor.isLeader()) leader = raftor;
+    }
+    const old_leader = leader orelse return error.LeaderNotElected;
+    isolated_node.store(old_leader.getStatus().id, .release);
+    cluster.net.drop_filter = dropIsolatedNode;
+
+    const Callback = struct {
+        calls: usize = 0,
+        err: ?raft.Error = null,
+
+        fn proposal(ctx: *anyopaque, result: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (result == .err) self.err = result.err;
+        }
+        fn read(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (result == .err) self.err = result.err;
+        }
+    };
+    var proposal = Callback{};
+    var read = Callback{};
+    try old_leader.propose("isolated", .{ .ctx = &proposal, .function = Callback.proposal });
+    try old_leader.readIndex("isolated-read", .{ .ctx = &read, .function = Callback.read });
+    _ = try old_leader.tick();
+    try std.testing.expectEqual(@as(usize, 0), proposal.calls);
+    try std.testing.expectEqual(@as(usize, 0), read.calls);
+
+    for (0..25) |_| _ = try old_leader.tick();
+    try std.testing.expect(!old_leader.isLeader());
+    try std.testing.expectEqual(@as(usize, 1), proposal.calls);
+    try std.testing.expectEqual(error.ProposalDropped, proposal.err.?);
+    try std.testing.expectEqual(@as(usize, 1), read.calls);
+    try std.testing.expectEqual(error.LostLeadership, read.err.?);
+
+    isolated_node.store(0, .release);
+    for (0..40) |_| try tickCluster(&cluster);
+    try std.testing.expectEqual(@as(usize, 1), proposal.calls);
+    try std.testing.expectEqual(@as(usize, 1), read.calls);
 }

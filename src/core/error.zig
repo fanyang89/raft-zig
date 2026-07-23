@@ -58,6 +58,7 @@ pub const Error = error{
     WalMetadataCorrupt,
     IncarnationExhausted,
     ContextSequenceExhausted,
+    EventLoopBusy,
 
     // RaftLog errors.
     ZeroEntriesInSlice,
@@ -160,6 +161,7 @@ pub fn name(e: Error) []const u8 {
         error.WalMetadataCorrupt => "WalMetadataCorrupt",
         error.IncarnationExhausted => "IncarnationExhausted",
         error.ContextSequenceExhausted => "ContextSequenceExhausted",
+        error.EventLoopBusy => "EventLoopBusy",
         error.ZeroEntriesInSlice => "ZeroEntriesInSlice",
         error.StepLocalMsg => "StepLocalMsg",
         error.StepPeerNotFound => "StepPeerNotFound",

@@ -177,6 +177,7 @@ pub const Raftor = struct {
     lifecycle_mutex: std.atomic.Mutex = .unlocked,
     lifecycle: Lifecycle = .active,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    event_loop_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     terminal_error: ?Error = null,
     transport_stopped: bool = false,
 
@@ -262,6 +263,7 @@ pub const Raftor = struct {
 
     pub fn destroy(self: *Raftor) void {
         std.debug.assert(!self.running.load(.acquire));
+        std.debug.assert(!self.event_loop_active.load(.acquire));
         var batch: ?ShutdownBatch = null;
         spinLock(&self.lifecycle_mutex);
         std.debug.assert(self.lifecycle != .stopping and self.lifecycle != .terminating and self.lifecycle != .destroying);
@@ -290,6 +292,7 @@ pub const Raftor = struct {
         self.lifecycle_mutex = .unlocked;
         self.lifecycle = .active;
         self.running = std.atomic.Value(bool).init(false);
+        self.event_loop_active = std.atomic.Value(bool).init(false);
         self.terminal_error = null;
         self.transport_stopped = false;
 
@@ -425,6 +428,12 @@ pub const Raftor = struct {
 
     /// Advance the event loop by one tick. Returns true if there was work.
     pub fn tick(self: *Raftor) Error!bool {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
+        return self.tickImpl();
+    }
+
+    fn tickImpl(self: *Raftor) Error!bool {
         if (self.driverError()) |err| return err;
         if (self.ready_processor.phase() != null) {
             _ = try self.processReady();
@@ -600,17 +609,23 @@ pub const Raftor = struct {
     // -----------------------------------------------------------------------
 
     pub fn campaign(self: *Raftor) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
         try self.raw_node.campaign();
         while (try self.processReady()) {}
     }
 
     pub fn transferLeader(self: *Raftor, target_id: u64) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
         try self.raw_node.transferLeader(target_id);
     }
 
     pub fn addNode(self: *Raftor, id: u64, addr: []const u8) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
         const inserted = try self.transport.addPeer(id, addr);
         errdefer if (inserted) self.transport.removePeer(id) catch {};
@@ -623,6 +638,8 @@ pub const Raftor = struct {
     }
 
     pub fn removeNode(self: *Raftor, id: u64) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
@@ -638,6 +655,12 @@ pub const Raftor = struct {
     /// StateMachine's `takeSnapshot` is called, then the result is persisted
     /// via `storage.applyLocalSnapshot` (which also compacts old entries).
     pub fn takeSnapshot(self: *Raftor) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
+        return self.takeSnapshotImpl();
+    }
+
+    fn takeSnapshotImpl(self: *Raftor) Error!void {
         if (self.driverError()) |err| return err;
         const applied_index = self.ready_processor.getAppliedIndex();
         if (applied_index == 0) return;
@@ -689,7 +712,7 @@ pub const Raftor = struct {
         if (entries_threshold > 0 and applied_index > snapshot_index and
             (applied_index - snapshot_index) >= entries_threshold)
         {
-            try self.takeSnapshot();
+            try self.takeSnapshotImpl();
             return;
         }
 
@@ -697,7 +720,7 @@ pub const Raftor = struct {
         if (interval_ticks > 0 and
             (self.tick_count - self.last_snapshot_tick) >= interval_ticks)
         {
-            try self.takeSnapshot();
+            try self.takeSnapshotImpl();
             return;
         }
 
@@ -741,6 +764,8 @@ pub const Raftor = struct {
     }
 
     pub fn processReadyStep(self: *Raftor) Error!bool {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
         const did_work = self.ready_processor.processStep() catch |err| {
             self.latchReadyError();
@@ -799,6 +824,16 @@ pub const Raftor = struct {
         if (self.terminal_error) |err| return err;
         if (self.lifecycle != .active) return error.ShuttingDown;
         return null;
+    }
+
+    fn enterEventLoop(self: *Raftor) Error!void {
+        if (self.event_loop_active.cmpxchgStrong(false, true, .acquire, .monotonic) != null) {
+            return error.EventLoopBusy;
+        }
+    }
+
+    fn leaveEventLoop(self: *Raftor) void {
+        self.event_loop_active.store(false, .release);
     }
 };
 

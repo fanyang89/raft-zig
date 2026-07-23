@@ -160,9 +160,8 @@ pub const ReadyProcessor = struct {
         if (self.fatal_error) |e| return e;
         if (self.pending == null) {
             if (!self.raw_node.*.hasReady()) return false;
-            const ready = try self.raw_node.*.getReady();
-            self.checkLeadershipChange(ready);
-            self.pending = .{ .ready = ready };
+            self.pending = .{ .ready = try self.raw_node.*.getReady() };
+            self.checkLeadershipChange(self.pending.?.ready);
             return true;
         }
 
@@ -272,16 +271,22 @@ pub const ReadyProcessor = struct {
     }
 
     fn checkLeadershipChange(self: *ReadyProcessor, rd: Ready) void {
+        var lost_leadership_callbacks: ?proposal_tracker_mod.DetachedCallbacks = null;
+        const current_term = self.raw_node.*.raftConst().term;
         if (rd.ss) |ss| {
             if (ss.role != self.prev_role or ss.leader_id != self.prev_leader) {
-                self.state_machine.onLeadershipChange(ss.role == .leader, self.raw_node.*.raftConst().term, ss.leader_id);
+                const was_leader = self.prev_role == .leader;
                 self.prev_role = ss.role;
                 self.prev_leader = ss.leader_id;
+                if (was_leader and ss.role != .leader) {
+                    lost_leadership_callbacks = self.proposal_tracker.detachAll();
+                }
+                self.state_machine.onLeadershipChange(ss.role == .leader, current_term, ss.leader_id);
             }
         }
-        const current_term = self.raw_node.*.raftConst().term;
-        if (current_term != self.prev_term) {
-            self.prev_term = current_term;
+        self.prev_term = current_term;
+        if (lost_leadership_callbacks) |*callbacks| {
+            callbacks.invoke(error.ProposalDropped, error.LostLeadership);
         }
     }
 
@@ -334,6 +339,7 @@ pub const ReadyProcessor = struct {
             .normal => {
                 var result = try self.state_machine.apply(entry);
                 defer result.deinit(self.allocator);
+                self.applied_index = entry.index;
                 if (result.response) |resp| {
                     if (entry.context.len > 0) {
                         self.proposal_tracker.complete(entry.context, resp);

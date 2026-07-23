@@ -11,7 +11,9 @@ const Cluster = struct {
     peers: []raft.Peer,
     nodes: [node_count]*adapter.NodeProcess,
     completed_proposals: usize = 0,
+    failed_proposals: usize = 0,
     minimum_completed_proposals: usize = 0,
+    minimum_terminated_proposals: usize = 0,
 
     pub fn deinit(self: *Cluster) void {
         const allocator = self.sim.env.allocator();
@@ -57,7 +59,11 @@ fn initCluster(sim: mar.Sim) !Cluster {
 
 fn proposalCallback(ctx: *anyopaque, result: raft.ProposalResult) void {
     const cluster: *Cluster = @ptrCast(@alignCast(ctx));
-    if (result == .ok) cluster.completed_proposals += 1;
+    if (result == .ok) {
+        cluster.completed_proposals += 1;
+    } else {
+        cluster.failed_proposals += 1;
+    }
 }
 
 fn drive(case: *Case, rounds: usize) !void {
@@ -99,7 +105,8 @@ fn scenario(case: *Case) !void {
     try case.app.sim.restartProcess(minority_index);
     try case.control().network.heal();
     try drive(case, 200);
-    case.app.minimum_completed_proposals = 2;
+    case.app.minimum_completed_proposals = 1;
+    case.app.minimum_terminated_proposals = 2;
 }
 
 fn findLeader(cluster: *Cluster) ?*raft.Raftor {
@@ -158,6 +165,7 @@ fn assertCommittedPrefix(left: *adapter.NodeProcess, right: *adapter.NodeProcess
 fn checkConvergence(case: *const Case) !void {
     try assertSafety(&case.app);
     try std.testing.expect(case.app.completed_proposals >= case.app.minimum_completed_proposals);
+    try std.testing.expect(case.app.completed_proposals + case.app.failed_proposals >= case.app.minimum_terminated_proposals);
     const expected = case.app.nodes[0].state_machine.applied.items;
     for (case.app.nodes[1..]) |node| {
         const actual = node.state_machine.applied.items;

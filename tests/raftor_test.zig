@@ -298,6 +298,34 @@ test "raftor: propose data is applied to state machine" {
     try std.testing.expectEqualStrings("hello world", sm.applied.items[1]);
 }
 
+test "raftor: callback observes applied index and cannot reenter event loop" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeConfig(1), sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    const Callback = struct {
+        raftor: *Raftor,
+        applied_index: ?u64 = null,
+        reentry_error: ?raft.Error = null,
+
+        fn invoke(ctx: *anyopaque, result: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .ok) self.applied_index = self.raftor.getStatus().applied_index;
+            _ = self.raftor.tick() catch |err| {
+                self.reentry_error = err;
+                return;
+            };
+        }
+    };
+    var callback = Callback{ .raftor = r };
+    try r.propose("payload", .{ .ctx = &callback, .function = Callback.invoke });
+    for (0..16) |_| _ = try r.tick();
+    try std.testing.expectEqual(sm.last_applied_index, callback.applied_index.?);
+    try std.testing.expectEqual(error.EventLoopBusy, callback.reentry_error.?);
+}
+
 test "raftor: multiple proposals all applied" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();
