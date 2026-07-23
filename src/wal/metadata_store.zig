@@ -1,5 +1,5 @@
 const std = @import("std");
-const linux = std.os.linux;
+const fs_mod = @import("fs.zig");
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
@@ -32,8 +32,9 @@ pub const MetadataStore = struct {
     dir: [:0]u8,
     path: [:0]u8,
     tmp_path: [:0]u8,
+    fs: fs_mod.FileSystem,
 
-    pub fn init(allocator: std.mem.Allocator, dir: [:0]const u8) !MetadataStore {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !MetadataStore {
         const dir_copy = try allocator.dupeSentinel(u8, dir, 0);
         errdefer allocator.free(dir_copy);
         const path = try makePath(allocator, dir, "metadata");
@@ -44,6 +45,7 @@ pub const MetadataStore = struct {
             .dir = dir_copy,
             .path = path,
             .tmp_path = tmp_path,
+            .fs = fs,
         };
     }
 
@@ -55,17 +57,17 @@ pub const MetadataStore = struct {
     }
 
     pub fn load(self: *MetadataStore) !?Metadata {
-        const fd = openRead(self.path) catch |err| switch (err) {
+        const fd = self.fs.open(self.path, .read_only) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer closeIgnore(fd);
+        defer self.fs.close(fd) catch {};
 
-        const size = try fileSize(fd);
+        const size = std.math.cast(usize, try self.fs.fileSize(fd)) orelse return error.StatFailed;
         if (size > max_metadata_size) return error.MetadataCorrupt;
         const data = try self.allocator.alloc(u8, size);
         defer self.allocator.free(data);
-        try readAll(fd, data);
+        if (try self.fs.preadAll(fd, data, 0) != data.len) return error.ReadFailed;
         return try decode(self.allocator, data);
     }
 
@@ -73,29 +75,29 @@ pub const MetadataStore = struct {
         const data = try encode(self.allocator, metadata);
         defer self.allocator.free(data);
 
-        const fd = try openTemporary(self.tmp_path);
+        const fd = try self.fs.open(self.tmp_path, .write_truncate);
         var is_open = true;
         errdefer {
-            if (is_open) closeIgnore(fd);
-            unlinkIgnore(self.tmp_path);
+            if (is_open) self.fs.close(fd) catch {};
+            self.fs.unlink(self.tmp_path) catch {};
         }
-        try writeAll(fd, data);
-        try syncFile(fd);
-        const close_result = closeFile(fd);
+        try self.fs.pwriteAll(fd, data, 0);
+        try self.fs.syncFile(fd);
+        const close_result = self.fs.close(fd);
         is_open = false;
         try close_result;
-        try renameFile(self.tmp_path, self.path);
-        try syncDirectory(self.dir);
+        try self.fs.rename(self.tmp_path, self.path);
+        try self.fs.syncDir(self.dir);
     }
 };
 
-pub fn removeFiles(allocator: std.mem.Allocator, dir: [:0]const u8) void {
+pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) void {
     const path = makePath(allocator, dir, "metadata") catch return;
     defer allocator.free(path);
     const tmp_path = makePath(allocator, dir, "metadata.tmp") catch return;
     defer allocator.free(tmp_path);
-    unlinkIgnore(path);
-    unlinkIgnore(tmp_path);
+    fs.unlink(path) catch {};
+    fs.unlink(tmp_path) catch {};
 }
 
 fn encode(allocator: std.mem.Allocator, metadata: Metadata) ![]u8 {
@@ -181,124 +183,18 @@ fn makePath(allocator: std.mem.Allocator, dir: [:0]const u8, basename: []const u
     return allocator.dupeZ(u8, path);
 }
 
-fn openRead(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            .NOENT => return error.FileNotFound,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn openTemporary(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0o644);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn fileSize(fd: linux.fd_t) !usize {
-    const rc = linux.lseek(fd, 0, 2);
-    if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-    return std.math.cast(usize, rc) orelse error.StatFailed;
-}
-
-fn readAll(fd: linux.fd_t, data: []u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const rc = linux.pread(fd, data[offset..].ptr, data.len - offset, @intCast(offset));
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ReadFailed;
-        offset += rc;
-    }
-}
-
-fn writeAll(fd: linux.fd_t, data: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const rc = linux.write(fd, data[offset..].ptr, data.len - offset);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        offset += rc;
-    }
-}
-
-fn syncFile(fd: linux.fd_t) !void {
-    while (true) {
-        const rc = linux.fsync(fd);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.SyncFailed,
-        }
-    }
-}
-
-fn closeFile(fd: linux.fd_t) !void {
-    if (linux.errno(linux.close(fd)) != .SUCCESS) return error.CloseFailed;
-}
-
-fn closeIgnore(fd: linux.fd_t) void {
-    _ = linux.close(fd);
-}
-
-fn renameFile(old: [:0]const u8, new: [:0]const u8) !void {
-    while (true) {
-        const rc = linux.rename(old.ptr, new.ptr);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.RenameFailed,
-        }
-    }
-}
-
-fn syncDirectory(path: [:0]const u8) !void {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const fd: linux.fd_t = while (true) {
-        const rc = linux.open(path.ptr, flags, 0);
-        switch (linux.errno(rc)) {
-            .SUCCESS => break @intCast(rc),
-            .INTR => continue,
-            else => return error.OpenFailed,
-        }
-    };
-    defer closeIgnore(fd);
-    try syncFile(fd);
-}
-
-fn unlinkIgnore(path: [:0]const u8) void {
-    _ = linux.unlink(path.ptr);
-}
-
 test "metadata store round-trips and rejects corruption" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-metadata-store-test";
-    removeFiles(allocator, dir);
-    _ = linux.mkdir(dir.ptr, 0o755);
+    const fs = fs_mod.linuxFileSystem();
+    removeFiles(allocator, fs, dir);
+    _ = try fs.makeDir(dir);
     defer {
-        removeFiles(allocator, dir);
-        _ = linux.rmdir(dir.ptr);
+        removeFiles(allocator, fs, dir);
+        _ = std.os.linux.rmdir(dir.ptr);
     }
 
-    var store = try MetadataStore.init(allocator, dir);
+    var store = try MetadataStore.init(allocator, fs, dir);
     defer store.deinit();
     try std.testing.expect((try store.load()) == null);
     try store.save(.{
@@ -319,16 +215,16 @@ test "metadata store round-trips and rejects corruption" {
     try std.testing.expectEqualStrings("hard", loaded.hard_state);
     try std.testing.expectEqualStrings("conf", loaded.conf_state);
 
-    const tmp_fd = try openTemporary(store.tmp_path);
-    try writeAll(tmp_fd, "stale");
-    try closeFile(tmp_fd);
+    const tmp_fd = try fs.open(store.tmp_path, .write_truncate);
+    try fs.pwriteAll(tmp_fd, "stale", 0);
+    try fs.close(tmp_fd);
     var loaded_with_stale_tmp = (try store.load()).?;
     defer loaded_with_stale_tmp.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 7), loaded_with_stale_tmp.first_index);
 
-    const fd = try openTemporary(store.path);
-    defer closeIgnore(fd);
-    try writeAll(fd, "corrupt");
+    const fd = try fs.open(store.path, .write_truncate);
+    defer fs.close(fd) catch {};
+    try fs.pwriteAll(fd, "corrupt", 0);
     try std.testing.expectError(error.MetadataCorrupt, store.load());
 }
 

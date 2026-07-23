@@ -206,6 +206,8 @@ pub const Raftor = raftor_mod.Raftor;
 
 pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;
+pub const WalFileSystem = wal_mod.WalFileSystem;
+pub const WalFileSystemError = wal_mod.WalFileSystemError;
 
 pub const encodeMessage = codec_mod.encodeMessage;
 pub const decodeMessage = codec_mod.decodeMessage;

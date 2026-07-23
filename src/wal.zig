@@ -35,6 +35,9 @@ const cloneEntry = storage_mod.cloneEntry;
 const cloneConfState = storage_mod.cloneConfState;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 
+pub const WalFileSystem = fs_mod.FileSystem;
+pub const WalFileSystemError = fs_mod.Error;
+
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
 const log = std.log.scoped(.raft_zig_wal);
@@ -386,10 +389,10 @@ pub const WAL = struct {
         var sm = try segment_manager_mod.SegmentManager.init(allocator, config.fs, config.dir);
         var owns_sm = true;
         errdefer if (owns_sm) sm.deinit();
-        var metadata_store = try metadata_store_mod.MetadataStore.init(allocator, config.dir);
+        var metadata_store = try metadata_store_mod.MetadataStore.init(allocator, config.fs, config.dir);
         var owns_metadata_store = true;
         errdefer if (owns_metadata_store) metadata_store.deinit();
-        var snapshot_store = try snapshot_store_mod.SnapshotStore.init(allocator, config.dir);
+        var snapshot_store = try snapshot_store_mod.SnapshotStore.init(allocator, config.fs, config.dir);
         var owns_snapshot_store = true;
         errdefer if (owns_snapshot_store) snapshot_store.deinit();
 
@@ -942,10 +945,14 @@ pub const WALStorage = struct {
     allocator: std.mem.Allocator,
 
     pub fn open(allocator: std.mem.Allocator, dir: [:0]const u8) Error!*WALStorage {
+        return openWithFs(allocator, dir, fs_mod.linuxFileSystem());
+    }
+
+    pub fn openWithFs(allocator: std.mem.Allocator, dir: [:0]const u8, fs: WalFileSystem) Error!*WALStorage {
         const self = try allocator.create(WALStorage);
         errdefer allocator.destroy(self);
         self.* = .{
-            .wal = WAL.open(allocator, .{ .dir = dir }) catch |err| return mapError(err),
+            .wal = WAL.open(allocator, .{ .dir = dir, .fs = fs }) catch |err| return mapError(err),
             .allocator = allocator,
         };
         return self;
@@ -1202,8 +1209,8 @@ fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
     var sm = segment_manager_mod.SegmentManager.init(allocator, fs_mod.linuxFileSystem(), dir) catch return;
     sm.removeAllSegments() catch {};
     sm.deinit();
-    metadata_store_mod.removeFiles(allocator, dir);
-    snapshot_store_mod.removeFiles(allocator, dir);
+    metadata_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), dir);
+    snapshot_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), dir);
     _ = linux.rmdir(dir.ptr);
 }
 
@@ -1352,7 +1359,7 @@ test "wal: non-empty WAL without metadata fails closed" {
         try wal.sync();
     }
 
-    metadata_store_mod.removeFiles(allocator, path);
+    metadata_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), path);
 
     try std.testing.expectError(error.MetadataCorrupt, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
 

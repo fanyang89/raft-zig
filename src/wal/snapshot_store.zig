@@ -1,5 +1,5 @@
 const std = @import("std");
-const linux = std.os.linux;
+const fs_mod = @import("fs.zig");
 
 const types = @import("../core/types.zig");
 
@@ -13,11 +13,13 @@ const header_size: usize = 64;
 pub const SnapshotStore = struct {
     allocator: std.mem.Allocator,
     dir: [:0]u8,
+    fs: fs_mod.FileSystem,
 
-    pub fn init(allocator: std.mem.Allocator, dir: [:0]const u8) !SnapshotStore {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !SnapshotStore {
         return .{
             .allocator = allocator,
             .dir = try allocator.dupeSentinel(u8, dir, 0),
+            .fs = fs,
         };
     }
 
@@ -35,30 +37,30 @@ pub const SnapshotStore = struct {
         const tmp_path = try makePath(self.allocator, self.dir, snapshot.metadata.index, snapshot.metadata.term, true);
         defer self.allocator.free(tmp_path);
 
-        const fd = try openTemporary(tmp_path);
+        const fd = try self.fs.open(tmp_path, .write_truncate);
         var is_open = true;
         errdefer {
-            if (is_open) closeIgnore(fd);
-            unlinkIgnore(tmp_path);
+            if (is_open) self.fs.close(fd) catch {};
+            self.fs.unlink(tmp_path) catch {};
         }
-        try writeAll(fd, data);
-        try syncFile(fd);
-        const close_result = closeFile(fd);
+        try self.fs.pwriteAll(fd, data, 0);
+        try self.fs.syncFile(fd);
+        const close_result = self.fs.close(fd);
         is_open = false;
         try close_result;
-        try renameFile(tmp_path, path);
-        try syncDirectory(self.dir);
+        try self.fs.rename(tmp_path, path);
+        try self.fs.syncDir(self.dir);
     }
 
     pub fn load(self: *SnapshotStore, index: u64, term: u64) !Snapshot {
         const path = try makePath(self.allocator, self.dir, index, term, false);
         defer self.allocator.free(path);
-        const fd = try openRead(path);
-        defer closeIgnore(fd);
-        const size = try fileSize(fd);
+        const fd = try self.fs.open(path, .read_only);
+        defer self.fs.close(fd) catch {};
+        const size = std.math.cast(usize, try self.fs.fileSize(fd)) orelse return error.StatFailed;
         const data = try self.allocator.alloc(u8, size);
         defer self.allocator.free(data);
-        try readAll(fd, data);
+        if (try self.fs.preadAll(fd, data, 0) != data.len) return error.ReadFailed;
         var snapshot = try decode(self.allocator, data);
         errdefer snapshot.deinit(self.allocator);
         if (snapshot.metadata.index != index or snapshot.metadata.term != term) return error.MetadataCorrupt;
@@ -69,34 +71,19 @@ pub const SnapshotStore = struct {
         if (index == 0) return;
         const path = try makePath(self.allocator, self.dir, index, term, false);
         defer self.allocator.free(path);
-        try unlinkFile(path);
-        try syncDirectory(self.dir);
+        try self.fs.unlink(path);
+        try self.fs.syncDir(self.dir);
     }
 };
 
-pub fn removeFiles(allocator: std.mem.Allocator, dir: [:0]const u8) void {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const fd = openDirectory(dir, flags) catch return;
-    defer closeIgnore(fd);
-    var buffer: [4096]u8 = undefined;
-    while (true) {
-        const n = getDirectoryEntries(fd, &buffer) catch return;
-        if (n == 0) break;
-        var offset: usize = 0;
-        while (offset < n) {
-            const entry: *align(1) linux.dirent64 = @ptrCast(&buffer[offset]);
-            const name_offset = @offsetOf(linux.dirent64, "name");
-            if (entry.reclen <= name_offset or entry.reclen > n - offset) return;
-            const name_ptr: [*]const u8 = &entry.name;
-            const padded_name = name_ptr[0 .. entry.reclen - name_offset];
-            const name_len = std.mem.findScalar(u8, padded_name, 0) orelse return;
-            const name = name_ptr[0..name_len];
-            if (isSnapshotFilename(name)) {
-                const path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir, name }, 0) catch return;
-                unlinkIgnore(path);
-                allocator.free(path);
-            }
-            offset += entry.reclen;
+pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) void {
+    var listing = fs.listDir(allocator, dir) catch return;
+    defer listing.deinit();
+    for (listing.entries.items) |entry| {
+        if (isSnapshotFilename(entry.name)) {
+            const path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir, entry.name }, 0) catch return;
+            fs.unlink(path) catch {};
+            allocator.free(path);
         }
     }
 }
@@ -192,150 +179,18 @@ fn isSnapshotFilename(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "snapshot-") and (std.mem.endsWith(u8, name, ".snap") or std.mem.endsWith(u8, name, ".tmp"));
 }
 
-fn openDirectory(path: [:0]const u8, flags: linux.O) !linux.fd_t {
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn getDirectoryEntries(fd: linux.fd_t, buffer: []u8) !usize {
-    while (true) {
-        const rc = linux.getdents64(fd, buffer.ptr, buffer.len);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return rc,
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-    }
-}
-
-fn openRead(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            .NOENT => return error.FileNotFound,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn openTemporary(path: [:0]const u8) !linux.fd_t {
-    const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true };
-    while (true) {
-        const rc = linux.open(path.ptr, flags, 0o644);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => return error.OpenFailed,
-        }
-    }
-}
-
-fn fileSize(fd: linux.fd_t) !usize {
-    const rc = linux.lseek(fd, 0, 2);
-    if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-    return std.math.cast(usize, rc) orelse error.StatFailed;
-}
-
-fn readAll(fd: linux.fd_t, data: []u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const rc = linux.pread(fd, data[offset..].ptr, data.len - offset, @intCast(offset));
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ReadFailed;
-        offset += rc;
-    }
-}
-
-fn writeAll(fd: linux.fd_t, data: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const rc = linux.write(fd, data[offset..].ptr, data.len - offset);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        offset += rc;
-    }
-}
-
-fn syncFile(fd: linux.fd_t) !void {
-    while (true) {
-        const rc = linux.fsync(fd);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.SyncFailed,
-        }
-    }
-}
-
-fn closeFile(fd: linux.fd_t) !void {
-    if (linux.errno(linux.close(fd)) != .SUCCESS) return error.CloseFailed;
-}
-
-fn closeIgnore(fd: linux.fd_t) void {
-    _ = linux.close(fd);
-}
-
-fn renameFile(old: [:0]const u8, new: [:0]const u8) !void {
-    while (true) {
-        const rc = linux.rename(old.ptr, new.ptr);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => continue,
-            else => return error.RenameFailed,
-        }
-    }
-}
-
-fn unlinkFile(path: [:0]const u8) !void {
-    while (true) {
-        const rc = linux.unlink(path.ptr);
-        switch (linux.errno(rc)) {
-            .SUCCESS, .NOENT => return,
-            .INTR => continue,
-            else => return error.UnlinkFailed,
-        }
-    }
-}
-
-fn unlinkIgnore(path: [:0]const u8) void {
-    _ = linux.unlink(path.ptr);
-}
-
-fn syncDirectory(path: [:0]const u8) !void {
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const fd = try openDirectory(path, flags);
-    defer closeIgnore(fd);
-    try syncFile(fd);
-}
-
 test "snapshot store round-trips complete snapshots" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-test";
-    removeFiles(allocator, dir);
-    _ = linux.mkdir(dir.ptr, 0o755);
+    const fs = fs_mod.linuxFileSystem();
+    removeFiles(allocator, fs, dir);
+    _ = try fs.makeDir(dir);
     defer {
-        removeFiles(allocator, dir);
-        _ = linux.rmdir(dir.ptr);
+        removeFiles(allocator, fs, dir);
+        _ = std.os.linux.rmdir(dir.ptr);
     }
 
-    var store = try SnapshotStore.init(allocator, dir);
+    var store = try SnapshotStore.init(allocator, fs, dir);
     defer store.deinit();
     var snapshot = Snapshot{
         .data = try allocator.dupe(u8, "state-image"),
@@ -363,14 +218,15 @@ test "snapshot store round-trips complete snapshots" {
 test "snapshot store rejects corruption and metadata mismatch" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-corruption-test";
-    removeFiles(allocator, dir);
-    _ = linux.mkdir(dir.ptr, 0o755);
+    const fs = fs_mod.linuxFileSystem();
+    removeFiles(allocator, fs, dir);
+    _ = try fs.makeDir(dir);
     defer {
-        removeFiles(allocator, dir);
-        _ = linux.rmdir(dir.ptr);
+        removeFiles(allocator, fs, dir);
+        _ = std.os.linux.rmdir(dir.ptr);
     }
 
-    var store = try SnapshotStore.init(allocator, dir);
+    var store = try SnapshotStore.init(allocator, fs, dir);
     defer store.deinit();
     const snapshot = Snapshot{ .data = @constCast("payload"), .metadata = .{ .index = 3, .term = 2 } };
     try store.save(snapshot);
@@ -378,8 +234,8 @@ test "snapshot store rejects corruption and metadata mismatch" {
 
     const path = try makePath(allocator, dir, 3, 2, false);
     defer allocator.free(path);
-    const fd = try openTemporary(path);
-    try writeAll(fd, "corrupt");
-    try closeFile(fd);
+    const fd = try fs.open(path, .write_truncate);
+    try fs.pwriteAll(fd, "corrupt", 0);
+    try fs.close(fd);
     try std.testing.expectError(error.MetadataCorrupt, store.load(3, 2));
 }

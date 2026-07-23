@@ -316,9 +316,12 @@ fn linuxUnlink(_: *anyopaque, path: [:0]const u8) Error!void {
 }
 
 fn linuxSyncDir(ctx: *anyopaque, path: [:0]const u8) Error!void {
-    const handle = linuxOpen(ctx, path, .read_only) catch |err| return switch (err) {
-        error.Interrupted => error.Interrupted,
-        else => error.DirectorySyncFailed,
+    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    const rc = linux.open(path.ptr, flags, 0);
+    const handle: Handle = switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => return error.Interrupted,
+        else => return error.DirectorySyncFailed,
     };
     defer linuxClose(ctx, handle) catch {};
     linuxSyncFile(ctx, handle) catch |err| return switch (err) {
