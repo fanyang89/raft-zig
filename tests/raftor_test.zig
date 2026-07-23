@@ -351,3 +351,28 @@ test "raftor: startup mode validates and reloads storage" {
     try std.testing.expectEqual(@as(u64, 7), r.getStatus().term);
     try std.testing.expectEqual(@as(u64, 1), r.getRawNode().raftConst().vote);
 }
+
+test "raftor: Ready persistence resumes at the failed phase" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const failing_allocator = failing.allocator();
+    var sm = MockStateMachine.init(failing_allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.create(failing_allocator, makeConfig(1), sm.stateMachine());
+    defer r.destroy();
+    try r.getRawNode().campaign();
+
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.validate, r.getReadyPhase().?);
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.persist_entries, r.getReadyPhase().?);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.persist_entries, r.getReadyPhase().?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(try r.tick());
+    try std.testing.expectEqual(@as(?raft.ReadyPhase, null), r.getReadyPhase());
+    try std.testing.expect(r.isLeader());
+}

@@ -45,6 +45,33 @@ const StateRole = state_role_mod.StateRole;
 
 const log = std.log.scoped(.raft_zig_ready_processor);
 
+pub const ReadyPhase = enum {
+    validate,
+    persist_entries,
+    persist_hard_state,
+    restore_snapshot,
+    persist_snapshot,
+    sync,
+    send_messages,
+    apply_committed,
+    complete_reads,
+    advance,
+    send_advanced_messages,
+    apply_advanced_committed,
+    advance_apply,
+};
+
+const PendingReady = struct {
+    ready: Ready,
+    light_ready: LightReady = .{},
+    phase: ReadyPhase = .validate,
+
+    fn deinit(self: *PendingReady, allocator: std.mem.Allocator) void {
+        self.light_ready.deinit(allocator);
+        self.ready.deinit(allocator);
+    }
+};
+
 pub const ReadyProcessor = struct {
     raw_node: *RawNode,
     storage: WritableStorage,
@@ -57,6 +84,8 @@ pub const ReadyProcessor = struct {
     prev_leader: u64,
     prev_term: u64,
     fatal_error: ?Error,
+    fatal_after_ready: ?Error,
+    pending: ?PendingReady,
     checksum_enabled: bool,
     allocator: std.mem.Allocator,
 
@@ -84,9 +113,16 @@ pub const ReadyProcessor = struct {
             .prev_leader = ss.leader_id,
             .prev_term = raw_node.raftConst().term,
             .fatal_error = null,
+            .fatal_after_ready = null,
+            .pending = null,
             .checksum_enabled = checksum_enabled,
             .allocator = allocator,
         };
+    }
+
+    pub fn deinit(self: *ReadyProcessor) void {
+        if (self.pending) |*pending| pending.deinit(self.allocator);
+        self.pending = null;
     }
 
     pub fn isLeader(self: ReadyProcessor) bool {
@@ -101,71 +137,108 @@ pub const ReadyProcessor = struct {
         return self.applied_index;
     }
 
+    pub fn phase(self: ReadyProcessor) ?ReadyPhase {
+        return if (self.pending) |pending| pending.phase else null;
+    }
+
     /// Process one Ready cycle. Returns true if there was work to do.
     pub fn process(self: *ReadyProcessor) Error!bool {
         if (self.fatal_error) |e| return e;
-        if (!self.raw_node.*.hasReady()) return false;
+        if (!try self.processStep()) return false;
+        while (self.pending != null) _ = try self.processStep();
+        return true;
+    }
 
-        var rd = try self.raw_node.*.getReady();
-        defer rd.deinit(self.allocator);
-
-        self.checkLeadershipChange(rd);
-
-        // 1. Validate checksums (optional).
-        if (self.checksum_enabled) try self.validateEntries(rd.entries);
-
-        // 2. Persist entries.
-        if (rd.entries.len > 0) {
-            self.storage.append(self.allocator, rd.entries) catch |e| {
-                log.warn("failed to persist entries: {s}", .{@errorName(e)});
-                return error.ProposalDropped;
-            };
+    /// Advance one phase of the current Ready cycle.
+    pub fn processStep(self: *ReadyProcessor) Error!bool {
+        if (self.fatal_error) |e| return e;
+        if (self.pending == null) {
+            if (!self.raw_node.*.hasReady()) return false;
+            const ready = try self.raw_node.*.getReady();
+            self.checkLeadershipChange(ready);
+            self.pending = .{ .ready = ready };
+            return true;
         }
 
-        // 3. Persist HardState.
-        if (rd.hs) |hs| {
-            self.storage.setHardState(hs) catch |e| {
-                log.warn("failed to persist hard state: {s}", .{@errorName(e)});
-                return error.ProposalDropped;
-            };
-            if (rd.must_sync) {
-                self.storage.sync() catch {};
-            }
+        const pending = &self.pending.?;
+        switch (pending.phase) {
+            .validate => {
+                if (self.checksum_enabled) try self.validateEntries(pending.ready.entries);
+                pending.phase = .persist_entries;
+            },
+            .persist_entries => {
+                if (pending.ready.entries.len > 0) {
+                    self.storage.append(self.allocator, pending.ready.entries) catch |err| {
+                        log.warn("failed to persist entries: {s}", .{@errorName(err)});
+                        return err;
+                    };
+                }
+                pending.phase = .persist_hard_state;
+            },
+            .persist_hard_state => {
+                if (pending.ready.hs) |hs| {
+                    self.storage.setHardState(hs) catch |err| {
+                        log.warn("failed to persist hard state: {s}", .{@errorName(err)});
+                        return err;
+                    };
+                }
+                pending.phase = .restore_snapshot;
+            },
+            .restore_snapshot => {
+                if (pending.ready.snapshot) |snapshot| {
+                    if (snapshot.metadata.index > 0) try self.restoreSnapshot(snapshot);
+                }
+                pending.phase = .persist_snapshot;
+            },
+            .persist_snapshot => {
+                if (pending.ready.snapshot) |snapshot| {
+                    if (snapshot.metadata.index > 0) try self.persistSnapshot(snapshot);
+                }
+                pending.phase = .sync;
+            },
+            .sync => {
+                if (pending.ready.must_sync) try self.storage.sync();
+                pending.phase = .send_messages;
+            },
+            .send_messages => {
+                self.sendMessages(pending.ready.light.messages);
+                pending.phase = .apply_committed;
+            },
+            .apply_committed => {
+                if (pending.ready.light.committed_entries.len > 0) {
+                    try self.applyCommittedEntries(pending.ready.light.committed_entries);
+                }
+                pending.phase = .complete_reads;
+            },
+            .complete_reads => {
+                for (pending.ready.read_states) |read_state| self.proposal_tracker.completeRead(read_state.request_ctx);
+                pending.phase = .advance;
+            },
+            .advance => {
+                pending.light_ready = self.raw_node.*.advance(pending.ready) catch |err| {
+                    self.fatal_error = err;
+                    return err;
+                };
+                pending.phase = .send_advanced_messages;
+            },
+            .send_advanced_messages => {
+                self.sendMessages(pending.light_ready.messages);
+                pending.phase = .apply_advanced_committed;
+            },
+            .apply_advanced_committed => {
+                if (pending.light_ready.committed_entries.len > 0) {
+                    try self.applyCommittedEntries(pending.light_ready.committed_entries);
+                }
+                pending.phase = .advance_apply;
+            },
+            .advance_apply => {
+                self.raw_node.*.advanceApply();
+                pending.deinit(self.allocator);
+                self.pending = null;
+                self.fatal_error = self.fatal_after_ready;
+                self.fatal_after_ready = null;
+            },
         }
-
-        // 4. Apply snapshot.
-        if (rd.snapshot) |snap| {
-            if (snap.metadata.index > 0) try self.applySnapshot(snap);
-        }
-
-        // 5. Send messages (from rd.light — pre-advance messages).
-        self.sendMessages(rd.light.messages);
-
-        // 6. Apply committed entries from rd.light.
-        if (rd.light.committed_entries.len > 0) try self.applyCommittedEntries(rd.light.committed_entries);
-
-        // 7. Enqueue read states.
-        for (rd.read_states) |rs| {
-            self.proposal_tracker.completeRead(rs.request_ctx);
-        }
-
-        // Also check rd.light for committed entries and messages already
-        // pulled by getReady's getLightReady.
-        // rd.light.committed_entries was applied above.
-        // rd.light.messages were sent above.
-
-        // 8. Advance and process the light ready.
-        var light_rd = try self.raw_node.*.advance(rd);
-        defer light_rd.deinit(self.allocator);
-
-        // Send messages from advance's light ready.
-        self.sendMessages(light_rd.messages);
-
-        // Apply committed entries from advance's light ready.
-        if (light_rd.committed_entries.len > 0) try self.applyCommittedEntries(light_rd.committed_entries);
-
-        self.raw_node.*.advanceApply();
-
         return true;
     }
 
@@ -215,20 +288,20 @@ pub const ReadyProcessor = struct {
         }
     }
 
-    fn applySnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
+    fn restoreSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
         log.info("applying snapshot at index {} term {}", .{ snap.metadata.index, snap.metadata.term });
 
-        // Restore to state machine first.
         const reader = BufferSnapshotReader.init(snap.data);
         try self.state_machine.restoreSnapshot(snap.metadata, .{
             .ctx = @constCast(&reader),
             .vtable = &buffer_snapshot_reader_vtable,
         });
+    }
 
-        // Then apply to storage.
+    fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
         self.storage.applySnapshot(self.allocator, snap) catch |e| {
             log.warn("failed to apply snapshot to storage: {s}", .{@errorName(e)});
-            return error.ProposalDropped;
+            return e;
         };
 
         self.applied_index = snap.metadata.index;
@@ -279,17 +352,17 @@ pub const ReadyProcessor = struct {
                 defer applied_cs.deinit(self.allocator);
                 self.storage.setConfState(self.allocator, applied_cs) catch |err| {
                     log.warn("failed to persist configuration: {s}", .{@errorName(err)});
-                    self.fatal_error = err;
+                    self.fatal_after_ready = err;
                 };
                 for (cc.changes) |change| switch (change.change_type) {
                     .add_node, .add_learner_node => _ = self.transport.addPeer(change.node_id, cc.context) catch |err| {
                         log.warn("failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
-                        self.fatal_error = err;
+                        self.fatal_after_ready = err;
                         continue;
                     },
                     .remove_node => self.transport.removePeer(change.node_id) catch |err| {
                         log.warn("failed to remove transport peer {}: {s}", .{ change.node_id, @errorName(err) });
-                        self.fatal_error = err;
+                        self.fatal_after_ready = err;
                     },
                 };
             },

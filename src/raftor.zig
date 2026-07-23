@@ -45,6 +45,7 @@ const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 const ProposalQueue = proposal_queue_mod.ProposalQueue;
 const ReadIndexQueue = proposal_queue_mod.ReadIndexQueue;
 const ReadyProcessor = ready_processor_mod.ReadyProcessor;
+const ReadyPhase = ready_processor_mod.ReadyPhase;
 const RaftorConfig = raftor_config_mod.RaftorConfig;
 const StateRole = state_role_mod.StateRole;
 const Peer = raw_node_mod.Peer;
@@ -288,6 +289,7 @@ pub const Raftor = struct {
         self.proposal_queue.deinit();
         self.read_index_queue.deinit();
         self.proposal_tracker.deinit();
+        self.ready_processor.deinit();
         self.raw_node.deinit();
         if (self.noop_transport) |*nt| nt.deinit();
         if (self.owned_storage) |*storage| storage.deinit(self.allocator);
@@ -314,6 +316,10 @@ pub const Raftor = struct {
     /// Advance the event loop by one tick. Returns true if there was work.
     pub fn tick(self: *Raftor) Error!bool {
         if (self.terminal_error) |e| return e;
+        if (self.ready_processor.phase() != null) {
+            _ = try self.ready_processor.process();
+            return true;
+        }
         self.tick_count += 1;
 
         self.proposal_tracker.expireTimeouts(self.tick_count);
@@ -554,6 +560,14 @@ pub const Raftor = struct {
 
     pub fn getRawNode(self: *Raftor) *RawNode {
         return &self.raw_node;
+    }
+
+    pub fn getReadyPhase(self: *const Raftor) ?ReadyPhase {
+        return self.ready_processor.phase();
+    }
+
+    pub fn processReadyStep(self: *Raftor) Error!bool {
+        return self.ready_processor.processStep();
     }
 };
 

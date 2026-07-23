@@ -134,6 +134,7 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.RaftorConfig;
         _ = raft.StartupMode;
         _ = raft.RaftorDependencies;
+        _ = raft.ReadyPhase;
         _ = raft.NodeStatus;
         _ = raft.Raftor;
     }

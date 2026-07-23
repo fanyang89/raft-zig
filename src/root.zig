@@ -198,6 +198,7 @@ pub const RaftorConfig = raftor_config_mod.RaftorConfig;
 
 pub const StartupMode = raftor_mod.StartupMode;
 pub const RaftorDependencies = raftor_mod.RaftorDependencies;
+pub const ReadyPhase = ready_processor_mod.ReadyPhase;
 pub const NodeStatus = raftor_mod.NodeStatus;
 pub const Raftor = raftor_mod.Raftor;
 
