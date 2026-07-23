@@ -219,6 +219,10 @@ pub const Raftor = struct {
 
         try config.raft.validate();
         try self.prepareStorage(startup_mode);
+        const initial_applied_index = if (startup_mode == .restart)
+            try self.restoreLocalSnapshot(dependencies.state_machine, config.raft.applied)
+        else
+            config.raft.applied;
 
         self.proposal_tracker = ProposalTracker.init(allocator);
         self.proposal_queue = ProposalQueue.init(allocator);
@@ -239,6 +243,7 @@ pub const Raftor = struct {
         // Build RawNode AFTER storage is at its final address.
         var raft_config = config.raft;
         raft_config.load_state_on_startup = startup_mode == .restart;
+        raft_config.applied = initial_applied_index;
         self.raw_node = try RawNode.init(allocator, raft_config, self.storage.asStorage());
         errdefer self.raw_node.deinit();
 
@@ -258,8 +263,22 @@ pub const Raftor = struct {
             &self.proposal_tracker,
             config.nodeId(),
             config.checksum_enabled,
-            config.raft.applied,
+            initial_applied_index,
         );
+    }
+
+    fn restoreLocalSnapshot(self: *Raftor, state_machine: StateMachine, fallback_applied_index: u64) Error!u64 {
+        var snapshot = (try self.storage.localSnapshot(self.allocator)) orelse return fallback_applied_index;
+        defer snapshot.deinit(self.allocator);
+        if (snapshot.metadata.index == 0) return fallback_applied_index;
+        var reader = state_machine_mod.BufferSnapshotReader.init(snapshot.data);
+        try state_machine.restoreSnapshot(snapshot.metadata, reader.reader());
+        log.info("restored local snapshot: node_id={}, index={}, term={}", .{
+            self.config.nodeId(),
+            snapshot.metadata.index,
+            snapshot.metadata.term,
+        });
+        return snapshot.metadata.index;
     }
 
     fn prepareStorage(self: *Raftor, startup_mode: StartupMode) Error!void {

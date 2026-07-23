@@ -55,6 +55,30 @@ pub const SnapshotReader = struct {
     }
 };
 
+pub const BufferSnapshotReader = struct {
+    data: []const u8,
+    offset: usize = 0,
+
+    pub fn init(data: []const u8) BufferSnapshotReader {
+        return .{ .data = data };
+    }
+
+    pub fn reader(self: *BufferSnapshotReader) SnapshotReader {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn readImpl(ctx: *anyopaque, out: []u8) Error!usize {
+        const self: *BufferSnapshotReader = @ptrCast(@alignCast(ctx));
+        if (self.offset >= self.data.len or out.len == 0) return 0;
+        const count = @min(out.len, self.data.len - self.offset);
+        @memcpy(out[0..count], self.data[self.offset .. self.offset + count]);
+        self.offset += count;
+        return count;
+    }
+
+    const vtable: SnapshotReader.VTable = .{ .read = readImpl };
+};
+
 /// vtable interface the Raftor orchestration layer calls into.
 pub const StateMachine = struct {
     ctx: *anyopaque,
@@ -65,6 +89,8 @@ pub const StateMachine = struct {
         /// state unchanged. Raftor treats every apply error as terminal.
         apply: *const fn (ctx: *anyopaque, entry: Entry) Error!ApplyResult,
         take_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: ConfState) Error!Snapshot,
+        /// Restore must be atomic: returning an error must leave application
+        /// state unchanged.
         restore_snapshot: *const fn (ctx: *anyopaque, metadata: SnapshotMetadata, reader: SnapshotReader) Error!void,
         on_leadership_change: *const fn (ctx: *anyopaque, is_leader: bool, term: u64, leader_id: u64) void = noopOnLeadershipChange,
     };

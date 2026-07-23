@@ -304,11 +304,8 @@ pub const ReadyProcessor = struct {
     fn restoreSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
         log.info("applying snapshot at index {} term {}", .{ snap.metadata.index, snap.metadata.term });
 
-        const reader = BufferSnapshotReader.init(snap.data);
-        try self.state_machine.restoreSnapshot(snap.metadata, .{
-            .ctx = @constCast(&reader),
-            .vtable = &buffer_snapshot_reader_vtable,
-        });
+        var reader = state_machine_mod.BufferSnapshotReader.init(snap.data);
+        try self.state_machine.restoreSnapshot(snap.metadata, reader.reader());
     }
 
     fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
@@ -368,31 +365,4 @@ pub const ReadyProcessor = struct {
             },
         }
     }
-};
-
-// ===========================================================================
-// Buffer-backed SnapshotReader
-// ===========================================================================
-
-const BufferSnapshotReader = struct {
-    data: []const u8,
-    offset: usize = 0,
-
-    fn init(data: []const u8) BufferSnapshotReader {
-        return .{ .data = data };
-    }
-
-    fn readImpl(ctx: *anyopaque, out: []u8) Error!usize {
-        const self: *BufferSnapshotReader = @ptrCast(@alignCast(ctx));
-        if (self.offset >= self.data.len or out.len == 0) return 0;
-        const remaining = self.data.len - self.offset;
-        const n = @min(out.len, remaining);
-        @memcpy(out[0..n], self.data[self.offset .. self.offset + n]);
-        self.offset += n;
-        return n;
-    }
-};
-
-const buffer_snapshot_reader_vtable: state_machine_mod.SnapshotReader.VTable = .{
-    .read = BufferSnapshotReader.readImpl,
 };

@@ -131,6 +131,76 @@ const FailingStateMachine = struct {
     };
 };
 
+const DurableStateMachine = struct {
+    allocator: std.mem.Allocator,
+    state: std.ArrayList(u8) = .empty,
+    last_applied_index: u64 = 0,
+    restore_count: usize = 0,
+    fail_restore: bool = false,
+
+    fn init(alloc: std.mem.Allocator) DurableStateMachine {
+        return .{ .allocator = alloc };
+    }
+
+    fn deinit(self: *DurableStateMachine) void {
+        self.state.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn cast(ctx: *anyopaque) *DurableStateMachine {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn apply(ctx: *anyopaque, entry: raft.Entry) raft.Error!raft.ApplyResult {
+        const self = cast(ctx);
+        try self.state.ensureUnusedCapacity(self.allocator, entry.data.len);
+        self.state.appendSliceAssumeCapacity(entry.data);
+        self.last_applied_index = entry.index;
+        return .{};
+    }
+
+    fn takeSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: raft.ConfState) raft.Error!raft.Snapshot {
+        const self = cast(ctx);
+        const data = try alloc.dupe(u8, self.state.items);
+        errdefer alloc.free(data);
+        return .{
+            .data = data,
+            .metadata = .{
+                .index = applied_index,
+                .term = applied_term,
+                .conf_state = try raft.cloneConfState(alloc, conf_state),
+            },
+        };
+    }
+
+    fn restoreSnapshot(ctx: *anyopaque, metadata: raft.SnapshotMetadata, reader: raft.SnapshotReader) raft.Error!void {
+        const self = cast(ctx);
+        if (self.fail_restore) return error.OutOfMemory;
+        var restored: std.ArrayList(u8) = .empty;
+        errdefer restored.deinit(self.allocator);
+        var buffer: [64]u8 = undefined;
+        while (true) {
+            const count = try reader.read(&buffer);
+            if (count == 0) break;
+            try restored.appendSlice(self.allocator, buffer[0..count]);
+        }
+        self.state.deinit(self.allocator);
+        self.state = restored;
+        self.last_applied_index = metadata.index;
+        self.restore_count += 1;
+    }
+
+    fn stateMachine(self: *DurableStateMachine) raft.StateMachine {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    const vtable: raft.StateMachine.VTable = .{
+        .apply = apply,
+        .take_snapshot = takeSnapshot,
+        .restore_snapshot = restoreSnapshot,
+    };
+};
+
 const ErrorTester = struct {
     completed: bool = false,
     err: ?raft.Error = null,
@@ -163,6 +233,10 @@ fn makeConfig(id: u64) RaftorConfig {
     rc.raft.heartbeat_tick = 1;
     rc.raft.election_timeout_seed = id * 999;
     return rc;
+}
+
+fn removeTestDir(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
 }
 
 const ProposalTester = struct {
@@ -718,4 +792,60 @@ test "raftor: advanced commit survives restart" {
     const restarted = try Raftor.createWithDependencies(allocator, config, .restart, dependencies);
     defer restarted.destroy();
     try std.testing.expectEqual(sm.last_applied_index, restarted.getStatus().applied_index);
+}
+
+test "raftor: WAL restart restores snapshot before replaying its suffix" {
+    const path = "/tmp/raft-zig-raftor-snapshot-restart";
+    removeTestDir(path);
+    defer removeTestDir(path);
+    var config = makeConfig(1);
+    config.data_dir = path;
+    config.snapshot_entries_threshold = 0;
+
+    var snapshot_index: u64 = 0;
+    {
+        var machine = DurableStateMachine.init(allocator);
+        defer machine.deinit();
+        const r = try Raftor.create(allocator, config, machine.stateMachine());
+        defer r.destroy();
+        try r.campaign();
+
+        var alpha = ProposalTester{};
+        try r.propose("alpha", alpha.callback());
+        for (0..16) |_| _ = try r.tick();
+        try std.testing.expect(alpha.applied);
+        try r.takeSnapshot();
+        snapshot_index = r.getStatus().applied_index;
+        try std.testing.expectEqualStrings("alpha", machine.state.items);
+
+        var beta = ProposalTester{};
+        try r.propose("beta", beta.callback());
+        for (0..16) |_| _ = try r.tick();
+        try std.testing.expect(beta.applied);
+        try std.testing.expectEqualStrings("alphabeta", machine.state.items);
+        try std.testing.expect(r.getStatus().applied_index > snapshot_index);
+    }
+
+    {
+        var failing_machine = DurableStateMachine.init(allocator);
+        defer failing_machine.deinit();
+        failing_machine.fail_restore = true;
+        try std.testing.expectError(error.OutOfMemory, Raftor.create(allocator, config, failing_machine.stateMachine()));
+        try std.testing.expectEqual(@as(usize, 0), failing_machine.state.items.len);
+    }
+
+    {
+        var restored_machine = DurableStateMachine.init(allocator);
+        defer restored_machine.deinit();
+        config.raft.applied = std.math.maxInt(u64);
+        const r = try Raftor.create(allocator, config, restored_machine.stateMachine());
+        defer r.destroy();
+        try std.testing.expectEqual(@as(usize, 1), restored_machine.restore_count);
+        try std.testing.expectEqual(snapshot_index, r.getStatus().applied_index);
+        try std.testing.expectEqualStrings("alpha", restored_machine.state.items);
+
+        for (0..16) |_| _ = try r.tick();
+        try std.testing.expectEqualStrings("alphabeta", restored_machine.state.items);
+        try std.testing.expect(r.getStatus().applied_index > snapshot_index);
+    }
 }
