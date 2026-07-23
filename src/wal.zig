@@ -16,6 +16,7 @@ const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
 const segment_mod = @import("wal/segment.zig");
 const segment_manager_mod = @import("wal/segment_manager.zig");
+const metadata_store_mod = @import("wal/metadata_store.zig");
 
 const Error = error_model.Error;
 const Entry = types.Entry;
@@ -335,6 +336,8 @@ pub const WAL = struct {
     dir: [:0]u8,
     segment_size: u64,
     segment_manager: segment_manager_mod.SegmentManager,
+    metadata_store: metadata_store_mod.MetadataStore,
+    metadata_dirty: bool,
 
     // In-memory state recovered from the log.
     entries: std.ArrayList(Entry),
@@ -350,6 +353,9 @@ pub const WAL = struct {
         var sm = try segment_manager_mod.SegmentManager.init(allocator, config.dir);
         var owns_sm = true;
         errdefer if (owns_sm) sm.deinit();
+        var metadata_store = try metadata_store_mod.MetadataStore.init(allocator, config.dir);
+        var owns_metadata_store = true;
+        errdefer if (owns_metadata_store) metadata_store.deinit();
 
         // If no segments exist, create the first one.
         if (sm.getCurrent() == null) {
@@ -363,6 +369,8 @@ pub const WAL = struct {
             .dir = dir_copy,
             .segment_size = config.segment_size,
             .segment_manager = sm,
+            .metadata_store = metadata_store,
+            .metadata_dirty = false,
             .entries = .empty,
             .hard_state = .{},
             .conf_state = .{},
@@ -370,9 +378,11 @@ pub const WAL = struct {
             .first_index = 1,
         };
         owns_sm = false;
+        owns_metadata_store = false;
         errdefer wal.deinit();
 
         try wal.recover();
+        if (wal.metadata_dirty) try wal.sync();
 
         log.info("WAL opened: dir={s}, segments={}, entries={}, first={}, last={}", .{ wal.dir, wal.segment_manager.count(), wal.entries.items.len, wal.firstIndex(), wal.lastIndex() });
         return wal;
@@ -380,6 +390,7 @@ pub const WAL = struct {
 
     pub fn deinit(self: *WAL) void {
         self.segment_manager.deinit();
+        self.metadata_store.deinit();
         for (self.entries.items) |*e| e.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.conf_state.deinit(self.allocator);
@@ -389,6 +400,19 @@ pub const WAL = struct {
     }
 
     fn recover(self: *WAL) !void {
+        var persisted_metadata = try self.metadata_store.load();
+        defer if (persisted_metadata) |*metadata| metadata.deinit(self.allocator);
+        const has_metadata = persisted_metadata != null;
+        if (persisted_metadata) |metadata| {
+            self.first_index = metadata.first_index;
+            self.snapshot_metadata = .{
+                .index = metadata.snapshot_index,
+                .term = metadata.snapshot_term,
+            };
+            if (metadata.hard_state.len > 0) self.hard_state = try deserializeHardState(metadata.hard_state);
+            if (metadata.conf_state.len > 0) self.conf_state = try deserializeConfState(self.allocator, metadata.conf_state);
+        }
+
         const segs = self.segment_manager.segments.items;
         for (segs) |entry| {
             const seg = entry.segment;
@@ -410,31 +434,41 @@ pub const WAL = struct {
                 switch (parsed.record_type) {
                     .entry => {
                         var e = deserializeEntry(self.allocator, parsed.payload) catch break;
+                        if (e.index < self.first_index) {
+                            e.deinit(self.allocator);
+                            offset += total;
+                            continue;
+                        }
                         self.entries.append(self.allocator, e) catch {
                             e.deinit(self.allocator);
                             break;
                         };
                     },
                     .hard_state => {
-                        self.hard_state = deserializeHardState(parsed.payload) catch break;
+                        if (!has_metadata) self.hard_state = deserializeHardState(parsed.payload) catch break;
                     },
                     .conf_state => {
-                        self.conf_state.deinit(self.allocator);
-                        self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
+                        if (!has_metadata) {
+                            self.conf_state.deinit(self.allocator);
+                            self.conf_state = deserializeConfState(self.allocator, parsed.payload) catch break;
+                        }
                     },
                     .snapshot => {
-                        const metadata = deserializeSnapshotMetadata(parsed.payload) catch break;
-                        self.snapshot_metadata.deinit(self.allocator);
-                        self.snapshot_metadata = metadata;
+                        if (!has_metadata) {
+                            const metadata = deserializeSnapshotMetadata(parsed.payload) catch break;
+                            self.snapshot_metadata.deinit(self.allocator);
+                            self.snapshot_metadata = metadata;
+                        }
                     },
                 }
                 offset += total;
             }
         }
 
-        if (self.entries.items.len > 0) {
+        if (!has_metadata and self.entries.items.len > 0) {
             self.first_index = self.entries.items[0].index;
         }
+        if (!has_metadata) self.metadata_dirty = true;
     }
 
     fn writeRecord(self: *WAL, record_type: RecordType, payload: []const u8) !void {
@@ -476,6 +510,7 @@ pub const WAL = struct {
         const payload = serializeHardState(hs);
         try self.writeRecord(.hard_state, &payload);
         self.hard_state = hs;
+        self.metadata_dirty = true;
     }
 
     pub fn saveConfState(self: *WAL, cs: ConfState) !void {
@@ -486,6 +521,7 @@ pub const WAL = struct {
         try self.writeRecord(.conf_state, payload);
         self.conf_state.deinit(self.allocator);
         self.conf_state = cloned;
+        self.metadata_dirty = true;
     }
 
     pub fn saveSnapshotMetadata(self: *WAL, meta: SnapshotMetadata) !void {
@@ -495,10 +531,12 @@ pub const WAL = struct {
         try self.writeRecord(.snapshot, &payload);
         self.snapshot_metadata.deinit(self.allocator);
         self.snapshot_metadata = .{ .index = meta.index, .term = meta.term };
+        self.metadata_dirty = true;
     }
 
     pub fn sync(self: *WAL) !void {
         try self.segment_manager.syncAll();
+        if (self.metadata_dirty) try self.syncMetadata();
     }
 
     pub fn close(self: *WAL) !void {
@@ -517,6 +555,8 @@ pub const WAL = struct {
         while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
         std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
         self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
+        self.first_index = compact_index;
+        self.metadata_dirty = true;
 
         // Delete old segment files.
         // A segment is safe to delete if its first_index < compact_index AND
@@ -539,8 +579,7 @@ pub const WAL = struct {
     // -----------------------------------------------------------------------
 
     pub fn firstIndex(self: WAL) u64 {
-        if (self.entries.items.len == 0) return self.snapshot_metadata.index + 1;
-        return self.entries.items[0].index;
+        return self.first_index;
     }
 
     pub fn lastIndex(self: WAL) u64 {
@@ -586,6 +625,20 @@ pub const WAL = struct {
             actual = view.len;
         }
         return allocator.realloc(result, actual) catch result[0..actual];
+    }
+
+    fn syncMetadata(self: *WAL) !void {
+        const hard_state = serializeHardState(self.hard_state);
+        const conf_state = try serializeConfState(self.allocator, self.conf_state);
+        defer self.allocator.free(conf_state);
+        try self.metadata_store.save(.{
+            .first_index = self.first_index,
+            .snapshot_index = self.snapshot_metadata.index,
+            .snapshot_term = self.snapshot_metadata.term,
+            .hard_state = @constCast(hard_state[0..]),
+            .conf_state = conf_state,
+        });
+        self.metadata_dirty = false;
     }
 };
 
@@ -723,6 +776,9 @@ fn mapError(err: anyerror) Error {
         error.UnlinkFailed => error.WalDeleteFailed,
         error.StatFailed => error.WalStatFailed,
         error.MkdirFailed => error.WalCreateDirectoryFailed,
+        error.RenameFailed => error.WalRenameFailed,
+        error.CloseFailed => error.WalCloseFailed,
+        error.MetadataCorrupt => error.WalMetadataCorrupt,
         error.InvalidSegmentHeader => error.InvalidSegmentHeader,
         error.SegmentNotOpen => error.SegmentNotOpen,
         error.HardStateParseError => error.HardStateParseError,
@@ -840,6 +896,7 @@ fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
     var sm = segment_manager_mod.SegmentManager.init(allocator, dir) catch return;
     sm.removeAllSegments() catch {};
     sm.deinit();
+    metadata_store_mod.removeFiles(allocator, dir);
     _ = linux.rmdir(dir.ptr);
 }
 
@@ -988,10 +1045,14 @@ test "wal: open, append, recover" {
         try wal.sync();
     }
 
+    metadata_store_mod.removeFiles(allocator, path);
+
     // Reopen and verify recovery.
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
+        var regenerated_metadata = (try wal.metadata_store.load()).?;
+        defer regenerated_metadata.deinit(allocator);
         try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
         try std.testing.expectEqual(@as(u64, 1), wal.hard_state.term);
         try std.testing.expectEqual(@as(u64, 2), wal.hard_state.commit);
