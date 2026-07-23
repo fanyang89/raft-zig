@@ -259,3 +259,7 @@ test "Marionette PacketRef transport preserves ownership" {
         .checks = &transport_checks,
     });
 }
+
+test {
+    _ = @import("cluster_test.zig");
+}
