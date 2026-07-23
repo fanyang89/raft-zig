@@ -8,4 +8,5 @@ test "etcd/raft source metadata" {
 test {
     _ = @import("cases/pre_vote_test.zig");
     _ = @import("cases/leadership_transfer_test.zig");
+    _ = @import("cases/read_index_test.zig");
 }

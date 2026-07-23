@@ -738,9 +738,11 @@ pub const Raft = struct {
                 if (self.progress_tracker.isSingleton()) {
                     const read_index = self.raft_log.committed;
                     if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                        var owned = resp;
-                        try self.send(owned);
-                        owned.deinit(self.allocator);
+                        self.send(resp) catch |err| {
+                            var owned = resp;
+                            owned.deinit(self.allocator);
+                            return err;
+                        };
                     }
                     return;
                 }
@@ -758,9 +760,11 @@ pub const Raft = struct {
                     .lease_based => {
                         const read_index = self.raft_log.committed;
                         if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                            var owned = resp;
-                            try self.send(owned);
-                            owned.deinit(self.allocator);
+                            self.send(resp) catch |err| {
+                                var owned = resp;
+                                owned.deinit(self.allocator);
+                                return err;
+                            };
                         }
                     },
                 }
@@ -1088,9 +1092,11 @@ pub const Raft = struct {
         defer self.allocator.free(statuses);
         for (statuses) |*st| {
             if (try self.handleReadyReadIndexMsg(st.req, st.index)) |resp| {
-                var owned = resp;
-                try self.send(owned);
-                owned.deinit(self.allocator);
+                self.send(resp) catch |err| {
+                    var owned = resp;
+                    owned.deinit(self.allocator);
+                    return err;
+                };
             }
             // Advance transferred ownership of the status (incl. req).
             var mut = st.*;
@@ -1581,9 +1587,10 @@ pub const Raft = struct {
                     defer self.allocator.free(statuses);
                     for (statuses) |*st| {
                         if (self.handleReadyReadIndexMsg(st.req, st.index) catch null) |resp| {
-                            var owned = resp;
-                            self.send(owned) catch {};
-                            owned.deinit(self.allocator);
+                            self.send(resp) catch {
+                                var owned = resp;
+                                owned.deinit(self.allocator);
+                            };
                         }
                         var mut = st.*;
                         mut.deinit(self.allocator);
