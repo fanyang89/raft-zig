@@ -85,6 +85,45 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
+    const upstream_specs = [_]TestSpec{
+        .{ .name = "upstream-source-audit", .source = "tests/upstream/source_audit_test.zig" },
+        .{ .name = "upstream-etcd-raft", .source = "tests/upstream/etcd_raft/suite_test.zig" },
+        .{ .name = "upstream-raft-rs", .source = "tests/upstream/raft_rs/suite_test.zig" },
+        .{ .name = "upstream-openraft", .source = "tests/upstream/openraft/suite_test.zig" },
+        .{ .name = "upstream-hashicorp-raft", .source = "tests/upstream/hashicorp_raft/suite_test.zig" },
+    };
+    const upstream_manifest = b.createModule(.{
+        .root_source_file = b.path("tests/upstream/source_manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const upstream_step = b.step("test-upstream", "Run all adapted upstream test suites");
+    const upstream_source_steps = [_]*std.Build.Step{
+        upstream_step,
+        b.step("test-upstream-etcd-raft", "Run adapted etcd/raft tests"),
+        b.step("test-upstream-raft-rs", "Run adapted raft-rs tests"),
+        b.step("test-upstream-openraft", "Run adapted OpenRaft tests"),
+        b.step("test-upstream-hashicorp-raft", "Run clean-room HashiCorp Raft tests"),
+    };
+
+    for (upstream_specs, upstream_source_steps) |spec, source_step| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(spec.source),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "raft_zig", .module = raft_zig },
+                .{ .name = "upstream_manifest", .module = upstream_manifest },
+            },
+        });
+        applySanitizers(module, sanitizers);
+        const tests = b.addTest(.{ .name = spec.name, .root_module = module });
+        const run_tests = b.addRunArtifact(tests);
+        source_step.dependOn(&run_tests.step);
+        upstream_step.dependOn(&run_tests.step);
+        test_step.dependOn(&run_tests.step);
+    }
+
     const vopr_smoke_step = b.step("vopr-smoke", "Run Marionette integration smoke tests");
     const wal_durability_step = b.step("wal-durability", "Run Marionette WAL durability tests");
     if (b.lazyDependency("marionette", .{

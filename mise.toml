@@ -12,6 +12,26 @@ run = "zig build"
 description = "Run all tests"
 run = "zig build test --summary all"
 
+[tasks.test-upstream]
+description = "Run all adapted upstream test suites"
+run = "zig build test-upstream --summary all"
+
+[tasks.test-upstream-etcd-raft]
+description = "Run adapted etcd/raft tests"
+run = "zig build test-upstream-etcd-raft --summary all"
+
+[tasks.test-upstream-raft-rs]
+description = "Run adapted raft-rs tests"
+run = "zig build test-upstream-raft-rs --summary all"
+
+[tasks.test-upstream-openraft]
+description = "Run adapted OpenRaft tests"
+run = "zig build test-upstream-openraft --summary all"
+
+[tasks.test-upstream-hashicorp-raft]
+description = "Run clean-room HashiCorp Raft tests"
+run = "zig build test-upstream-hashicorp-raft --summary all"
+
 [tasks.test-release-safe]
 description = "Run all tests with ReleaseSafe optimization"
 run = "zig build test -Doptimize=ReleaseSafe --summary all"
