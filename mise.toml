@@ -44,6 +44,10 @@ run = "scripts/run-fuzz.sh fuzz-confchange 100K"
 description = "Fuzz deterministic cluster simulation"
 run = "scripts/run-fuzz.sh fuzz-sim 10K"
 
+[tasks.vopr-smoke]
+description = "Run Marionette integration smoke tests"
+run = "zig build vopr-smoke --summary all"
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src examples tests"

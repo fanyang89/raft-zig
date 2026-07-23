@@ -8,6 +8,11 @@
             .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/refs/tags/v0.2.1",
             .hash = "grpc_lite-0.2.1-BcwY0OX-AwCcwgLoCJ3EJyQsUDTvUJ_mRK80htiG1Bot",
         },
+        .marionette = .{
+            .url = "https://codeload.github.com/sb2bg/marionette/tar.gz/refs/tags/v0.6.0",
+            .hash = "marionette-0.6.0-jTrEFDEmGwAsls0lMrAb9uRDOWApe_5DSJkDfE6pTQwb",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

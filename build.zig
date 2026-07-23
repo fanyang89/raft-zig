@@ -84,6 +84,30 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
+    const vopr_smoke_step = b.step("vopr-smoke", "Run Marionette integration smoke tests");
+    if (b.lazyDependency("marionette", .{
+        .target = target,
+        .optimize = optimize,
+    })) |marionette_dep| {
+        const vopr_smoke_module = b.createModule(.{
+            .root_source_file = b.path("tests/vopr/smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "raft_zig", .module = raft_zig },
+                .{ .name = "marionette", .module = marionette_dep.module("marionette") },
+            },
+        });
+        applySanitizers(vopr_smoke_module, sanitizers);
+        const vopr_smoke_tests = b.addTest(.{
+            .name = "vopr-smoke",
+            .root_module = vopr_smoke_module,
+        });
+        const run_vopr_smoke = b.addRunArtifact(vopr_smoke_tests);
+        vopr_smoke_step.dependOn(&run_vopr_smoke.step);
+        test_step.dependOn(&run_vopr_smoke.step);
+    }
+
     const fuzz_smoke_step = b.step("fuzz-smoke", "Run fuzz corpus smoke tests");
     const fuzz_specs = [_]FuzzSpec{
         .{ .name = "codec", .source = "src/codec.zig" },

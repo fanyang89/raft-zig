@@ -42,6 +42,7 @@ mise run fuzz-codec
 mise run fuzz-wal
 mise run fuzz-confchange
 mise run fuzz-sim
+mise run vopr-smoke
 mise run fmt
 mise run fmt-check
 ```
