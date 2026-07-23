@@ -16,6 +16,7 @@ const storage_mod = @import("storage.zig");
 const segment_mod = @import("wal/segment.zig");
 const segment_manager_mod = @import("wal/segment_manager.zig");
 const metadata_store_mod = @import("wal/metadata_store.zig");
+const snapshot_store_mod = @import("wal/snapshot_store.zig");
 const wal_index_mod = @import("wal/wal_index.zig");
 
 const Error = error_model.Error;
@@ -1030,6 +1031,7 @@ fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
     sm.removeAllSegments() catch {};
     sm.deinit();
     metadata_store_mod.removeFiles(allocator, dir);
+    snapshot_store_mod.removeFiles(allocator, dir);
     _ = linux.rmdir(dir.ptr);
 }
 
