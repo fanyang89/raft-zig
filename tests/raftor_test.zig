@@ -15,6 +15,7 @@ const StateRole = raft.StateRole;
 const SyncFailingStorage = struct {
     inner: raft.WritableStorage,
     fail_sync: bool = false,
+    fail_conf_state: bool = false,
 
     fn cast(ctx: *anyopaque) *SyncFailingStorage {
         return @ptrCast(@alignCast(ctx));
@@ -53,7 +54,9 @@ const SyncFailingStorage = struct {
     }
 
     fn setConfState(ctx: *anyopaque, alloc: std.mem.Allocator, conf_state: raft.ConfState) raft.Error!void {
-        return cast(ctx).inner.setConfState(alloc, conf_state);
+        const self = cast(ctx);
+        if (self.fail_conf_state) return error.WalWriteFailed;
+        return self.inner.setConfState(alloc, conf_state);
     }
 
     fn applySnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, snapshot: raft.Snapshot) raft.Error!void {
@@ -88,6 +91,64 @@ const SyncFailingStorage = struct {
         .apply_local_snapshot = applyLocalSnapshot,
         .sync_ = sync,
     };
+};
+
+const FailingStateMachine = struct {
+    inner: *MockStateMachine,
+    fail_data: []const u8,
+
+    fn cast(ctx: *anyopaque) *FailingStateMachine {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn apply(ctx: *anyopaque, entry: raft.Entry) raft.Error!raft.ApplyResult {
+        const self = cast(ctx);
+        if (std.mem.eql(u8, entry.data, self.fail_data)) return error.OutOfMemory;
+        return MockStateMachine.applyImpl(self.inner, entry);
+    }
+
+    fn takeSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: raft.ConfState) raft.Error!raft.Snapshot {
+        return MockStateMachine.takeSnapshotImpl(cast(ctx).inner, alloc, applied_index, applied_term, conf_state);
+    }
+
+    fn restoreSnapshot(ctx: *anyopaque, metadata: raft.SnapshotMetadata, reader: raft.SnapshotReader) raft.Error!void {
+        return MockStateMachine.restoreSnapshotImpl(cast(ctx).inner, metadata, reader);
+    }
+
+    fn stateMachine(self: *FailingStateMachine) raft.StateMachine {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    const vtable: raft.StateMachine.VTable = .{
+        .apply = apply,
+        .take_snapshot = takeSnapshot,
+        .restore_snapshot = restoreSnapshot,
+    };
+};
+
+const ErrorTester = struct {
+    completed: bool = false,
+    err: ?raft.Error = null,
+
+    fn proposalCb(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *ErrorTester = @ptrCast(@alignCast(ctx));
+        self.completed = true;
+        if (result == .err) self.err = result.err;
+    }
+
+    fn proposalCallback(self: *ErrorTester) raft.ProposalCallback {
+        return .{ .ctx = self, .function = proposalCb };
+    }
+
+    fn readCb(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *ErrorTester = @ptrCast(@alignCast(ctx));
+        self.completed = true;
+        if (result == .err) self.err = result.err;
+    }
+
+    fn readCallback(self: *ErrorTester) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = readCb };
+    }
 };
 
 fn makeConfig(id: u64) RaftorConfig {
@@ -545,6 +606,83 @@ test "raftor: Ready sync failure blocks send and apply" {
         try std.testing.expect(try r.processReadyStep());
     }
     try std.testing.expectEqual(@as(usize, 1), sm.applied.items.len);
+}
+
+test "raftor: committed apply failure is terminal" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var failing_sm = FailingStateMachine{ .inner = &sm, .fail_data = "fail" };
+
+    const r = try Raftor.create(allocator, makeConfig(1), failing_sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    var failed = ErrorTester{};
+    var after = ErrorTester{};
+    try r.propose("fail", failed.proposalCallback());
+    try r.propose("after", after.proposalCallback());
+
+    try std.testing.expectError(error.OutOfMemory, r.tick());
+    try std.testing.expectEqual(@as(u64, 1), r.getStatus().applied_index);
+    try std.testing.expectEqual(@as(usize, 1), sm.applied.items.len);
+    try std.testing.expectEqual(error.OutOfMemory, failed.err.?);
+    try std.testing.expectEqual(error.OutOfMemory, after.err.?);
+    try std.testing.expectError(error.OutOfMemory, r.tick());
+
+    var rejected = ErrorTester{};
+    try std.testing.expectError(error.ShuttingDown, r.propose("new", rejected.proposalCallback()));
+    try std.testing.expect(!rejected.completed);
+}
+
+test "raftor: terminal failure drains queued requests" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var failing_sm = FailingStateMachine{ .inner = &sm, .fail_data = "fail" };
+
+    const r = try Raftor.create(allocator, makeConfig(1), failing_sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+    try r.getRawNode().propose("", "fail");
+
+    var proposal = ErrorTester{};
+    var read = ErrorTester{};
+    try r.propose("queued", proposal.proposalCallback());
+    try r.readIndex("queued-read", read.readCallback());
+
+    var terminal_error: ?raft.Error = null;
+    for (0..32) |_| {
+        _ = r.processReadyStep() catch |err| {
+            terminal_error = err;
+            break;
+        };
+    }
+    try std.testing.expectEqual(error.OutOfMemory, terminal_error.?);
+    try std.testing.expectEqual(error.OutOfMemory, proposal.err.?);
+    try std.testing.expectEqual(error.OutOfMemory, read.err.?);
+}
+
+test "raftor: configuration persistence failure is terminal" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    failing_storage.fail_conf_state = true;
+
+    try r.addNode(2, "peer-2");
+    try std.testing.expectError(error.WalWriteFailed, r.tick());
+    try std.testing.expectEqual(@as(u64, 1), r.getStatus().applied_index);
+    try std.testing.expectError(error.WalWriteFailed, r.tick());
 }
 
 test "raftor: advanced commit survives restart" {

@@ -61,6 +61,8 @@ pub const StateMachine = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// Apply must be atomic: returning an error must leave application
+        /// state unchanged. Raftor treats every apply error as terminal.
         apply: *const fn (ctx: *anyopaque, entry: Entry) Error!ApplyResult,
         take_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: ConfState) Error!Snapshot,
         restore_snapshot: *const fn (ctx: *anyopaque, metadata: SnapshotMetadata, reader: SnapshotReader) Error!void,
@@ -107,10 +109,13 @@ pub const MockStateMachine = struct {
 
     pub fn applyImpl(ctx: *anyopaque, entry: Entry) Error!ApplyResult {
         const self: *MockStateMachine = @ptrCast(@alignCast(ctx));
-        self.last_applied_index = entry.index;
         const data_copy = try self.allocator.dupe(u8, entry.data);
-        try self.applied.append(self.allocator, data_copy);
+        errdefer self.allocator.free(data_copy);
         const resp = try self.allocator.dupe(u8, entry.data);
+        errdefer self.allocator.free(resp);
+        try self.applied.ensureUnusedCapacity(self.allocator, 1);
+        self.applied.appendAssumeCapacity(data_copy);
+        self.last_applied_index = entry.index;
         return .{ .response = resp };
     }
 
@@ -163,4 +168,15 @@ test "mock state machine applies entries and returns response" {
     try std.testing.expectEqualStrings("hello", result.response.?);
     try std.testing.expectEqual(@as(usize, 1), sm.applied.items.len);
     try std.testing.expectEqualStrings("hello", sm.applied.items[0]);
+}
+
+test "mock state machine leaves state unchanged on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var sm = MockStateMachine.init(failing.allocator());
+    defer sm.deinit();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, sm.stateMachine().apply(.{ .index = 1, .term = 1, .data = @constCast("data") }));
+    try std.testing.expectEqual(@as(u64, 0), sm.last_applied_index);
+    try std.testing.expectEqual(@as(usize, 0), sm.applied.items.len);
 }

@@ -143,6 +143,10 @@ pub const ReadyProcessor = struct {
         return if (self.pending) |pending| pending.phase else null;
     }
 
+    pub fn terminalError(self: ReadyProcessor) ?Error {
+        return self.fatal_error;
+    }
+
     /// Process one Ready cycle. Returns true if there was work to do.
     pub fn process(self: *ReadyProcessor) Error!bool {
         if (self.fatal_error) |e| return e;
@@ -288,10 +292,10 @@ pub const ReadyProcessor = struct {
             if (expected == 0) continue;
             const actual = util.computeEntryChecksum(entry);
             if (actual != expected) {
-                log.warn("checksum mismatch at index {}: expected {x}, got {x}", .{ entry.index, expected, actual });
                 if (entry.context.len > 0) {
                     self.proposal_tracker.fail(entry.context, error.ChecksumMismatch);
                 }
+                self.fatal_error = error.ChecksumMismatch;
                 return error.ChecksumMismatch;
             }
         }
@@ -317,16 +321,13 @@ pub const ReadyProcessor = struct {
     fn applyCommittedEntries(self: *ReadyProcessor, entries: []Entry) Error!void {
         for (entries) |entry| {
             self.applyEntry(entry) catch |e| {
-                log.warn("failed to apply entry at index {}: {s}", .{ entry.index, @errorName(e) });
-                if (e == error.ChecksumMismatch) {
-                    self.fatal_error = e;
-                    return e;
-                }
-                // Non-fatal: continue applying remaining entries.
+                if (entry.context.len > 0) self.proposal_tracker.fail(entry.context, e);
+                self.fatal_error = e;
+                return e;
             };
             self.applied_index = entry.index;
+            self.proposal_tracker.completeReadyReads(self.applied_index);
         }
-        self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
     fn applyEntry(self: *ReadyProcessor, entry: Entry) Error!void {
@@ -347,21 +348,12 @@ pub const ReadyProcessor = struct {
                 }
             },
             .conf_change, .conf_change_v2 => {
-                var cc = util.decodeConfChangeV2(self.allocator, entry.data) catch {
-                    log.warn("failed to decode ConfChangeV2 at index {}", .{entry.index});
-                    return error.ConfChangeParseError;
-                };
+                var cc = util.decodeConfChangeV2(self.allocator, entry.data) catch return error.ConfChangeParseError;
                 defer cc.deinit(self.allocator);
 
-                var applied_cs = self.raw_node.*.applyConfChange(cc) catch |e| {
-                    log.warn("ApplyConfChange failed: {s}", .{@errorName(e)});
-                    return e;
-                };
+                var applied_cs = try self.raw_node.*.applyConfChange(cc);
                 defer applied_cs.deinit(self.allocator);
-                self.storage.setConfState(self.allocator, applied_cs) catch |err| {
-                    log.warn("failed to persist configuration: {s}", .{@errorName(err)});
-                    self.fatal_after_ready = err;
-                };
+                try self.storage.setConfState(self.allocator, applied_cs);
                 for (cc.changes) |change| switch (change.change_type) {
                     .add_node, .add_learner_node => _ = self.transport.addPeer(change.node_id, cc.context) catch |err| {
                         log.warn("failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
