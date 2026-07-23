@@ -41,9 +41,13 @@ mise run fuzz-smoke
 mise run fuzz-codec
 mise run fuzz-wal
 mise run fuzz-confchange
+mise run fuzz-sim
 mise run fmt
 mise run fmt-check
 ```
+
+Bounded fuzzing exits non-zero when Zig writes a reproducer to `.zig-cache/f/crash`.
+The simulation target checks core Raft safety and post-partition convergence; application and snapshot-state convergence remain separate full-stack work.
 
 Direct Zig invocations work too:
 

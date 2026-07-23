@@ -30,15 +30,19 @@ run = "zig build fuzz-smoke --summary all"
 
 [tasks.fuzz-codec]
 description = "Fuzz RPC codecs"
-run = "zig build fuzz-codec -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+run = "scripts/run-fuzz.sh fuzz-codec 100K"
 
 [tasks.fuzz-wal]
 description = "Fuzz WAL decoders"
-run = "zig build fuzz-wal -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+run = "scripts/run-fuzz.sh fuzz-wal 100K"
 
 [tasks.fuzz-confchange]
 description = "Fuzz configuration change codecs"
-run = "zig build fuzz-confchange -Doptimize=ReleaseSafe --fuzz=100K --summary line"
+run = "scripts/run-fuzz.sh fuzz-confchange 100K"
+
+[tasks.fuzz-sim]
+description = "Fuzz deterministic cluster simulation"
+run = "scripts/run-fuzz.sh fuzz-sim 10K"
 
 [tasks.fmt]
 description = "Format Zig sources"

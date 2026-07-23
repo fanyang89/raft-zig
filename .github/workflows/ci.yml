@@ -85,10 +85,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - codec
-          - wal
-          - confchange
+        include:
+          - target: codec
+            runs: 100K
+          - target: wal
+            runs: 100K
+          - target: confchange
+            runs: 100K
+          - target: sim
+            runs: 10K
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -101,13 +106,14 @@ jobs:
         uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
 
       - name: Run bounded fuzzing
-        run: zig build fuzz-${{ matrix.target }} -Doptimize=ReleaseSafe --fuzz=100K --summary line
+        run: scripts/run-fuzz.sh fuzz-${{ matrix.target }} ${{ matrix.runs }}
 
       - name: Upload fuzz failure artifacts
         if: failure()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: fuzz-${{ matrix.target }}-failure
+          include-hidden-files: true
           if-no-files-found: ignore
           path: |
             crash-*
