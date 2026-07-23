@@ -11,6 +11,7 @@ const Cluster = struct {
     peers: []raft.Peer,
     nodes: [node_count]*adapter.NodeProcess,
     completed_proposals: usize = 0,
+    minimum_completed_proposals: usize = 0,
 
     pub fn deinit(self: *Cluster) void {
         const allocator = self.sim.env.allocator();
@@ -98,6 +99,7 @@ fn scenario(case: *Case) !void {
     try case.app.sim.restartProcess(minority_index);
     try case.control().network.heal();
     try drive(case, 200);
+    case.app.minimum_completed_proposals = 2;
 }
 
 fn findLeader(cluster: *Cluster) ?*raft.Raftor {
@@ -155,13 +157,93 @@ fn assertCommittedPrefix(left: *adapter.NodeProcess, right: *adapter.NodeProcess
 
 fn checkConvergence(case: *const Case) !void {
     try assertSafety(&case.app);
-    try std.testing.expectEqual(@as(usize, 2), case.app.completed_proposals);
+    try std.testing.expect(case.app.completed_proposals >= case.app.minimum_completed_proposals);
     const expected = case.app.nodes[0].state_machine.applied.items;
     for (case.app.nodes[1..]) |node| {
         const actual = node.state_machine.applied.items;
         try std.testing.expectEqual(expected.len, actual.len);
         for (expected, actual) |left, right| try std.testing.expectEqualStrings(left, right);
     }
+}
+
+fn chaosScenario(case: *Case) !void {
+    try case.app.nodes[0].raftor.?.campaign();
+    try drive(case, 30);
+
+    const proposal_values = [_][]const u8{ "chaos-0", "chaos-1", "chaos-2", "chaos-3" };
+    for (0..100) |step| {
+        const action = randomLessThan(case.env().io(), u8, 9);
+        const node_index = randomLessThan(case.env().io(), usize, node_count);
+        try case.env().record("raft_vopr.action step={} action={} node={}", .{ step, action, node_index });
+        switch (action) {
+            0 => if (case.app.nodes[node_index].raftor) |node| {
+                _ = try node.tick();
+            },
+            1 => {
+                try drive(case, 1);
+            },
+            2 => if (case.app.nodes[node_index].raftor != null) {
+                _ = try case.app.nodes[node_index].transport.transport().pollOne();
+            },
+            3 => if (case.app.nodes[node_index].raftor) |node| {
+                _ = try node.processReadyStep();
+            },
+            4 => {
+                try case.control().network.heal();
+                const minority = [_]mar.NodeId{@intCast(node_index)};
+                var majority: [node_count - 1]mar.NodeId = undefined;
+                var count: usize = 0;
+                for (0..node_count) |index| {
+                    if (index == node_index) continue;
+                    majority[count] = @intCast(index);
+                    count += 1;
+                }
+                try case.control().network.partition(&majority, &minority);
+            },
+            5 => try case.control().network.heal(),
+            6 => if (aliveCount(&case.app) > 1 and case.app.nodes[node_index].raftor != null) {
+                try case.app.sim.killProcess(@intCast(node_index));
+            },
+            7 => if (case.app.nodes[node_index].raftor == null) {
+                try case.app.sim.restartProcess(@intCast(node_index));
+            },
+            8 => if (findLeader(&case.app)) |leader| {
+                try leader.propose(proposal_values[step % proposal_values.len], .{
+                    .ctx = &case.app,
+                    .function = proposalCallback,
+                });
+                _ = try leader.tick();
+            },
+            else => unreachable,
+        }
+        try assertSafety(&case.app);
+    }
+
+    try case.app.sim.transitionToLiveness(&.{ 0, 1, 2 });
+    var attempts: usize = 0;
+    while (findLeader(&case.app) == null and attempts < 10) : (attempts += 1) {
+        try case.app.nodes[0].raftor.?.campaign();
+        try drive(case, 20);
+    }
+    const leader = findLeader(&case.app) orelse return error.LeaderNotElected;
+    const completed_before = case.app.completed_proposals;
+    try leader.propose("final-marker", .{ .ctx = &case.app, .function = proposalCallback });
+    _ = try leader.tick();
+    try drive(case, 300);
+    case.app.minimum_completed_proposals = completed_before + 1;
+}
+
+fn aliveCount(cluster: *const Cluster) usize {
+    var count: usize = 0;
+    for (cluster.nodes) |node| {
+        if (node.raftor != null) count += 1;
+    }
+    return count;
+}
+
+fn randomLessThan(io: std.Io, comptime T: type, less_than: T) T {
+    var source: std.Random.IoSource = .{ .io = io };
+    return @intCast(source.interface().intRangeLessThan(u64, 0, less_than));
 }
 
 const checks = [_]mar.StateCheck(Case){
@@ -197,6 +279,19 @@ test "Marionette full-stack Raft seed sweep" {
         .simulate = simulate_options,
         .init = initCluster,
         .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "Marionette full-stack chaos seed sweep" {
+    try mar.expectSimFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC4A05,
+        .seeds = 16,
+        .tick_ns = mar.default_tick_ns,
+        .simulate = simulate_options,
+        .init = initCluster,
+        .scenario = chaosScenario,
         .checks = &checks,
     });
 }
