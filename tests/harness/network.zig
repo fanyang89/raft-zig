@@ -215,7 +215,7 @@ pub const Network = struct {
         var peers_it = self.peers.valueIterator();
         while (peers_it.next()) |peer_ptr| {
             const peer = peer_ptr.*;
-            if (peer.storage.core.snapshot_metadata.index != 0) return error.SnapshotSafetyUnsupported;
+            if (peer.storage.core.snapshot_data.metadata.index != 0) return error.SnapshotSafetyUnsupported;
             if (raft.checkRaftInvariants(&peer.raft)) |violation| {
                 std.log.err(
                     "node {} invariant failed: {s}, role={s}, term={}, peer={}, expected={}, actual={}",

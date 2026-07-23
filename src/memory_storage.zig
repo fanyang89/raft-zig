@@ -34,7 +34,7 @@ pub const WritableStorage = storage_mod.WritableStorage;
 pub const MemoryStorageCore = struct {
     raft_state: RaftState,
     entries: std.ArrayList(Entry),
-    snapshot_metadata: SnapshotMetadata,
+    snapshot_data: Snapshot,
     trigger_snapshot_unavailable: bool,
     trigger_log_unavailable: bool,
     get_entries_context: ?GetEntriesContext,
@@ -43,7 +43,7 @@ pub const MemoryStorageCore = struct {
         return .{
             .raft_state = .{},
             .entries = .empty,
-            .snapshot_metadata = .{},
+            .snapshot_data = .{},
             .trigger_snapshot_unavailable = false,
             .trigger_log_unavailable = false,
             .get_entries_context = null,
@@ -54,7 +54,7 @@ pub const MemoryStorageCore = struct {
         self.raft_state.deinit(allocator);
         for (self.entries.items) |*e| e.deinit(allocator);
         self.entries.deinit(allocator);
-        self.snapshot_metadata.deinit(allocator);
+        self.snapshot_data.deinit(allocator);
         self.* = undefined;
     }
 
@@ -79,41 +79,41 @@ pub const MemoryStorageCore = struct {
         const meta = snap.metadata;
         if (self.firstIndex() > meta.index) return error.SnapshotOutOfDate;
 
-        self.snapshot_metadata.deinit(allocator);
-        self.snapshot_metadata = .{
-            .index = meta.index,
-            .term = meta.term,
-            .conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state),
-        };
+        var cloned_snapshot = try storage_mod.cloneSnapshot(allocator, snap);
+        errdefer cloned_snapshot.deinit(allocator);
+        var cloned_conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state);
+        errdefer cloned_conf_state.deinit(allocator);
 
         self.raft_state.hard_state.term = @max(self.raft_state.hard_state.term, meta.term);
         self.raft_state.hard_state.commit = meta.index;
         for (self.entries.items) |*e| e.deinit(allocator);
         self.entries.clearRetainingCapacity();
 
+        self.snapshot_data.deinit(allocator);
+        self.snapshot_data = cloned_snapshot;
         self.raft_state.conf_state.deinit(allocator);
-        self.raft_state.conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state);
+        self.raft_state.conf_state = cloned_conf_state;
     }
 
     pub fn applyLocalSnapshot(self: *MemoryStorageCore, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const meta = snap.metadata;
         if (self.firstIndex() > meta.index) return error.SnapshotOutOfDate;
 
-        self.snapshot_metadata.deinit(allocator);
-        self.snapshot_metadata = .{
-            .index = meta.index,
-            .term = meta.term,
-            .conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state),
-        };
+        var cloned_snapshot = try storage_mod.cloneSnapshot(allocator, snap);
+        errdefer cloned_snapshot.deinit(allocator);
+        var cloned_conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state);
+        errdefer cloned_conf_state.deinit(allocator);
+
+        try self.compact(allocator, std.math.add(u64, meta.index, 1) catch return error.Fatal);
 
         self.raft_state.hard_state.term = @max(self.raft_state.hard_state.term, meta.term);
         if (self.raft_state.hard_state.commit < meta.index) {
             self.raft_state.hard_state.commit = meta.index;
         }
+        self.snapshot_data.deinit(allocator);
+        self.snapshot_data = cloned_snapshot;
         self.raft_state.conf_state.deinit(allocator);
-        self.raft_state.conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state);
-
-        try self.compact(allocator, meta.index + 1);
+        self.raft_state.conf_state = cloned_conf_state;
     }
 
     pub fn compact(self: *MemoryStorageCore, allocator: std.mem.Allocator, compact_index: u64) Error!void {
@@ -176,12 +176,12 @@ pub const MemoryStorageCore = struct {
     }
 
     pub fn firstIndex(self: MemoryStorageCore) u64 {
-        if (self.entries.items.len == 0) return self.snapshot_metadata.index + 1;
+        if (self.entries.items.len == 0) return self.snapshot_data.metadata.index + 1;
         return self.entries.items[0].index;
     }
 
     pub fn lastIndex(self: MemoryStorageCore) u64 {
-        if (self.entries.items.len == 0) return self.snapshot_metadata.index;
+        if (self.entries.items.len == 0) return self.snapshot_data.metadata.index;
         return self.entries.items[self.entries.items.len - 1].index;
     }
 
@@ -189,12 +189,12 @@ pub const MemoryStorageCore = struct {
     /// entry at that index (or from `snapshot_metadata` when they coincide).
     pub fn snapshot(self: MemoryStorageCore, allocator: std.mem.Allocator) Error!Snapshot {
         const commit = self.raft_state.hard_state.commit;
-        if (commit < self.snapshot_metadata.index) {
+        if (commit < self.snapshot_data.metadata.index) {
             return error.Fatal;
         }
 
-        var term = self.snapshot_metadata.term;
-        if (commit > self.snapshot_metadata.index) {
+        var term = self.snapshot_data.metadata.term;
+        if (commit > self.snapshot_data.metadata.index) {
             const offset = self.entries.items[0].index;
             if (commit - offset >= self.entries.items.len) {
                 return error.Fatal;
@@ -203,7 +203,10 @@ pub const MemoryStorageCore = struct {
         }
 
         return .{
-            .data = try allocator.alloc(u8, 0),
+            .data = if (commit == self.snapshot_data.metadata.index)
+                try allocator.dupe(u8, self.snapshot_data.data)
+            else
+                try allocator.alloc(u8, 0),
             .metadata = .{
                 .index = commit,
                 .term = term,
@@ -347,7 +350,7 @@ pub const MemoryStorage = struct {
     }
 
     pub fn term(self: *MemoryStorage, idx: u64) Error!u64 {
-        if (idx == self.core.snapshot_metadata.index) return self.core.snapshot_metadata.term;
+        if (idx == self.core.snapshot_data.metadata.index) return self.core.snapshot_data.metadata.term;
 
         const offset = self.core.firstIndex();
         if (idx < offset) return error.Compacted;
@@ -394,6 +397,11 @@ pub const MemoryStorage = struct {
             };
         }
         return snap;
+    }
+
+    pub fn localSnapshot(self: *MemoryStorage, allocator: std.mem.Allocator) Error!?Snapshot {
+        if (self.core.snapshot_data.metadata.index == 0) return null;
+        return try storage_mod.cloneSnapshot(allocator, self.core.snapshot_data);
     }
 
     /// VTable wiring for `asWritableStorage` / `asStorage`.
@@ -464,6 +472,11 @@ pub const MemoryStorage = struct {
         return self.applyLocalSnapshot(allocator, snap);
     }
 
+    fn local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator) Error!?Snapshot {
+        const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
+        return self.localSnapshot(allocator);
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
         return self.sync_();
@@ -481,6 +494,7 @@ pub const MemoryStorage = struct {
         .set_conf_state = set_conf_state_impl,
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
+        .local_snapshot = local_snapshot_impl,
         .sync_ = sync_impl,
     };
 
@@ -616,6 +630,7 @@ test "memory storage apply snapshot" {
     defer storage.deinit(allocator);
 
     var snap = Snapshot{
+        .data = try allocator.dupe(u8, "state-image"),
         .metadata = .{
             .index = 4,
             .term = 4,
@@ -624,6 +639,10 @@ test "memory storage apply snapshot" {
     };
     defer snap.deinit(allocator);
     try storage.applySnapshot(allocator, snap);
+    var local = (try storage.localSnapshot(allocator)).?;
+    defer local.deinit(allocator);
+    try std.testing.expectEqualStrings("state-image", local.data);
+    try std.testing.expect(local.metadata.conf_state.eql(snap.metadata.conf_state));
 
     var stale = Snapshot{ .metadata = .{ .index = 3, .term = 3 } };
     defer stale.deinit(allocator);

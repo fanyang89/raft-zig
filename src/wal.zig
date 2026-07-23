@@ -863,6 +863,10 @@ pub const WALStorage = struct {
         self.wal.sync() catch |err| return mapError(err);
     }
 
+    fn local_snapshot_impl(_: *anyopaque, _: std.mem.Allocator) Error!?Snapshot {
+        return null;
+    }
+
     fn sync_impl(ctx: *anyopaque) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         self.wal.sync() catch |err| return mapError(err);
@@ -880,6 +884,7 @@ pub const WALStorage = struct {
         .set_conf_state = set_conf_state_impl,
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
+        .local_snapshot = local_snapshot_impl,
         .sync_ = sync_impl,
     };
 

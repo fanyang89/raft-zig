@@ -67,6 +67,10 @@ const SyncFailingStorage = struct {
         return cast(ctx).inner.applyLocalSnapshot(alloc, snapshot);
     }
 
+    fn localSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator) raft.Error!?raft.Snapshot {
+        return cast(ctx).inner.localSnapshot(alloc);
+    }
+
     fn sync(ctx: *anyopaque) raft.Error!void {
         const self = cast(ctx);
         if (self.fail_sync) return error.WalSyncFailed;
@@ -89,6 +93,7 @@ const SyncFailingStorage = struct {
         .set_conf_state = setConfState,
         .apply_snapshot = applySnapshot,
         .apply_local_snapshot = applyLocalSnapshot,
+        .local_snapshot = localSnapshot,
         .sync_ = sync,
     };
 };
