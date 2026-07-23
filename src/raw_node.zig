@@ -53,8 +53,6 @@ const setEntryChecksum = util.setEntryChecksum;
 const encodeConfChangeV2 = util.encodeConfChangeV2;
 const decodeConfChangeV2 = util.decodeConfChangeV2;
 
-const log = std.log.scoped(.raft_zig_raw_node);
-
 // ===========================================================================
 // Peer / SnapshotStatus / message classification
 // ===========================================================================

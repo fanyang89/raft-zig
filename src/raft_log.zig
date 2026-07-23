@@ -191,7 +191,7 @@ pub const RaftLog = struct {
         ents: []const Entry,
     ) Error!MaybeAppendResult {
         if (!try self.matchTerm(idx, term_)) {
-            log.info(
+            log.debug(
                 "MaybeAppend failed: idx={}, term={}, last_index={}",
                 .{ idx, term_, self.lastIndex() },
             );
@@ -203,10 +203,6 @@ pub const RaftLog = struct {
         if (conflict_idx == 0) {
             // no conflict
         } else if (conflict_idx <= self.committed) {
-            log.warn(
-                "entry {} conflict with committed entry {}",
-                .{ conflict_idx, self.committed },
-            );
             return error.Fatal;
         } else {
             const start: usize = @intCast(conflict_idx - (idx + 1));
@@ -254,10 +250,6 @@ pub const RaftLog = struct {
     pub fn commitTo(self: *RaftLog, to_commit: u64) Error!void {
         if (self.committed >= to_commit) return;
         if (self.lastIndex() < to_commit) {
-            log.warn(
-                "to_commit {} is out of range [last_index {}]",
-                .{ to_commit, self.lastIndex() },
-            );
             return error.Fatal;
         }
         self.committed = to_commit;
@@ -265,7 +257,6 @@ pub const RaftLog = struct {
 
     pub fn mustCheckOutOfBounds(self: *const RaftLog, low: u64, high: u64) Error!void {
         if (low > high) {
-            log.warn("invalid slice {} > {}", .{ low, high });
             return error.Fatal;
         }
 
@@ -274,10 +265,6 @@ pub const RaftLog = struct {
 
         const length = self.lastIndex() + 1 - first_index;
         if (high > first_index + length) {
-            log.warn(
-                "slice[{},{}] out of bound[{},{}]",
-                .{ low, high, first_index, self.lastIndex() },
-            );
             return error.Fatal;
         }
     }
@@ -381,7 +368,7 @@ pub const RaftLog = struct {
     ) Error!FindConflictByTermResult {
         var conflict_index = index;
         if (index > self.lastIndex()) {
-            log.warn(
+            log.debug(
                 "index({}) is out of range [0, last_index({})] in find_conflict_by_term",
                 .{ index, self.lastIndex() },
             );
@@ -423,7 +410,6 @@ pub const RaftLog = struct {
     pub fn restore(self: *RaftLog, snapshot: Snapshot) Error!void {
         const index = snapshot.metadata.index;
         if (index < self.committed) {
-            log.warn("index {} < committed_ {}", .{ index, self.committed });
             return error.Fatal;
         }
         if (self.persisted > self.committed) {
@@ -489,7 +475,6 @@ pub const RaftLog = struct {
         while (lo < high) {
             const got = try self.slice(lo, high, page_size, context);
             if (got.len == 0) {
-                log.warn("got 0 entries in [{}, {})", .{ lo, high });
                 return error.ZeroEntriesInSlice;
             }
             lo += got.len;

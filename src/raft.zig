@@ -262,8 +262,8 @@ pub const Raft = struct {
         defer post_cs.deinit(allocator);
 
         log.info(
-            "new raft instance: term={} commit={} applied={} last_index={} last_term={}",
-            .{ r.term, r.raft_log.committed, r.raft_log.applied, r.raft_log.lastIndex(), r.raft_log.lastTerm() catch 0 },
+            "node {} initialized: term={} commit={} applied={} last_index={} last_term={}",
+            .{ r.id, r.term, r.raft_log.committed, r.raft_log.applied, r.raft_log.lastIndex(), r.raft_log.lastTerm() catch 0 },
         );
 
         invariant.assertRaft(&r);
@@ -327,7 +327,7 @@ pub const Raft = struct {
         self.state = .follower;
         self.pending_request_snapshot = pending_request_snapshot;
         self.raft_log.max_apply_unpersisted_log_limit = 0;
-        log.info("became follower at term {}", .{term});
+        log.info("node {} became follower at term {}", .{ self.id, term });
     }
 
     pub fn becomePreCandidate(self: *Raft) void {
@@ -336,7 +336,7 @@ pub const Raft = struct {
         self.state = .pre_candidate;
         self.progress_tracker.resetVotes();
         self.leader_id = invalid_id;
-        log.info("became pre-candidate at term {}", .{self.term});
+        log.info("node {} became pre-candidate at term {}", .{ self.id, self.term });
     }
 
     pub fn becomeCandidate(self: *Raft) void {
@@ -347,7 +347,7 @@ pub const Raft = struct {
         self.vote = self.id;
         self.state = .candidate;
         self.promotable = self.progress_tracker.conf.voters.contains(self.id);
-        log.info("became candidate at term {}", .{term});
+        log.info("node {} became candidate at term {}", .{ self.id, term });
     }
 
     pub fn becomeLeader(self: *Raft) Error!void {
@@ -376,7 +376,7 @@ pub const Raft = struct {
             @panic("appending an empty entry should never be dropped");
         }
 
-        log.info("became leader at term {}", .{self.term});
+        log.info("node {} became leader at term {}", .{ self.id, self.term });
     }
 
     // -----------------------------------------------------------------------
@@ -481,7 +481,7 @@ pub const Raft = struct {
                 const in_lease = self.check_quorum and self.leader_id != invalid_id and
                     self.election_elapsed < self.election_timeout;
                 if (!force and in_lease) {
-                    log.info("ignored vote from {}: lease is not expired", .{m.from});
+                    log.debug("node {} ignored vote from {}: lease is not expired", .{ self.id, m.from });
                     return;
                 }
             }
@@ -491,7 +491,7 @@ pub const Raft = struct {
             if (is_prevote_request or is_prevote_resp_ok) {
                 // Never change our term in response to a pre-vote.
             } else {
-                log.info("received a message with higher term from {}", .{m.from});
+                log.info("node {} received a message with higher term from {}", .{ self.id, m.from });
                 if (m.msg_type == .append or m.msg_type == .heartbeat or m.msg_type == .snapshot) {
                     self.becomeFollower(m.term, m.from);
                 } else {
@@ -515,7 +515,7 @@ pub const Raft = struct {
                     .reject = true,
                 });
             } else {
-                log.info("ignored a message with lower term from {}", .{m.from});
+                log.debug("node {} ignored a message with lower term from {}", .{ self.id, m.from });
             }
             return;
         }
@@ -526,7 +526,7 @@ pub const Raft = struct {
                 if (self.promotable) {
                     self.hup(false);
                 } else {
-                    log.info("received MsgHup but not promotable; ignored", .{});
+                    log.debug("node {} received MsgHup but is not promotable", .{self.id});
                 }
             },
             .request_vote, .request_pre_vote => try self.handleVoteRequest(m),
@@ -598,7 +598,7 @@ pub const Raft = struct {
                 try self.maybeCommitByVote(m);
             },
             .timeout_now => log.debug("candidate ignored MsgTimeoutNow from {}", .{m.from}),
-            .read_index => log.info("candidate has no leader; dropping read index msg", .{}),
+            .read_index => log.debug("node {} has no leader; dropping read index message", .{self.id}),
             else => {},
         }
     }
@@ -632,7 +632,7 @@ pub const Raft = struct {
             },
             .transfer_leader => {
                 if (self.leader_id == invalid_id) {
-                    log.info("follower has no leader; dropping transfer msg", .{});
+                    log.debug("node {} has no leader; dropping transfer message", .{self.id});
                     return;
                 }
                 m.to = self.leader_id;
@@ -645,12 +645,12 @@ pub const Raft = struct {
                 if (self.promotable) {
                     self.hup(true);
                 } else {
-                    log.info("received MsgTimeoutNow but not promotable", .{});
+                    log.debug("node {} received MsgTimeoutNow but is not promotable", .{self.id});
                 }
             },
             .read_index => {
                 if (self.leader_id == invalid_id) {
-                    log.info("follower has no leader; dropping read index msg", .{});
+                    log.debug("node {} has no leader; dropping read index message", .{self.id});
                     return;
                 }
                 m.to = self.leader_id;
@@ -689,7 +689,7 @@ pub const Raft = struct {
             .check_quorum => {
                 const active = self.progress_tracker.quorumRecentlyActive(self.id) catch true;
                 if (!active) {
-                    log.warn("stepped down to follower since quorum is not active", .{});
+                    log.warn("node {} stepped down because quorum is inactive", .{self.id});
                     self.becomeFollower(self.term, invalid_id);
                 }
                 return;
@@ -705,16 +705,16 @@ pub const Raft = struct {
                 for (m.entries, 0..) |e, i| {
                     if (e.entry_type == .conf_change_v2) {
                         if (self.hasPendingConf()) {
-                            log.warn("proposed ConfChangeV2 while another is pending; dropping", .{});
+                            log.debug("node {} dropped ConfChangeV2 while another is pending", .{self.id});
                             return error.ProposalDropped;
                         }
                         if (conf_change_position != null) {
-                            log.warn("proposed multiple ConfChangeV2 entries; dropping", .{});
+                            log.debug("node {} dropped multiple ConfChangeV2 entries", .{self.id});
                             return error.ProposalDropped;
                         }
                         conf_change_position = i;
                         if (e.data.len == 0) {
-                            log.warn("proposed ConfChangeV2 has no data; dropping", .{});
+                            log.debug("node {} dropped ConfChangeV2 without data", .{self.id});
                             return error.ProposalDropped;
                         }
                     }
@@ -732,7 +732,7 @@ pub const Raft = struct {
             },
             .read_index => {
                 if (!self.commitToCurrentTerm()) {
-                    log.info("leader has not yet committed in its term; dropping read index", .{});
+                    log.debug("node {} has not committed in its term; dropping read index", .{self.id});
                     return;
                 }
                 if (self.progress_tracker.isSingleton()) {
@@ -861,11 +861,11 @@ pub const Raft = struct {
         const low: u64 = if (self.raft_log.unstable.maybeFirstIndex()) |i| i else self.raft_log.applied + 1;
         const high = self.raft_log.committed + 1;
         if (self.hasUnappliedConfChanges(low, high)) {
-            log.warn("cannot campaign at term {}; pending configuration changes", .{self.term});
+            log.debug("node {} cannot campaign at term {}; configuration changes are pending", .{ self.id, self.term });
             return;
         }
 
-        log.info("starting a new election at term {}", .{self.term});
+        log.info("node {} starting a new election at term {}", .{ self.id, self.term });
         if (transfer_leader) {
             self.campaign(.transfer) catch {};
         } else if (self.pre_vote) {
@@ -961,10 +961,7 @@ pub const Raft = struct {
             return;
         }
 
-        const result = self.raft_log.maybeAppend(m.index, m.log_term, m.commit, m.entries) catch |e| {
-            log.warn("MaybeAppend returned error: {s}", .{@errorName(e)});
-            return e;
-        };
+        const result = try self.raft_log.maybeAppend(m.index, m.log_term, m.commit, m.entries);
 
         if (result.term_matched) {
             try self.send(.{
@@ -1272,11 +1269,11 @@ pub const Raft = struct {
 
     pub fn requestSnapshot(self: *Raft) Error!void {
         if (self.state == .leader) {
-            log.info("can not request snapshot on leader; dropping", .{});
+            log.debug("node {} cannot request a snapshot while leader", .{self.id});
         } else if (self.leader_id == invalid_id) {
-            log.info("no leader; dropping request snapshot", .{});
+            log.debug("node {} has no leader; dropping snapshot request", .{self.id});
         } else if (self.snapshot() != null or self.pending_request_snapshot != invalid_index) {
-            log.info("there is a pending snapshot; dropping request snapshot", .{});
+            log.debug("node {} already has a pending snapshot", .{self.id});
         } else {
             const request_index = self.raft_log.lastIndex();
             const request_index_term = self.raft_log.term(request_index) catch 0;
@@ -1285,7 +1282,7 @@ pub const Raft = struct {
                 try self.sendRequestSnapshot();
                 return;
             }
-            log.info("mismatched term; dropping request snapshot", .{});
+            log.debug("node {} dropped snapshot request due to term mismatch", .{self.id});
         }
         return error.RequestSnapshotDropped;
     }

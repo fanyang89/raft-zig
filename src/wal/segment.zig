@@ -7,6 +7,8 @@
 const std = @import("std");
 const linux = std.os.linux;
 
+const log = std.log.scoped(.raft_zig_wal);
+
 const SEGMENT_HEADER_SIZE: usize = 32;
 const segment_magic: u32 = 0x57414C31; // "WAL1"
 const format_version: u32 = 1;
@@ -32,7 +34,7 @@ fn sysOpenExclusive(path: [:0]const u8) !linux.fd_t {
     const rc = linux.open(path.ptr, flags, 0o644);
     const e = errno(rc);
     if (e != 0) {
-        std.debug.print("sysOpenExclusive failed: path={s}, errno={}\n", .{ path, e });
+        log.debug("exclusive open failed: path={s}, errno={}", .{ path, e });
         return error.OpenFailed;
     }
     return @intCast(rc);

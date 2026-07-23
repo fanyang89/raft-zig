@@ -373,8 +373,9 @@ pub const Raftor = struct {
             had_work = true;
         }
 
-        self.maybeAutoSnapshot() catch |e| {
-            log.warn("snapshot attempt failed: {s}", .{@errorName(e)});
+        self.maybeAutoSnapshot() catch |e| switch (e) {
+            error.SnapshotOutOfDate => log.debug("snapshot attempt skipped: {s}", .{@errorName(e)}),
+            else => log.warn("snapshot attempt failed: {s}", .{@errorName(e)}),
         };
 
         return had_work;
@@ -480,11 +481,8 @@ pub const Raftor = struct {
         );
         defer snap.deinit(self.allocator);
 
-        log.info("taking snapshot at index {} term {}", .{ applied_index, applied_term });
-        self.storage.applyLocalSnapshot(self.allocator, snap) catch |e| {
-            log.warn("applyLocalSnapshot failed: {s}", .{@errorName(e)});
-            return e;
-        };
+        log.info("node {} taking snapshot at index {} term {}", .{ self.raw_node.raftConst().id, applied_index, applied_term });
+        try self.storage.applyLocalSnapshot(self.allocator, snap);
 
         self.last_snapshot_tick = self.tick_count;
         self.last_snapshot_attempt_index = applied_index;

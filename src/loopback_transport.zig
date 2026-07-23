@@ -19,8 +19,6 @@ const Transport = transport_mod.Transport;
 const MessageCallback = transport_mod.MessageCallback;
 const cloneMessage = storage_mod.cloneMessage;
 
-const log = std.log.scoped(.raft_zig_loopback);
-
 /// Central registry that routes messages between in-process nodes.
 /// Must be heap-allocated (via `create`) so that `LoopbackTransport.network`
 /// pointers remain valid across caller stack frames.

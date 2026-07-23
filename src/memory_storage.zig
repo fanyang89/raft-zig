@@ -30,8 +30,6 @@ pub const GetEntriesContext = storage_mod.GetEntriesContext;
 pub const Storage = storage_mod.Storage;
 pub const WritableStorage = storage_mod.WritableStorage;
 
-const log = std.log.scoped(.raft_zig_memory_storage);
-
 /// Non-locking core. Tests and single-threaded callers use this directly.
 pub const MemoryStorageCore = struct {
     raft_state: RaftState,
@@ -122,7 +120,6 @@ pub const MemoryStorageCore = struct {
         if (compact_index <= self.firstIndex()) return;
 
         if (compact_index > self.lastIndex() + 1) {
-            log.warn("compact not received raft logs: compact_index={} last_index={}", .{ compact_index, self.lastIndex() });
             return error.Fatal;
         }
 
@@ -146,11 +143,9 @@ pub const MemoryStorageCore = struct {
 
         const new_appended = ents[0].index;
         if (self.firstIndex() > new_appended) {
-            log.warn("overwrite compacted raft logs: compacted={} new_appended={}", .{ self.firstIndex() - 1, new_appended });
             return error.Fatal;
         }
         if (self.lastIndex() + 1 < new_appended) {
-            log.warn("raft logs should be continuous: last_index={} new_appended={}", .{ self.lastIndex(), new_appended });
             return error.Fatal;
         }
 
@@ -195,7 +190,6 @@ pub const MemoryStorageCore = struct {
     pub fn snapshot(self: MemoryStorageCore, allocator: std.mem.Allocator) Error!Snapshot {
         const commit = self.raft_state.hard_state.commit;
         if (commit < self.snapshot_metadata.index) {
-            log.warn("commit {} < snapshot_metadata.index {}", .{ commit, self.snapshot_metadata.index });
             return error.Fatal;
         }
 
@@ -203,7 +197,6 @@ pub const MemoryStorageCore = struct {
         if (commit > self.snapshot_metadata.index) {
             const offset = self.entries.items[0].index;
             if (commit - offset >= self.entries.items.len) {
-                log.warn("commit {} out of range (last={})", .{ commit, self.lastIndex() });
                 return error.Fatal;
             }
             term = self.entries.items[commit - offset].term;
@@ -248,7 +241,6 @@ pub const MemoryStorage = struct {
     ) Error![]Entry {
         if (low < self.core.firstIndex()) return error.Compacted;
         if (high > self.core.lastIndex() + 1) {
-            log.warn("index out of bound: last={} high={}", .{ self.core.lastIndex() + 1, high });
             return error.Fatal;
         }
 

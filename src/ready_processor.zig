@@ -170,19 +170,13 @@ pub const ReadyProcessor = struct {
             },
             .persist_entries => {
                 if (pending.ready.entries.len > 0) {
-                    self.storage.append(self.allocator, pending.ready.entries) catch |err| {
-                        log.warn("failed to persist entries: {s}", .{@errorName(err)});
-                        return err;
-                    };
+                    try self.storage.append(self.allocator, pending.ready.entries);
                 }
                 pending.phase = .persist_hard_state;
             },
             .persist_hard_state => {
                 if (pending.ready.hs) |hs| {
-                    self.storage.setHardState(hs) catch |err| {
-                        log.warn("failed to persist hard state: {s}", .{@errorName(err)});
-                        return err;
-                    };
+                    try self.storage.setHardState(hs);
                 }
                 pending.phase = .restore_snapshot;
             },
@@ -311,10 +305,7 @@ pub const ReadyProcessor = struct {
     }
 
     fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
-        self.storage.applySnapshot(self.allocator, snap) catch |e| {
-            log.warn("failed to apply snapshot to storage: {s}", .{@errorName(e)});
-            return e;
-        };
+        try self.storage.applySnapshot(self.allocator, snap);
 
         self.applied_index = snap.metadata.index;
     }
