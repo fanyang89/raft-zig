@@ -10,6 +10,7 @@
 //!   * No telemetry / OpenTelemetry.
 
 const std = @import("std");
+const linux = std.os.linux;
 
 const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
@@ -45,6 +46,9 @@ const NoopTransport = transport_mod.NoopTransport;
 const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 const ProposalQueue = proposal_queue_mod.ProposalQueue;
 const ReadIndexQueue = proposal_queue_mod.ReadIndexQueue;
+const ProposalItem = proposal_queue_mod.ProposalItem;
+const ReadIndexItem = proposal_queue_mod.ReadIndexItem;
+const DetachedCallbacks = proposal_tracker_mod.DetachedCallbacks;
 const ReadyProcessor = ready_processor_mod.ReadyProcessor;
 const ReadyPhase = ready_processor_mod.ReadyPhase;
 const RaftorConfig = raftor_config_mod.RaftorConfig;
@@ -52,6 +56,58 @@ const StateRole = state_role_mod.StateRole;
 const Peer = raw_node_mod.Peer;
 
 const log = std.log.scoped(.raft_zig_raftor);
+
+fn spinLock(mutex: *std.atomic.Mutex) void {
+    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn sleepNanoseconds(nanoseconds: u64) void {
+    var request = linux.timespec{
+        .sec = std.math.cast(isize, nanoseconds / std.time.ns_per_s) orelse std.math.maxInt(isize),
+        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
+    };
+    var remaining: linux.timespec = undefined;
+    while (true) {
+        const rc = linux.nanosleep(&request, &remaining);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => request = remaining,
+            else => return,
+        }
+    }
+}
+
+const Lifecycle = enum {
+    active,
+    stopping,
+    stopped,
+    terminating,
+    terminal,
+    destroying,
+};
+
+const ShutdownBatch = struct {
+    proposals: std.ArrayList(ProposalItem),
+    reads: std.ArrayList(ReadIndexItem),
+    tracked: DetachedCallbacks,
+    allocator: std.mem.Allocator,
+
+    fn invoke(self: *ShutdownBatch, proposal_error: Error, read_error: Error) void {
+        for (self.proposals.items) |proposal| {
+            self.allocator.free(proposal.data);
+            self.allocator.free(proposal.ctx);
+            proposal.callback.invoke(.{ .err = proposal_error });
+        }
+        self.proposals.deinit(self.allocator);
+        for (self.reads.items) |read| {
+            self.allocator.free(read.ctx);
+            read.callback.invoke(.{ .err = read_error });
+        }
+        self.reads.deinit(self.allocator);
+        self.tracked.invoke(proposal_error, read_error);
+        self.* = undefined;
+    }
+};
 
 /// Storage owned by the convenience constructors.
 const StorageBackend = union(enum) {
@@ -118,8 +174,11 @@ pub const Raftor = struct {
     request_context_generator: request_context_mod.Generator,
 
     tick_count: u64 = 0,
-    running: bool = false,
+    lifecycle_mutex: std.atomic.Mutex = .unlocked,
+    lifecycle: Lifecycle = .active,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     terminal_error: ?Error = null,
+    transport_stopped: bool = false,
 
     // Snapshot triggering state.
     last_snapshot_attempt_index: u64 = 0,
@@ -202,6 +261,16 @@ pub const Raftor = struct {
     }
 
     pub fn destroy(self: *Raftor) void {
+        std.debug.assert(!self.running.load(.acquire));
+        var batch: ?ShutdownBatch = null;
+        spinLock(&self.lifecycle_mutex);
+        std.debug.assert(self.lifecycle != .stopping and self.lifecycle != .terminating and self.lifecycle != .destroying);
+        if (self.lifecycle == .active) batch = self.detachRequestsLocked();
+        self.lifecycle = .destroying;
+        const stop_transport = self.markTransportStoppedLocked();
+        self.lifecycle_mutex.unlock();
+        if (stop_transport) self.transport.stop();
+        if (batch) |*detached| detached.invoke(error.ShuttingDown, error.ShuttingDown);
         const allocator = self.allocator;
         self.deinitInternal();
         allocator.destroy(self);
@@ -218,6 +287,11 @@ pub const Raftor = struct {
         self.config = config;
         self.storage = dependencies.storage;
         self.transport = dependencies.transport;
+        self.lifecycle_mutex = .unlocked;
+        self.lifecycle = .active;
+        self.running = std.atomic.Value(bool).init(false);
+        self.terminal_error = null;
+        self.transport_stopped = false;
 
         try config.raft.validate();
         try self.prepareStorage(startup_mode);
@@ -237,8 +311,6 @@ pub const Raftor = struct {
             self.proposal_tracker.deinit();
         }
         self.tick_count = 0;
-        self.running = false;
-        self.terminal_error = null;
         self.last_snapshot_attempt_index = 0;
         self.last_snapshot_attempt_tick = 0;
         self.last_snapshot_tick = 0;
@@ -309,19 +381,34 @@ pub const Raftor = struct {
 
     fn deinitInternal(self: *Raftor) void {
         self.transport.setMessageCallback(null);
+        self.ready_processor.deinit();
         self.proposal_queue.deinit();
         self.read_index_queue.deinit();
         self.proposal_tracker.deinit();
-        self.ready_processor.deinit();
         self.raw_node.deinit();
         if (self.noop_transport) |*nt| nt.deinit();
         if (self.owned_storage) |*storage| storage.deinit(self.allocator);
     }
 
+    fn detachRequestsLocked(self: *Raftor) ShutdownBatch {
+        return .{
+            .proposals = self.proposal_queue.takeAll(),
+            .reads = self.read_index_queue.takeAll(),
+            .tracked = self.proposal_tracker.detachAll(),
+            .allocator = self.allocator,
+        };
+    }
+
+    fn markTransportStoppedLocked(self: *Raftor) bool {
+        if (self.transport_stopped) return false;
+        self.transport_stopped = true;
+        return true;
+    }
+
     /// Inbound message callback. Transfers message ownership to `step()`.
     fn onMessage(ctx: *anyopaque, msg: Message) Error!void {
         const self: *Raftor = @ptrCast(@alignCast(ctx));
-        if (self.terminal_error) |err| {
+        if (self.driverError()) |err| {
             var owned = msg;
             owned.deinit(self.allocator);
             return err;
@@ -338,7 +425,7 @@ pub const Raftor = struct {
 
     /// Advance the event loop by one tick. Returns true if there was work.
     pub fn tick(self: *Raftor) Error!bool {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         if (self.ready_processor.phase() != null) {
             _ = try self.processReady();
             return true;
@@ -350,17 +437,33 @@ pub const Raftor = struct {
         // Drain pending proposals from the thread-safe queue.
         var had_work = false;
         const proposal_timeout = if (self.config.proposal_timeout_ticks > 0) self.config.proposal_timeout_ticks else 0;
-        while (self.proposal_queue.tryPop()) |p| {
-            defer {
-                self.allocator.free(p.data);
-                self.allocator.free(p.ctx);
+        while (true) {
+            spinLock(&self.lifecycle_mutex);
+            if (self.lifecycle != .active) {
+                self.lifecycle_mutex.unlock();
+                break;
             }
-            self.proposal_tracker.track(p.ctx, p.callback, self.tick_count, proposal_timeout) catch |err| {
-                p.callback.invoke(.{ .err = err });
-                continue;
+            const item = self.proposal_queue.tryPop() orelse {
+                self.lifecycle_mutex.unlock();
+                break;
             };
-            self.raw_node.propose(p.ctx, p.data) catch |e| {
-                self.proposal_tracker.fail(p.ctx, e);
+            const track_error: ?Error = if (self.proposal_tracker.track(
+                item.ctx,
+                item.callback,
+                self.tick_count,
+                proposal_timeout,
+            )) |_| null else |err| err;
+            self.lifecycle_mutex.unlock();
+            defer {
+                self.allocator.free(item.data);
+                self.allocator.free(item.ctx);
+            }
+            if (track_error) |err| {
+                item.callback.invoke(.{ .err = err });
+                continue;
+            }
+            self.raw_node.propose(item.ctx, item.data) catch |e| {
+                self.proposal_tracker.fail(item.ctx, e);
                 if (e != error.ProposalDropped) return e;
             };
             had_work = true;
@@ -368,14 +471,30 @@ pub const Raftor = struct {
 
         // Drain pending reads.
         const read_timeout = if (self.config.read_index_timeout_ticks > 0) self.config.read_index_timeout_ticks else 0;
-        while (self.read_index_queue.tryPop()) |r| {
-            defer self.allocator.free(r.ctx);
-            self.proposal_tracker.trackRead(r.ctx, r.callback, self.tick_count, read_timeout) catch |err| {
-                r.callback.invoke(.{ .err = err });
-                continue;
+        while (true) {
+            spinLock(&self.lifecycle_mutex);
+            if (self.lifecycle != .active) {
+                self.lifecycle_mutex.unlock();
+                break;
+            }
+            const item = self.read_index_queue.tryPop() orelse {
+                self.lifecycle_mutex.unlock();
+                break;
             };
-            self.raw_node.readIndex(r.ctx) catch |err| {
-                self.proposal_tracker.failRead(r.ctx, err);
+            const track_error: ?Error = if (self.proposal_tracker.trackRead(
+                item.ctx,
+                item.callback,
+                self.tick_count,
+                read_timeout,
+            )) |_| null else |err| err;
+            self.lifecycle_mutex.unlock();
+            defer self.allocator.free(item.ctx);
+            if (track_error) |err| {
+                item.callback.invoke(.{ .err = err });
+                continue;
+            }
+            self.raw_node.readIndex(item.ctx) catch |err| {
+                self.proposal_tracker.failRead(item.ctx, err);
                 return err;
             };
             had_work = true;
@@ -406,22 +525,50 @@ pub const Raftor = struct {
 
     /// Run the event loop until `stop()` is called. Blocks the caller.
     pub fn run(self: *Raftor) Error!void {
-        self.running = true;
-        while (self.running) {
-            if (self.terminal_error) |e| return e;
+        spinLock(&self.lifecycle_mutex);
+        if (self.lifecycle != .active) {
+            const err = self.terminal_error orelse error.ShuttingDown;
+            self.lifecycle_mutex.unlock();
+            return err;
+        }
+        if (self.running.load(.monotonic)) {
+            self.lifecycle_mutex.unlock();
+            return error.AlreadyStarted;
+        }
+        self.running.store(true, .release);
+        self.lifecycle_mutex.unlock();
+        defer self.running.store(false, .release);
+        while (self.running.load(.acquire)) {
             _ = try self.tick();
             // Sleep for the configured tick interval to avoid busy-looping.
-            const ns: u64 = self.config.tick_interval_ms * std.time.ns_per_ms;
-            std.Thread.sleep(ns);
+            sleepNanoseconds(self.config.tick_interval_ms *| std.time.ns_per_ms);
         }
     }
 
     pub fn stop(self: *Raftor) void {
-        self.running = false;
+        var batch: ?ShutdownBatch = null;
+        spinLock(&self.lifecycle_mutex);
+        self.running.store(false, .release);
+        if (self.lifecycle == .active) {
+            self.lifecycle = .stopping;
+            batch = self.detachRequestsLocked();
+        }
+        const stop_transport = self.markTransportStoppedLocked();
+        self.lifecycle_mutex.unlock();
+        const owns_shutdown = batch != null;
+
+        if (stop_transport) self.transport.stop();
+        if (batch) |*detached| detached.invoke(error.ShuttingDown, error.ShuttingDown);
+
+        if (owns_shutdown) {
+            spinLock(&self.lifecycle_mutex);
+            if (self.lifecycle == .stopping) self.lifecycle = .stopped;
+            self.lifecycle_mutex.unlock();
+        }
     }
 
     pub fn isRunning(self: *const Raftor) bool {
-        return self.running;
+        return self.running.load(.acquire);
     }
 
     // -----------------------------------------------------------------------
@@ -429,19 +576,22 @@ pub const Raftor = struct {
     // -----------------------------------------------------------------------
 
     pub fn propose(self: *Raftor, data: []const u8, callback: proposal_tracker_mod.ProposalCallback) !void {
-        if (self.terminal_error != null) return error.ShuttingDown;
         const data_copy = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(data_copy);
         const ctx_copy = try self.request_context_generator.next(self.allocator, .proposal, "");
         errdefer self.allocator.free(ctx_copy);
-        // Push to thread-safe queue; tick() will drain it.
+        spinLock(&self.lifecycle_mutex);
+        defer self.lifecycle_mutex.unlock();
+        if (self.lifecycle != .active) return error.ShuttingDown;
         try self.proposal_queue.push(data_copy, ctx_copy, callback);
     }
 
     pub fn readIndex(self: *Raftor, ctx: []const u8, callback: proposal_tracker_mod.ReadIndexCallback) !void {
-        if (self.terminal_error != null) return error.ShuttingDown;
         const ctx_copy = try self.request_context_generator.next(self.allocator, .read_index, ctx);
         errdefer self.allocator.free(ctx_copy);
+        spinLock(&self.lifecycle_mutex);
+        defer self.lifecycle_mutex.unlock();
+        if (self.lifecycle != .active) return error.ShuttingDown;
         try self.read_index_queue.push(ctx_copy, callback);
     }
 
@@ -450,18 +600,18 @@ pub const Raftor = struct {
     // -----------------------------------------------------------------------
 
     pub fn campaign(self: *Raftor) Error!void {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         try self.raw_node.campaign();
         while (try self.processReady()) {}
     }
 
     pub fn transferLeader(self: *Raftor, target_id: u64) Error!void {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         try self.raw_node.transferLeader(target_id);
     }
 
     pub fn addNode(self: *Raftor, id: u64, addr: []const u8) Error!void {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         const inserted = try self.transport.addPeer(id, addr);
         errdefer if (inserted) self.transport.removePeer(id) catch {};
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
@@ -473,7 +623,7 @@ pub const Raftor = struct {
     }
 
     pub fn removeNode(self: *Raftor, id: u64) Error!void {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
         cc.changes[0] = .{ .change_type = .remove_node, .node_id = id };
@@ -488,7 +638,7 @@ pub const Raftor = struct {
     /// StateMachine's `takeSnapshot` is called, then the result is persisted
     /// via `storage.applyLocalSnapshot` (which also compacts old entries).
     pub fn takeSnapshot(self: *Raftor) Error!void {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         const applied_index = self.ready_processor.getAppliedIndex();
         if (applied_index == 0) return;
 
@@ -591,7 +741,7 @@ pub const Raftor = struct {
     }
 
     pub fn processReadyStep(self: *Raftor) Error!bool {
-        if (self.terminal_error) |e| return e;
+        if (self.driverError()) |err| return err;
         const did_work = self.ready_processor.processStep() catch |err| {
             self.latchReadyError();
             return err;
@@ -620,19 +770,35 @@ pub const Raftor = struct {
     }
 
     fn enterTerminal(self: *Raftor, err: Error) void {
-        if (self.terminal_error != null) return;
-        self.terminal_error = err;
-        self.proposal_tracker.failAll(err);
-        self.proposal_tracker.failAllReads(err);
-        while (self.proposal_queue.tryPop()) |proposal| {
-            proposal.callback.invoke(.{ .err = err });
-            self.allocator.free(proposal.data);
-            self.allocator.free(proposal.ctx);
+        var batch: ?ShutdownBatch = null;
+        spinLock(&self.lifecycle_mutex);
+        if (self.terminal_error == null) self.terminal_error = err;
+        self.running.store(false, .release);
+        if (self.lifecycle == .active) {
+            self.lifecycle = .terminating;
+            batch = self.detachRequestsLocked();
         }
-        while (self.read_index_queue.tryPop()) |read| {
-            read.callback.invoke(.{ .err = err });
-            self.allocator.free(read.ctx);
+        const stop_transport = self.markTransportStoppedLocked();
+        self.lifecycle_mutex.unlock();
+        const owns_shutdown = batch != null;
+
+        if (stop_transport) self.transport.stop();
+        if (batch) |*detached| detached.invoke(err, err);
+
+        if (owns_shutdown) {
+            spinLock(&self.lifecycle_mutex);
+            if (self.lifecycle == .terminating) self.lifecycle = .terminal;
+            self.lifecycle_mutex.unlock();
         }
+    }
+
+    fn driverError(self: *const Raftor) ?Error {
+        const mutex = @constCast(&self.lifecycle_mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
+        if (self.terminal_error) |err| return err;
+        if (self.lifecycle != .active) return error.ShuttingDown;
+        return null;
     }
 };
 
@@ -751,4 +917,32 @@ test "raftor: request context sequence exhaustion does not enqueue" {
     );
     try std.testing.expect(r.proposal_queue.empty());
     try std.testing.expect(r.read_index_queue.empty());
+}
+
+test "raftor: stop terminates tracked requests" {
+    const allocator = std.testing.allocator;
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeRaftorConfig(1), sm.stateMachine());
+    defer r.destroy();
+
+    const Callback = struct {
+        proposal_error: ?Error = null,
+        read_error: ?Error = null,
+
+        fn proposal(ctx: *anyopaque, result: proposal_tracker_mod.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .err) self.proposal_error = result.err;
+        }
+        fn read(ctx: *anyopaque, result: proposal_tracker_mod.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .err) self.read_error = result.err;
+        }
+    };
+    var callback = Callback{};
+    try r.proposal_tracker.track("proposal", .{ .ctx = &callback, .function = Callback.proposal }, 0, 0);
+    try r.proposal_tracker.trackRead("read", .{ .ctx = &callback, .function = Callback.read }, 0, 0);
+    r.stop();
+    try std.testing.expectEqual(error.ShuttingDown, callback.proposal_error.?);
+    try std.testing.expectEqual(error.ShuttingDown, callback.read_error.?);
 }

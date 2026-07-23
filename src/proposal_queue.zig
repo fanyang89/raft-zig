@@ -65,6 +65,14 @@ pub const ProposalQueue = struct {
         return self.items.orderedRemove(0);
     }
 
+    pub fn takeAll(self: *ProposalQueue) std.ArrayList(ProposalItem) {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        const items = self.items;
+        self.items = .empty;
+        return items;
+    }
+
     pub fn empty(self: *ProposalQueue) bool {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
@@ -99,6 +107,14 @@ pub const ReadIndexQueue = struct {
         defer self.mutex.unlock();
         if (self.items.items.len == 0) return null;
         return self.items.orderedRemove(0);
+    }
+
+    pub fn takeAll(self: *ReadIndexQueue) std.ArrayList(ReadIndexItem) {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        const items = self.items;
+        self.items = .empty;
+        return items;
     }
 
     pub fn empty(self: *ReadIndexQueue) bool {

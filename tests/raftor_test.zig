@@ -457,6 +457,149 @@ test "raftor: stop terminates run loop" {
     try std.testing.expect(!r.isRunning());
 }
 
+test "raftor: stop terminates queued requests exactly once" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeConfig(1), sm.stateMachine());
+    defer r.destroy();
+
+    var proposal = ErrorTester{};
+    var read = ErrorTester{};
+    try r.propose("queued", proposal.proposalCallback());
+    try r.readIndex("queued-read", read.readCallback());
+    r.stop();
+    r.stop();
+    try std.testing.expectEqual(error.ShuttingDown, proposal.err.?);
+    try std.testing.expectEqual(error.ShuttingDown, read.err.?);
+    try std.testing.expectError(error.ShuttingDown, r.propose("late", proposal.proposalCallback()));
+    try std.testing.expectError(error.ShuttingDown, r.readIndex("late-read", read.readCallback()));
+}
+
+test "raftor: destroy terminates queued requests" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeConfig(1), sm.stateMachine());
+    var proposal = ErrorTester{};
+    var read = ErrorTester{};
+    try r.propose("queued", proposal.proposalCallback());
+    try r.readIndex("queued-read", read.readCallback());
+    r.destroy();
+    try std.testing.expectEqual(error.ShuttingDown, proposal.err.?);
+    try std.testing.expectEqual(error.ShuttingDown, read.err.?);
+}
+
+test "raftor: shutdown callback can stop again" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(allocator, makeConfig(1), sm.stateMachine());
+    defer r.destroy();
+
+    const Callback = struct {
+        raftor: *Raftor,
+        calls: usize = 0,
+        rejected: bool = false,
+
+        fn invoke(ctx: *anyopaque, result: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .err and result.err == error.ShuttingDown) self.calls += 1;
+            self.raftor.stop();
+            self.raftor.propose("reentrant", .{ .ctx = self, .function = invoke }) catch |err| {
+                self.rejected = err == error.ShuttingDown;
+            };
+        }
+    };
+    var callback = Callback{ .raftor = r };
+    try r.propose("queued", .{ .ctx = &callback, .function = Callback.invoke });
+    r.stop();
+    try std.testing.expectEqual(@as(usize, 1), callback.calls);
+    try std.testing.expect(callback.rejected);
+}
+
+test "raftor: concurrent stop completes every accepted request once" {
+    const thread_allocator = std.heap.smp_allocator;
+    var sm = MockStateMachine.init(thread_allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.tick_interval_ms = 1;
+    const r = try Raftor.create(thread_allocator, config, sm.stateMachine());
+    defer r.destroy();
+
+    const producer_count = 4;
+    const requests_per_producer = 64;
+    const Record = struct {
+        accepted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        callbacks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+        fn proposal(ctx: *anyopaque, _: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.callbacks.fetchAdd(1, .monotonic);
+        }
+        fn read(ctx: *anyopaque, _: raft.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.callbacks.fetchAdd(1, .monotonic);
+        }
+    };
+    var records: [producer_count][requests_per_producer]Record = undefined;
+    for (&records) |*producer_records| {
+        for (producer_records) |*record| record.* = .{};
+    }
+    var attempts = std.atomic.Value(usize).init(0);
+
+    const RunState = struct {
+        raftor: *Raftor,
+        err: ?raft.Error = null,
+        fn run(self: *@This()) void {
+            self.raftor.run() catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var run_state = RunState{ .raftor = r };
+    const run_thread = try std.Thread.spawn(.{}, RunState.run, .{&run_state});
+    while (!r.isRunning()) std.atomic.spinLoopHint();
+
+    const Producer = struct {
+        raftor: *Raftor,
+        records: *[requests_per_producer]Record,
+        attempts: *std.atomic.Value(usize),
+        unexpected_error: ?raft.Error = null,
+
+        fn run(self: *@This()) void {
+            for (self.records, 0..) |*record, index| {
+                _ = self.attempts.fetchAdd(1, .release);
+                const result = if (index % 2 == 0)
+                    self.raftor.propose("value", .{ .ctx = record, .function = Record.proposal })
+                else
+                    self.raftor.readIndex("read", .{ .ctx = record, .function = Record.read });
+                if (result) |_| {
+                    record.accepted.store(true, .release);
+                } else |err| {
+                    if (err != error.ShuttingDown) self.unexpected_error = err;
+                }
+            }
+        }
+    };
+    var producers: [producer_count]Producer = undefined;
+    var producer_threads: [producer_count]std.Thread = undefined;
+    for (&producers, &producer_threads, &records) |*producer, *thread, *producer_records| {
+        producer.* = .{ .raftor = r, .records = producer_records, .attempts = &attempts };
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+    while (attempts.load(.acquire) < requests_per_producer) std.atomic.spinLoopHint();
+    r.stop();
+    for (producer_threads) |thread| thread.join();
+    run_thread.join();
+
+    try std.testing.expect(run_state.err == null);
+    for (producers) |producer| try std.testing.expect(producer.unexpected_error == null);
+    for (records) |producer_records| {
+        for (producer_records) |record| {
+            const expected: usize = if (record.accepted.load(.acquire)) 1 else 0;
+            try std.testing.expectEqual(expected, record.callbacks.load(.acquire));
+        }
+    }
+}
+
 test "raftor: manual takeSnapshot compacts storage" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();
