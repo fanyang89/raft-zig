@@ -131,6 +131,22 @@ pub const SegmentManager = struct {
         }
     }
 
+    pub fn removeSegmentsAfter(self: *SegmentManager, after_id: u64) !void {
+        var i = self.segments.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.segments.items[i].id <= after_id) break;
+            try self.segments.items[i].segment.unlink();
+            self.segments.items[i].segment.destroy();
+            _ = self.segments.orderedRemove(i);
+            self.directory_dirty = true;
+        }
+        self.current_segment_id = if (self.segments.items.len > 0)
+            self.segments.items[self.segments.items.len - 1].id
+        else
+            0;
+    }
+
     pub fn removeAllSegments(self: *SegmentManager) !void {
         while (self.segments.items.len > 0) {
             const entry = self.segments.items[0];

@@ -5,9 +5,8 @@
 //! Compaction deletes old segment files, reclaiming disk space.
 //!
 //! Record format matches raftpp exactly (magic "WAL1", CRC32C over
-//! type+flags+length+padding+payload). In-memory entries list is retained
-//! for O(1) term/entries lookups; WALIndex (on-demand disk reads) is a
-//! future Phase 2 optimization.
+//! type+flags+length+padding+payload). In-memory entries are retained for
+//! reads, while WALIndex tracks segment and byte offsets for truncation.
 
 const std = @import("std");
 
@@ -17,6 +16,7 @@ const storage_mod = @import("storage.zig");
 const segment_mod = @import("wal/segment.zig");
 const segment_manager_mod = @import("wal/segment_manager.zig");
 const metadata_store_mod = @import("wal/metadata_store.zig");
+const wal_index_mod = @import("wal/wal_index.zig");
 
 const Error = error_model.Error;
 const Entry = types.Entry;
@@ -50,6 +50,12 @@ const RecordType = enum(u8) {
     hard_state = 3,
     conf_state = 4,
     snapshot = 5,
+};
+
+const RecordLocation = struct {
+    segment_id: u64,
+    offset: u64,
+    length: u32,
 };
 
 const SEGMENT_HEADER_SIZE: usize = 32;
@@ -338,6 +344,7 @@ pub const WAL = struct {
     segment_manager: segment_manager_mod.SegmentManager,
     metadata_store: metadata_store_mod.MetadataStore,
     metadata_dirty: bool,
+    wal_index: wal_index_mod.WALIndex,
 
     // In-memory state recovered from the log.
     entries: std.ArrayList(Entry),
@@ -371,6 +378,7 @@ pub const WAL = struct {
             .segment_manager = sm,
             .metadata_store = metadata_store,
             .metadata_dirty = false,
+            .wal_index = wal_index_mod.WALIndex.init(allocator),
             .entries = .empty,
             .hard_state = .{},
             .conf_state = .{},
@@ -391,6 +399,7 @@ pub const WAL = struct {
     pub fn deinit(self: *WAL) void {
         self.segment_manager.deinit();
         self.metadata_store.deinit();
+        self.wal_index.deinit();
         for (self.entries.items) |*e| e.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.conf_state.deinit(self.allocator);
@@ -405,6 +414,7 @@ pub const WAL = struct {
         const has_metadata = persisted_metadata != null;
         if (persisted_metadata) |metadata| {
             self.first_index = metadata.first_index;
+            self.wal_index.setFirstIndex(metadata.first_index);
             self.snapshot_metadata = .{
                 .index = metadata.snapshot_index,
                 .term = metadata.snapshot_term,
@@ -414,6 +424,10 @@ pub const WAL = struct {
         }
 
         const segs = self.segment_manager.segments.items;
+        if (!has_metadata and segs.len > 0) {
+            self.first_index = segs[0].segment.first_index;
+            self.wal_index.setFirstIndex(self.first_index);
+        }
         for (segs) |entry| {
             const seg = entry.segment;
             const body_size = seg.file_size - SEGMENT_HEADER_SIZE;
@@ -439,10 +453,18 @@ pub const WAL = struct {
                             offset += total;
                             continue;
                         }
-                        self.entries.append(self.allocator, e) catch {
+                        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+                        try self.wal_index.ensureUnusedCapacity(1);
+                        self.wal_index.insertAssumeCapacity(e.index, .{
+                            .segment_id = entry.id,
+                            .offset = SEGMENT_HEADER_SIZE + offset,
+                            .length = @intCast(total),
+                            .term = e.term,
+                        }) catch |err| {
                             e.deinit(self.allocator);
-                            break;
+                            return err;
                         };
+                        self.entries.appendAssumeCapacity(e);
                     },
                     .hard_state => {
                         if (!has_metadata) self.hard_state = deserializeHardState(parsed.payload) catch break;
@@ -467,13 +489,15 @@ pub const WAL = struct {
 
         if (!has_metadata and self.entries.items.len > 0) {
             self.first_index = self.entries.items[0].index;
+            self.wal_index.setFirstIndex(self.first_index);
         }
         if (!has_metadata) self.metadata_dirty = true;
     }
 
-    fn writeRecord(self: *WAL, record_type: RecordType, payload: []const u8) !void {
+    fn writeRecord(self: *WAL, record_type: RecordType, payload: []const u8) !RecordLocation {
         const record = try buildRecord(self.allocator, record_type, payload);
         defer self.allocator.free(record);
+        const record_length = std.math.cast(u32, record.len) orelse return error.RecordTooLarge;
 
         // Roll segment if needed.
         const cur = self.segment_manager.getCurrent() orelse
@@ -491,24 +515,61 @@ pub const WAL = struct {
         }
 
         const active = self.segment_manager.getCurrent().?;
+        const offset = active.write_offset;
         try active.append(record);
+        return .{
+            .segment_id = active.segment_id,
+            .offset = offset,
+            .length = record_length,
+        };
     }
 
     pub fn append(self: *WAL, entries: []const Entry) !void {
-        for (entries) |entry| {
+        if (entries.len == 0) return;
+        for (entries[1..], entries[0 .. entries.len - 1]) |entry, previous| {
+            if (entry.index != std.math.add(u64, previous.index, 1) catch return error.Fatal) return error.Fatal;
+        }
+        if (entries[0].index < self.first_index) return error.Fatal;
+
+        const next_index = std.math.add(u64, self.lastIndex(), 1) catch return error.Fatal;
+        if (entries[0].index > next_index) return error.Fatal;
+
+        var append_from: usize = 0;
+        while (append_from < entries.len and entries[append_from].index <= self.lastIndex()) : (append_from += 1) {
+            const existing_offset: usize = @intCast(entries[append_from].index - self.first_index);
+            if (existing_offset >= self.entries.items.len) return error.Fatal;
+            if (!entryEql(self.entries.items[existing_offset], entries[append_from])) break;
+        }
+        if (append_from == entries.len) return;
+
+        const first_new = entries[append_from].index;
+        if (first_new <= self.lastIndex()) {
+            if (first_new <= self.hard_state.commit) return error.Fatal;
+            try self.truncateSuffixFrom(first_new);
+        }
+        if (first_new != std.math.add(u64, self.lastIndex(), 1) catch return error.Fatal) return error.Fatal;
+
+        for (entries[append_from..]) |entry| {
             var cloned = try cloneEntry(self.allocator, entry);
             errdefer cloned.deinit(self.allocator);
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
+            try self.wal_index.ensureUnusedCapacity(1);
             const payload = try serializeEntry(self.allocator, entry);
             defer self.allocator.free(payload);
-            try self.writeRecord(.entry, payload);
+            const location = try self.writeRecord(.entry, payload);
+            try self.wal_index.insertAssumeCapacity(entry.index, .{
+                .segment_id = location.segment_id,
+                .offset = location.offset,
+                .length = location.length,
+                .term = entry.term,
+            });
             self.entries.appendAssumeCapacity(cloned);
         }
     }
 
     pub fn saveHardState(self: *WAL, hs: HardState) !void {
         const payload = serializeHardState(hs);
-        try self.writeRecord(.hard_state, &payload);
+        _ = try self.writeRecord(.hard_state, &payload);
         self.hard_state = hs;
         self.metadata_dirty = true;
     }
@@ -518,7 +579,7 @@ pub const WAL = struct {
         errdefer cloned.deinit(self.allocator);
         const payload = try serializeConfState(self.allocator, cs);
         defer self.allocator.free(payload);
-        try self.writeRecord(.conf_state, payload);
+        _ = try self.writeRecord(.conf_state, payload);
         self.conf_state.deinit(self.allocator);
         self.conf_state = cloned;
         self.metadata_dirty = true;
@@ -528,7 +589,7 @@ pub const WAL = struct {
         var payload: [16]u8 = undefined;
         std.mem.writeInt(u64, payload[0..8], meta.index, .little);
         std.mem.writeInt(u64, payload[8..16], meta.term, .little);
-        try self.writeRecord(.snapshot, &payload);
+        _ = try self.writeRecord(.snapshot, &payload);
         self.snapshot_metadata.deinit(self.allocator);
         self.snapshot_metadata = .{ .index = meta.index, .term = meta.term };
         self.metadata_dirty = true;
@@ -555,6 +616,7 @@ pub const WAL = struct {
         while (i < drop_count) : (i += 1) self.entries.items[i].deinit(self.allocator);
         std.mem.copyForwards(Entry, self.entries.items[0..], self.entries.items[drop_count..]);
         self.entries.shrinkRetainingCapacity(self.entries.items.len - drop_count);
+        self.wal_index.truncateBefore(compact_index);
         self.first_index = compact_index;
         self.metadata_dirty = true;
 
@@ -591,12 +653,8 @@ pub const WAL = struct {
         if (idx == self.snapshot_metadata.index and self.snapshot_metadata.index > 0) {
             return self.snapshot_metadata.term;
         }
-        if (self.entries.items.len == 0) return error.Unavailable;
-        const offset = self.firstIndex();
-        if (idx < offset) return error.Compacted;
-        if (idx > self.lastIndex()) return error.Unavailable;
-        const i: usize = @intCast(idx - offset);
-        return self.entries.items[i].term;
+        if (idx < self.firstIndex()) return error.Compacted;
+        return self.wal_index.term(idx) orelse error.Unavailable;
     }
 
     pub fn readEntries(
@@ -640,7 +698,30 @@ pub const WAL = struct {
         });
         self.metadata_dirty = false;
     }
+
+    fn truncateSuffixFrom(self: *WAL, index: u64) !void {
+        const location = self.wal_index.lookup(index) orelse return error.Fatal;
+        const segment = self.segment_manager.get(location.segment_id) orelse return error.Fatal;
+        try segment.truncate(location.offset);
+        try segment.sync();
+        try self.segment_manager.removeSegmentsAfter(location.segment_id);
+        try self.segment_manager.syncAll();
+
+        const keep_count: usize = @intCast(index - self.first_index);
+        for (self.entries.items[keep_count..]) |*entry| entry.deinit(self.allocator);
+        self.entries.shrinkRetainingCapacity(keep_count);
+        self.wal_index.truncateFrom(index);
+    }
 };
+
+fn entryEql(a: Entry, b: Entry) bool {
+    return a.index == b.index and
+        a.term == b.term and
+        a.entry_type == b.entry_type and
+        a.checksum == b.checksum and
+        std.mem.eql(u8, a.data, b.data) and
+        std.mem.eql(u8, a.context, b.context);
+}
 
 // ===========================================================================
 // WALStorage — adapts WAL to the WritableStorage vtable interface
@@ -1105,6 +1186,60 @@ test "wal: compact removes old entries" {
 
         // Entries below firstIndex are compacted.
         try std.testing.expectError(error.Compacted, wal.readEntries(allocator, 1, 3, null));
+    }
+
+    removeWALDir(allocator, path);
+}
+
+test "wal: suffix overwrite is idempotent and restart-safe" {
+    const allocator = std.testing.allocator;
+    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-overwrite";
+    removeWALDir(allocator, path);
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1, .data = @constCast("a") },
+            .{ .index = 2, .term = 1, .data = @constCast("b") },
+            .{ .index = 3, .term = 1, .data = @constCast("c") },
+            .{ .index = 4, .term = 1, .data = @constCast("d") },
+        });
+        try wal.saveHardState(.{ .term = 5, .vote = 1, .commit = 1 });
+        try wal.sync();
+        try std.testing.expect(wal.segment_manager.count() >= 4);
+
+        const offset_before_retry = wal.segment_manager.getCurrent().?.write_offset;
+        try wal.append(&.{.{ .index = 4, .term = 1, .data = @constCast("d") }});
+        try std.testing.expectEqual(offset_before_retry, wal.segment_manager.getCurrent().?.write_offset);
+
+        try std.testing.expectError(error.Fatal, wal.append(&.{.{ .index = 1, .term = 9 }}));
+        try std.testing.expectError(error.Fatal, wal.append(&.{.{ .index = 6, .term = 2 }}));
+
+        try wal.append(&.{
+            .{ .index = 2, .term = 2, .data = @constCast("new-b") },
+            .{ .index = 3, .term = 2, .data = @constCast("new-c") },
+        });
+        try wal.sync();
+        try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 5), wal.hard_state.term);
+        try std.testing.expectEqual(@as(u64, 1), wal.hard_state.vote);
+        try std.testing.expectEqual(@as(u64, 1), wal.hard_state.commit);
+        try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+        const entries = try wal.readEntries(allocator, 1, 4, null);
+        defer {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+        try std.testing.expectEqualStrings("a", entries[0].data);
+        try std.testing.expectEqualStrings("new-b", entries[1].data);
+        try std.testing.expectEqualStrings("new-c", entries[2].data);
+        try std.testing.expectEqual(@as(u64, 2), entries[2].term);
     }
 
     removeWALDir(allocator, path);
