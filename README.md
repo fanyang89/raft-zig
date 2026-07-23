@@ -53,6 +53,8 @@ zig build test --summary all
 zig fmt build.zig src examples tests
 ```
 
+Fast Raft invariant checks are enabled by default in Debug and ReleaseSafe builds. Override them with `-Dinvariant-checks=false` or `-Dinvariant-checks=true`.
+
 ## Examples
 
 | Example | Description |

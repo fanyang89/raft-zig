@@ -14,6 +14,12 @@ pub fn build(b: *std.Build) void {
 
     const raft_zig_options = b.addOptions();
     raft_zig_options.addOption([]const u8, "version", manifest.version);
+    raft_zig_options.addOption(
+        bool,
+        "invariant_checks",
+        b.option(bool, "invariant-checks", "Enable fast Raft invariant checks") orelse
+            (optimize == .Debug or optimize == .ReleaseSafe),
+    );
 
     const raft_zig = b.addModule("raft_zig", .{
         .root_source_file = b.path("src/root.zig"),

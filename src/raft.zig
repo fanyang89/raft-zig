@@ -67,6 +67,7 @@ const ConfChanger = conf_changer_mod.ConfChanger;
 const restoreTracker = conf_restore_mod.restore;
 
 const StateRole = @import("core/state_role.zig").StateRole;
+const invariant = @import("invariant.zig");
 const SoftState = @import("core/state_role.zig").SoftState;
 
 const log = std.log.scoped(.raft_zig);
@@ -265,6 +266,7 @@ pub const Raft = struct {
             .{ r.term, r.raft_log.committed, r.raft_log.applied, r.raft_log.lastIndex(), r.raft_log.lastTerm() catch 0 },
         );
 
+        invariant.assertRaft(&r);
         return r;
     }
 
@@ -318,6 +320,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn becomeFollower(self: *Raft, term: u64, leader_id: u64) void {
+        defer invariant.assertRaft(self);
         const pending_request_snapshot = self.pending_request_snapshot;
         self.reset(term);
         self.leader_id = leader_id;
@@ -328,6 +331,7 @@ pub const Raft = struct {
     }
 
     pub fn becomePreCandidate(self: *Raft) void {
+        defer invariant.assertRaft(self);
         std.debug.assert(self.state != .leader);
         self.state = .pre_candidate;
         self.progress_tracker.resetVotes();
@@ -336,6 +340,7 @@ pub const Raft = struct {
     }
 
     pub fn becomeCandidate(self: *Raft) void {
+        defer invariant.assertRaft(self);
         std.debug.assert(self.state != .leader);
         const term = self.term + 1;
         self.reset(term);
@@ -346,6 +351,7 @@ pub const Raft = struct {
     }
 
     pub fn becomeLeader(self: *Raft) Error!void {
+        defer invariant.assertRaft(self);
         std.debug.assert(self.state != .follower);
 
         self.reset(self.term);
@@ -378,6 +384,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn tick(self: *Raft) Error!bool {
+        defer invariant.assertRaft(self);
         return switch (self.state) {
             .follower, .candidate, .pre_candidate => try self.tickElection(),
             .leader => try self.tickHeartbeat(),
@@ -460,6 +467,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn step(self: *Raft, m_in: *Message) Error!void {
+        defer invariant.assertRaft(self);
         // m_in may be moved into the messages list; clone for safety where
         // we still need to read after a `send`. We treat the caller-owned
         // buffer as mutable.
@@ -1520,6 +1528,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn applyConfChange(self: *Raft, cc: ConfChangeV2) Error!ConfState {
+        defer invariant.assertRaft(self);
         var changer = ConfChanger.init(&self.progress_tracker);
         var result: ?conf_changer_mod.ConfChangeResult = null;
         defer if (result) |*r| r.deinit(self.allocator);
@@ -1543,6 +1552,7 @@ pub const Raft = struct {
     }
 
     pub fn postConfChange(self: *Raft) ConfState {
+        defer invariant.assertRaft(self);
         log.info("switched to configuration", .{});
         const cs = self.progress_tracker.conf.toConfState(self.allocator) catch return ConfState{};
         const is_voter = self.progress_tracker.conf.voters.contains(self.id);
@@ -1596,6 +1606,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn loadState(self: *Raft, hs: HardState) void {
+        defer invariant.assertRaft(self);
         if (hs.commit < self.raft_log.committed or hs.commit > self.raft_log.lastIndex()) {
             log.warn(
                 "hs.commit {} out of range [{}, {}]",
@@ -1609,6 +1620,7 @@ pub const Raft = struct {
     }
 
     pub fn commitApply(self: *Raft, applied: u64) void {
+        defer invariant.assertRaft(self);
         self.commitApplyInternal(applied, false);
     }
 
@@ -1657,6 +1669,7 @@ pub const Raft = struct {
     }
 
     pub fn onPersistEntries(self: *Raft, index: u64, term_: u64) Error!void {
+        defer invariant.assertRaft(self);
         const update = try self.raft_log.maybePersist(index, term_);
         if (update and self.state == .leader) {
             if (self.term != term_) {
@@ -1671,6 +1684,7 @@ pub const Raft = struct {
     }
 
     pub fn onPersistSnapshot(self: *Raft, index: u64) void {
+        defer invariant.assertRaft(self);
         _ = self.raft_log.maybePersistSnapshot(index);
     }
 

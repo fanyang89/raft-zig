@@ -41,6 +41,7 @@ const conf_changer_mod = @import("conf_changer.zig");
 const conf_restore_mod = @import("conf_restore.zig");
 const raft_config_mod = @import("raft_config.zig");
 const raft_mod = @import("raft.zig");
+const invariant_mod = @import("invariant.zig");
 const raw_node_mod = @import("raw_node.zig");
 const state_machine_mod = @import("state_machine.zig");
 const transport_mod = @import("transport.zig");
@@ -163,6 +164,9 @@ pub const campaign_pre_election = raft_mod.campaign_pre_election;
 pub const campaign_election = raft_mod.campaign_election;
 pub const campaign_transfer = raft_mod.campaign_transfer;
 pub const Raft = raft_mod.Raft;
+pub const InvariantKind = invariant_mod.Kind;
+pub const InvariantViolation = invariant_mod.Violation;
+pub const checkRaftInvariants = invariant_mod.checkRaft;
 
 pub const Peer = raw_node_mod.Peer;
 pub const SnapshotStatus = raw_node_mod.SnapshotStatus;
