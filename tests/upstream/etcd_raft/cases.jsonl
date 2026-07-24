@@ -145,7 +145,7 @@
 {"id":"raft_test.go::TestLeaderStepdownWhenQuorumActive","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"The upstream check-quorum scenario remains to be adapted."}
 {"id":"raft_test.go::TestLeaderStepdownWhenQuorumLost","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"A check-quorum leader stepping down after an election timeout without quorum activity remains to be tested."}
 {"id":"raft_test.go::TestLeaderSupersedingWithCheckQuorum","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"The upstream check-quorum scenario remains to be adapted."}
-{"id":"raft_test.go::TestLeaderTransferAfterSnapshot","path":"raft_test.go","category":"leadership-transfer","status":"blocked","rationale":"The deterministic network does not yet support snapshot safety checks."}
+{"id":"raft_test.go::TestLeaderTransferAfterSnapshot","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The deterministic network now supports snapshot safety checks; the leadership-transfer-after-snapshot scenario awaits adaptation."}
 {"id":"raft_test.go::TestLeaderTransferBack","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The upstream leadership-transfer scenario remains to be adapted."}
 {"id":"raft_test.go::TestLeaderTransferDemoteNode","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The upstream leadership-transfer scenario remains to be adapted."}
 {"id":"raft_test.go::TestLeaderTransferIgnoreProposal","path":"raft_test.go","category":"leadership-transfer","status":"adapted","target":"tests/upstream/etcd_raft/cases/leadership_transfer_test.zig","rationale":"Rejects proposals while leadership transfer is pending."}
@@ -214,7 +214,7 @@
 {"id":"raft_test.go::TestSingleNodeCandidate","path":"raft_test.go","category":"election","status":"planned","rationale":"The single-node candidate transition and self-vote behavior remain to be asserted before leader promotion."}
 {"id":"raft_test.go::TestSingleNodeCommit","path":"raft_test.go","category":"commit","status":"covered_elsewhere","target":"tests/raft_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestSingleNodePreCandidate","path":"raft_test.go","category":"election","status":"planned","rationale":"The upstream election scenario remains to be adapted."}
-{"id":"raft_test.go::TestSlowNodeRestore","path":"raft_test.go","category":"snapshot-restore","status":"blocked","rationale":"The deterministic network currently rejects safety checks with snapshots."}
+{"id":"raft_test.go::TestSlowNodeRestore","path":"raft_test.go","category":"snapshot-restore","status":"planned","rationale":"The deterministic network now supports snapshot safety checks; the slow-node snapshot-restore scenario awaits adaptation."}
 {"id":"raft_test.go::TestStateTransition","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
 {"id":"raft_test.go::TestStepConfig","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"Stepping configuration proposals through each relevant Raft role remains to be tested."}
 {"id":"raft_test.go::TestStepIgnoreConfig","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"Replacing disallowed configuration proposals with normal entries during Raft step processing remains to be tested."}

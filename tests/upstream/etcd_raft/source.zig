@@ -12,7 +12,7 @@ pub const upstream: manifest.Source = .{
         .adapted = 12,
         .covered_elsewhere = 69,
         .excluded = 30,
-        .blocked = 2,
-        .planned = 186,
+        .blocked = 0,
+        .planned = 188,
     },
 };

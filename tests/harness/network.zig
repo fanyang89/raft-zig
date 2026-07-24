@@ -220,7 +220,6 @@ pub const Network = struct {
         var peers_it = self.peers.valueIterator();
         while (peers_it.next()) |peer_ptr| {
             const peer = peer_ptr.*;
-            if (peer.storage.core.snapshot_data.metadata.index != 0) return error.SnapshotSafetyUnsupported;
             if (raft.checkRaftInvariants(&peer.raft)) |violation| {
                 std.log.err(
                     "node {} invariant failed: {s}, role={s}, term={}, peer={}, expected={}, actual={}",
@@ -255,6 +254,7 @@ pub const Network = struct {
             while (right_it.next()) |right_ptr| {
                 if (left_ptr.*.raft.id >= right_ptr.*.raft.id) continue;
                 try checkCommittedOverlap(left_ptr.*, right_ptr.*);
+                try checkSnapshotBoundary(left_ptr.*, right_ptr.*);
             }
         }
     }
@@ -453,11 +453,48 @@ fn checkCommittedOverlap(left: *Peer, right: *Peer) !void {
 }
 
 fn checkLogsEqual(left: *Peer, right: *Peer) !void {
+    // Compare only the common suffix above both peers' first indexes, so a
+    // compacted (snapshotted) prefix does not register as divergence.
     const left_entries = left.storage.core.entries.items;
     const right_entries = right.storage.core.entries.items;
-    if (left_entries.len != right_entries.len) return error.LogNotConverged;
-    for (left_entries, right_entries) |left_entry, right_entry| {
+    if (left_entries.len == 0 or right_entries.len == 0) {
+        if (left_entries.len != right_entries.len) return error.LogNotConverged;
+        return;
+    }
+    const left_first = left_entries[0].index;
+    const right_first = right_entries[0].index;
+    const start = @max(left_first, right_first);
+    const left_off: usize = @intCast(start - left_first);
+    const right_off: usize = @intCast(start - right_first);
+    const left_tail = left_entries[left_off..];
+    const right_tail = right_entries[right_off..];
+    if (left_tail.len != right_tail.len) return error.LogNotConverged;
+    for (left_tail, right_tail) |left_entry, right_entry| {
         if (!entriesEqual(left_entry, right_entry)) return error.LogNotConverged;
+    }
+    try checkSnapshotBoundary(left, right);
+}
+
+// Verify that a peer's installed snapshot agrees with any entry the other
+// peer still retains at the snapshot's index. Runs both directions.
+fn checkSnapshotBoundary(snap_peer: *Peer, other: *Peer) !void {
+    try checkOneSnapshotBoundary(snap_peer, other);
+    try checkOneSnapshotBoundary(other, snap_peer);
+}
+
+fn checkOneSnapshotBoundary(snap_peer: *Peer, other: *Peer) !void {
+    const snap = snap_peer.storage.core.snapshot_data;
+    const snap_idx = snap.metadata.index;
+    if (snap_idx == 0) return;
+    const snap_term = snap.metadata.term;
+    if (entryAt(other, snap_idx)) |other_entry| {
+        if (other_entry.term != snap_term) {
+            std.log.err(
+                "snapshot term {} at index {} on node {} disagrees with node {} entry term {}",
+                .{ snap_term, snap_idx, snap_peer.raft.id, other.raft.id, other_entry.term },
+            );
+            return error.SnapshotLogViolation;
+        }
     }
 }
 

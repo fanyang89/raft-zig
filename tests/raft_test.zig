@@ -209,3 +209,35 @@ test "raft: heartbeat advances follower commit" {
     }
     try std.testing.expectEqual(@as(u64, 2), net.getPeer(3).?.raft.raft_log.committed);
 }
+
+test "raft: network checkSafety supports snapshots" {
+    // A snapshot installed on one node's storage must no longer trip the old
+    // SnapshotSafetyUnsupported bail-out, and the boundary term must agree
+    // with entries the other nodes still retain.
+    var net = try network_mod.newNetwork(&.{ 1, 2, 3 });
+    defer net.deinit();
+
+    var hup_msg = hup(1);
+    try net.send(&.{hup_msg});
+    freeMsg(&hup_msg);
+    var prop = try propose(1, "x");
+    try net.send(&.{prop});
+    freeMsg(&prop);
+
+    const p1 = net.getPeer(1).?;
+    try std.testing.expectEqual(@as(u64, 2), p1.raft.raft_log.committed);
+
+    const voters = try allocator.dupe(u64, &.{ 1, 2, 3 });
+    var snap = raft.Snapshot{
+        .metadata = .{ .index = 2, .term = 1, .conf_state = .{ .voters = voters } },
+    };
+    defer snap.deinit(allocator);
+    try p1.storage.applySnapshot(allocator, snap);
+
+    // Consistent snapshot: safety check passes (previously returned
+    // SnapshotSafetyUnsupported). Mismatch detection at the snapshot boundary
+    // is exercised by checkSnapshotBoundary, which uses the same std.log.err
+    // + error pattern as checkCommittedOverlap and is intentionally not
+    // triggered here to avoid failing the test on the error log.
+    try net.checkSafety();
+}
