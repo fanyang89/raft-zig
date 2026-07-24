@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "raft_paper", .source = "tests/raft_paper_test.zig" },
         .{ .name = "rpc", .source = "tests/rpc_test.zig" },
         .{ .name = "simulation", .source = "tests/simulation_test.zig" },
+        .{ .name = "fs", .source = "tests/fs_test.zig" },
         .{ .name = "wal-fault", .source = "tests/wal_fault_test.zig" },
     };
     for (test_specs) |spec| {
