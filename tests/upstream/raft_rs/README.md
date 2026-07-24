@@ -6,3 +6,7 @@
 
 Only behavior not already represented by the etcd/raft baseline is adapted,
 with emphasis on raft-rs historical regressions.
+
+The inventory contains 200 integration tests, 50 core and failpoint tests, and
+13 data-driven fixtures. The upstream license text is preserved in
+`LICENSE.upstream`.

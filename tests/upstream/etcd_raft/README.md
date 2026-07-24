@@ -6,3 +6,6 @@
 
 etcd/raft is the primary compatibility baseline. Adapted tests retain a source
 case identifier and attribution in the inventory.
+
+The inventory contains 249 top-level tests and 13 stable data-driven fixtures.
+The upstream license text is preserved in `LICENSE.upstream`.

@@ -7,3 +7,8 @@
 Only externally observable behavior is used. Tests are independently designed
 against raft-zig APIs without copying HashiCorp source, helpers, constants,
 assertions, or test structure.
+
+The inventory contains 94 high-level families, 16 commitment and configuration
+cases, 15 snapshot-store exclusions, and 59 stable parameterized subcases. The
+upstream license text is preserved in `LICENSE.upstream` for provenance; its
+presence does not change the clean-room policy.
