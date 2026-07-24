@@ -6,7 +6,12 @@ pub const upstream: manifest.Source = .{
     .revision = "0d15d99844e8245ac917ce76ce2e4598665d0e40",
     .license = "MIT OR Apache-2.0",
     .policy = "Reimplement stateful invariants and non-duplicate behavior.",
-    .inventory = "",
-    .expected_case_count = 0,
-    .expected_status_counts = .{},
+    .inventory = @embedFile("cases.jsonl"),
+    .expected_case_count = 286,
+    .expected_status_counts = .{
+        .covered_elsewhere = 109,
+        .excluded = 47,
+        .blocked = 11,
+        .planned = 119,
+    },
 };
