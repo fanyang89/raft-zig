@@ -1,3 +1,7 @@
+// Copyright 2015 The etcd Authors
+// Licensed under the Apache License, Version 2.0.
+// Adapted and modified for raft-zig; see ../LICENSE.upstream.
+
 const std = @import("std");
 const raft = @import("raft_zig");
 const network = @import("raft_test_network");

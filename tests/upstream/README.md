@@ -33,14 +33,15 @@ Records are sorted by `path`, then `id`, and use these fields:
 `target` is required for `adapted`, `reimplemented`, and
 `covered_elsewhere`; it is omitted for all other statuses. Source manifests
 pin the expected record and status counts so accidental inventory changes fail
-the audit tests.
+the audit tests. A `covered_elsewhere` target must directly assert the recorded
+behavior; executing related code or testing a broader component is not enough.
 
 ## Coverage Snapshot
 
 | Source | Cases | Adapted | Covered | Planned | Excluded | Blocked |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| etcd/raft | 262 | 12 | 140 | 93 | 15 | 2 |
-| raft-rs | 263 | 0 | 218 | 37 | 2 | 6 |
-| OpenRaft | 286 | 0 | 109 | 119 | 47 | 11 |
-| HashiCorp Raft | 184 | 0 | 27 | 46 | 89 | 22 |
-| Total | 995 | 12 | 494 | 295 | 153 | 41 |
+| etcd/raft | 299 | 12 | 69 | 186 | 30 | 2 |
+| raft-rs | 263 | 0 | 93 | 155 | 7 | 8 |
+| OpenRaft | 286 | 0 | 21 | 207 | 47 | 11 |
+| HashiCorp Raft | 184 | 0 | 11 | 60 | 91 | 22 |
+| Total | 1032 | 12 | 194 | 608 | 175 | 43 |

@@ -4,9 +4,9 @@
 - Revision: `dd30865f162c68ee31130c7f8ee1047e9122f2ec`
 - License: MPL-2.0
 
-Only externally observable behavior is used. Tests are independently designed
-against raft-zig APIs without copying HashiCorp source, helpers, constants,
-assertions, or test structure.
+Only externally observable behavior is used. The inventory retains upstream
+symbol and subcase names for provenance, but does not copy source code,
+helpers, constants, assertions, or control flow.
 
 The inventory contains 94 high-level families, 16 commitment and configuration
 cases, 15 snapshot-store exclusions, and 59 stable parameterized subcases. The
