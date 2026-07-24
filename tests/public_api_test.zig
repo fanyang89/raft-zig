@@ -137,6 +137,15 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.ReadyPhase;
         _ = raft.NodeStatus;
         _ = raft.Raftor;
+        _ = raft.Fs;
+        _ = raft.FsError;
+        _ = raft.FileHandle;
+        _ = raft.FsOpenMode;
+        _ = raft.FsDirListing;
+        _ = raft.FsDirEntryKind;
+        _ = raft.realFileSystem;
+        _ = raft.WalFileSystem;
+        _ = raft.linuxWalFileSystem;
     }
 
     _ = try std.SemanticVersion.parse(raft.version);

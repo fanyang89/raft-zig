@@ -49,6 +49,7 @@ const proposal_tracker_mod = @import("proposal_tracker.zig");
 const raftor_config_mod = @import("raftor_config.zig");
 const ready_processor_mod = @import("ready_processor.zig");
 const raftor_mod = @import("raftor.zig");
+const fs_mod = @import("fs.zig");
 const wal_mod = @import("wal.zig");
 const codec_mod = @import("codec.zig");
 const loopback_transport_mod = @import("loopback_transport.zig");
@@ -204,6 +205,14 @@ pub const ReadyPhase = ready_processor_mod.ReadyPhase;
 pub const NodeStatus = raftor_mod.NodeStatus;
 pub const Raftor = raftor_mod.Raftor;
 
+pub const Fs = fs_mod.Fs;
+pub const FsError = fs_mod.Error;
+pub const FileHandle = fs_mod.Handle;
+pub const FsOpenMode = fs_mod.OpenMode;
+pub const FsDirListing = fs_mod.DirListing;
+pub const FsDirEntryKind = fs_mod.EntryKind;
+pub const realFileSystem = fs_mod.realFileSystem;
+
 pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;
 pub const WalFileSystem = wal_mod.WalFileSystem;
@@ -212,7 +221,7 @@ pub const WalFileHandle = wal_mod.WalFileHandle;
 pub const WalOpenMode = wal_mod.WalOpenMode;
 pub const WalDirListing = wal_mod.WalDirListing;
 pub const WalDirEntryKind = wal_mod.WalDirEntryKind;
-pub const linuxWalFileSystem = wal_mod.linuxWalFileSystem;
+pub const linuxWalFileSystem = realFileSystem;
 
 pub const encodeMessage = codec_mod.encodeMessage;
 pub const decodeMessage = codec_mod.decodeMessage;

@@ -49,7 +49,7 @@ pub const DirListing = struct {
     }
 };
 
-pub const FileSystem = struct {
+pub const Fs = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
@@ -68,28 +68,28 @@ pub const FileSystem = struct {
         sync_dir: *const fn (*anyopaque, [:0]const u8) Error!void,
     };
 
-    pub fn makeDir(self: FileSystem, path: [:0]const u8) Error!bool {
+    pub fn makeDir(self: Fs, path: [:0]const u8) Error!bool {
         while (true) return self.vtable.make_dir(self.ctx, path) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn listDir(self: FileSystem, allocator: std.mem.Allocator, path: [:0]const u8) Error!DirListing {
+    pub fn listDir(self: Fs, allocator: std.mem.Allocator, path: [:0]const u8) Error!DirListing {
         while (true) return self.vtable.list_dir(self.ctx, allocator, path) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn open(self: FileSystem, path: [:0]const u8, mode: OpenMode) Error!Handle {
+    pub fn open(self: Fs, path: [:0]const u8, mode: OpenMode) Error!Handle {
         while (true) return self.vtable.open(self.ctx, path, mode) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn preadAll(self: FileSystem, handle: Handle, buffer: []u8, offset: u64) Error!usize {
+    pub fn preadAll(self: Fs, handle: Handle, buffer: []u8, offset: u64) Error!usize {
         var read_len: usize = 0;
         while (read_len < buffer.len) {
             const current_offset = std.math.add(u64, offset, @intCast(read_len)) catch return error.ReadFailed;
@@ -104,7 +104,7 @@ pub const FileSystem = struct {
         return read_len;
     }
 
-    pub fn pwriteAll(self: FileSystem, handle: Handle, data: []const u8, offset: u64) Error!void {
+    pub fn pwriteAll(self: Fs, handle: Handle, data: []const u8, offset: u64) Error!void {
         var written: usize = 0;
         while (written < data.len) {
             const current_offset = std.math.add(u64, offset, @intCast(written)) catch return error.WriteFailed;
@@ -117,46 +117,46 @@ pub const FileSystem = struct {
         }
     }
 
-    pub fn fileSize(self: FileSystem, handle: Handle) Error!u64 {
+    pub fn fileSize(self: Fs, handle: Handle) Error!u64 {
         while (true) return self.vtable.file_size(self.ctx, handle) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn truncate(self: FileSystem, handle: Handle, len: u64) Error!void {
+    pub fn truncate(self: Fs, handle: Handle, len: u64) Error!void {
         while (true) return self.vtable.truncate(self.ctx, handle, len) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn syncFile(self: FileSystem, handle: Handle) Error!void {
+    pub fn syncFile(self: Fs, handle: Handle) Error!void {
         while (true) return self.vtable.sync_file(self.ctx, handle) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn close(self: FileSystem, handle: Handle) Error!void {
+    pub fn close(self: Fs, handle: Handle) Error!void {
         return self.vtable.close(self.ctx, handle);
     }
 
-    pub fn rename(self: FileSystem, old_path: [:0]const u8, new_path: [:0]const u8) Error!void {
+    pub fn rename(self: Fs, old_path: [:0]const u8, new_path: [:0]const u8) Error!void {
         while (true) return self.vtable.rename(self.ctx, old_path, new_path) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn unlink(self: FileSystem, path: [:0]const u8) Error!void {
+    pub fn unlink(self: Fs, path: [:0]const u8) Error!void {
         while (true) return self.vtable.unlink(self.ctx, path) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
         };
     }
 
-    pub fn syncDir(self: FileSystem, path: [:0]const u8) Error!void {
+    pub fn syncDir(self: Fs, path: [:0]const u8) Error!void {
         while (true) return self.vtable.sync_dir(self.ctx, path) catch |err| switch (err) {
             error.Interrupted => continue,
             else => return err,
@@ -166,9 +166,12 @@ pub const FileSystem = struct {
 
 var linux_context: u8 = 0;
 
-pub fn linuxFileSystem() FileSystem {
+pub fn realFileSystem() Fs {
     return .{ .ctx = &linux_context, .vtable = &linux_vtable };
 }
+
+pub const FileSystem = Fs;
+pub const linuxFileSystem = realFileSystem;
 
 fn linuxMakeDir(_: *anyopaque, path: [:0]const u8) Error!bool {
     const rc = linux.mkdir(path.ptr, 0o755);
@@ -330,7 +333,7 @@ fn linuxSyncDir(ctx: *anyopaque, path: [:0]const u8) Error!void {
     };
 }
 
-const linux_vtable: FileSystem.VTable = .{
+const linux_vtable: Fs.VTable = .{
     .make_dir = linuxMakeDir,
     .list_dir = linuxListDir,
     .open = linuxOpen,
@@ -345,10 +348,10 @@ const linux_vtable: FileSystem.VTable = .{
     .sync_dir = linuxSyncDir,
 };
 
-test "Linux WalFs round-trips files and directory listings" {
+test "RealFs round-trips files and directory listings" {
     const allocator = std.testing.allocator;
     const path = "/tmp/raft-zig-wal-fs-test";
-    const fs = linuxFileSystem();
+    const fs = realFileSystem();
     _ = fs.makeDir(path) catch {};
     defer {
         fs.unlink("/tmp/raft-zig-wal-fs-test/data") catch {};

@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs_mod = @import("fs.zig");
+const fs_mod = @import("../fs.zig");
 
 const types = @import("../core/types.zig");
 
@@ -13,9 +13,9 @@ const header_size: usize = 64;
 pub const SnapshotStore = struct {
     allocator: std.mem.Allocator,
     dir: [:0]u8,
-    fs: fs_mod.FileSystem,
+    fs: fs_mod.Fs,
 
-    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !SnapshotStore {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u8) !SnapshotStore {
         return .{
             .allocator = allocator,
             .dir = try allocator.dupeSentinel(u8, dir, 0),
@@ -76,7 +76,7 @@ pub const SnapshotStore = struct {
     }
 };
 
-pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) void {
+pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u8) void {
     var listing = fs.listDir(allocator, dir) catch return;
     defer listing.deinit();
     for (listing.entries.items) |entry| {
@@ -182,7 +182,7 @@ fn isSnapshotFilename(name: []const u8) bool {
 test "snapshot store round-trips complete snapshots" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-test";
-    const fs = fs_mod.linuxFileSystem();
+    const fs = fs_mod.realFileSystem();
     removeFiles(allocator, fs, dir);
     _ = try fs.makeDir(dir);
     defer {
@@ -218,7 +218,7 @@ test "snapshot store round-trips complete snapshots" {
 test "snapshot store rejects corruption and metadata mismatch" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-corruption-test";
-    const fs = fs_mod.linuxFileSystem();
+    const fs = fs_mod.realFileSystem();
     removeFiles(allocator, fs, dir);
     _ = try fs.makeDir(dir);
     defer {

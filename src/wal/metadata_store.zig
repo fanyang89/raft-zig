@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs_mod = @import("fs.zig");
+const fs_mod = @import("../fs.zig");
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
@@ -32,9 +32,9 @@ pub const MetadataStore = struct {
     dir: [:0]u8,
     path: [:0]u8,
     tmp_path: [:0]u8,
-    fs: fs_mod.FileSystem,
+    fs: fs_mod.Fs,
 
-    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !MetadataStore {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u8) !MetadataStore {
         const dir_copy = try allocator.dupeSentinel(u8, dir, 0);
         errdefer allocator.free(dir_copy);
         const path = try makePath(allocator, dir, "metadata");
@@ -91,7 +91,7 @@ pub const MetadataStore = struct {
     }
 };
 
-pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) void {
+pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u8) void {
     const path = makePath(allocator, dir, "metadata") catch return;
     defer allocator.free(path);
     const tmp_path = makePath(allocator, dir, "metadata.tmp") catch return;
@@ -186,7 +186,7 @@ fn makePath(allocator: std.mem.Allocator, dir: [:0]const u8, basename: []const u
 test "metadata store round-trips and rejects corruption" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-metadata-store-test";
-    const fs = fs_mod.linuxFileSystem();
+    const fs = fs_mod.realFileSystem();
     removeFiles(allocator, fs, dir);
     _ = try fs.makeDir(dir);
     defer {

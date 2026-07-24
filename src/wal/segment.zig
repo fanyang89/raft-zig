@@ -5,7 +5,7 @@
 //! It knows nothing about Raft records — that's the WAL layer's job.
 
 const std = @import("std");
-const fs_mod = @import("fs.zig");
+const fs_mod = @import("../fs.zig");
 
 const SEGMENT_HEADER_SIZE: usize = 32;
 const segment_magic: u32 = 0x57414C31; // "WAL1"
@@ -17,7 +17,7 @@ const format_version: u32 = 1;
 
 pub const Segment = struct {
     fd: ?fs_mod.Handle,
-    fs: fs_mod.FileSystem,
+    fs: fs_mod.Fs,
     segment_id: u64,
     first_index: u64,
     write_offset: u64,
@@ -29,7 +29,7 @@ pub const Segment = struct {
     /// Writes the 32-byte segment header. The file is opened O_CREAT|O_EXCL.
     pub fn create(
         allocator: std.mem.Allocator,
-        fs: fs_mod.FileSystem,
+        fs: fs_mod.Fs,
         dir: [:0]const u8,
         segment_id: u64,
         first_index: u64,
@@ -62,7 +62,7 @@ pub const Segment = struct {
 
     /// Open an existing segment file, read its header, and determine
     /// write_offset from the file size.
-    pub fn open(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, path: [:0]const u8) !*Segment {
+    pub fn open(allocator: std.mem.Allocator, fs: fs_mod.Fs, path: [:0]const u8) !*Segment {
         const fd = try fs.open(path, .read_write);
         errdefer fs.close(fd) catch {};
 
@@ -183,11 +183,11 @@ fn encodeHeader(out: *[SEGMENT_HEADER_SIZE]u8, segment_id: u64, first_index: u64
 // Directory helpers
 // ===========================================================================
 
-pub fn makeDir(fs: fs_mod.FileSystem, path: [:0]const u8) !bool {
+pub fn makeDir(fs: fs_mod.Fs, path: [:0]const u8) !bool {
     return fs.makeDir(path);
 }
 
-pub fn syncDirectory(fs: fs_mod.FileSystem, path: [:0]const u8) !void {
+pub fn syncDirectory(fs: fs_mod.Fs, path: [:0]const u8) !void {
     try fs.syncDir(path);
 }
 

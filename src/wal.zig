@@ -14,7 +14,7 @@ const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
 const segment_mod = @import("wal/segment.zig");
-const fs_mod = @import("wal/fs.zig");
+const fs_mod = @import("fs.zig");
 const segment_manager_mod = @import("wal/segment_manager.zig");
 const metadata_store_mod = @import("wal/metadata_store.zig");
 const snapshot_store_mod = @import("wal/snapshot_store.zig");
@@ -35,13 +35,21 @@ const cloneEntry = storage_mod.cloneEntry;
 const cloneConfState = storage_mod.cloneConfState;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 
-pub const WalFileSystem = fs_mod.FileSystem;
+pub const Fs = fs_mod.Fs;
+pub const FsError = fs_mod.Error;
+pub const FileHandle = fs_mod.Handle;
+pub const FsOpenMode = fs_mod.OpenMode;
+pub const FsDirListing = fs_mod.DirListing;
+pub const FsDirEntryKind = fs_mod.EntryKind;
+pub const realFileSystem = fs_mod.realFileSystem;
+
+pub const WalFileSystem = Fs;
 pub const WalFileSystemError = fs_mod.Error;
 pub const WalFileHandle = fs_mod.Handle;
 pub const WalOpenMode = fs_mod.OpenMode;
 pub const WalDirListing = fs_mod.DirListing;
 pub const WalDirEntryKind = fs_mod.EntryKind;
-pub const linuxWalFileSystem = fs_mod.linuxFileSystem;
+pub const linuxWalFileSystem = realFileSystem;
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
@@ -364,14 +372,14 @@ fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
 pub const WALConfig = struct {
     dir: [:0]const u8,
     segment_size: u64 = 64 * 1024 * 1024, // 64 MB default
-    fs: fs_mod.FileSystem = fs_mod.linuxFileSystem(),
+    fs: fs_mod.Fs = fs_mod.realFileSystem(),
 };
 
 pub const WAL = struct {
     allocator: std.mem.Allocator,
     dir: [:0]u8,
     segment_size: u64,
-    fs: fs_mod.FileSystem,
+    fs: fs_mod.Fs,
     segment_manager: segment_manager_mod.SegmentManager,
     metadata_store: metadata_store_mod.MetadataStore,
     snapshot_store: snapshot_store_mod.SnapshotStore,
@@ -955,7 +963,7 @@ pub const WALStorage = struct {
     allocator: std.mem.Allocator,
 
     pub fn open(allocator: std.mem.Allocator, dir: [:0]const u8) Error!*WALStorage {
-        return openWithFs(allocator, dir, fs_mod.linuxFileSystem());
+        return openWithFs(allocator, dir, fs_mod.realFileSystem());
     }
 
     pub fn openWithFs(allocator: std.mem.Allocator, dir: [:0]const u8, fs: WalFileSystem) Error!*WALStorage {
@@ -1216,11 +1224,11 @@ const linux = std.os.linux;
 
 fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
     // Best-effort: scan directory and delete segment files.
-    var sm = segment_manager_mod.SegmentManager.init(allocator, fs_mod.linuxFileSystem(), dir) catch return;
+    var sm = segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir) catch return;
     sm.removeAllSegments() catch {};
     sm.deinit();
-    metadata_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), dir);
-    snapshot_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), dir);
+    metadata_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), dir);
+    snapshot_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), dir);
     _ = linux.rmdir(dir.ptr);
 }
 
@@ -1250,19 +1258,19 @@ test "wal: segment discovery accepts a compacted prefix" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery";
     removeWALDir(allocator, dir);
-    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
 
     const metadata_path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery/metadata";
     try createEmptyFile(metadata_path);
     defer removeFile(metadata_path);
 
-    const segment2 = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 2, 10);
+    const segment2 = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
     segment2.destroy();
-    const segment3 = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 3, 20);
+    const segment3 = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 3, 20);
     segment3.destroy();
 
     {
-        var manager = try segment_manager_mod.SegmentManager.init(allocator, fs_mod.linuxFileSystem(), dir);
+        var manager = try segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir);
         defer manager.deinit();
         try std.testing.expectEqual(@as(usize, 2), manager.count());
         try std.testing.expectEqual(@as(u64, 2), manager.segments.items[0].id);
@@ -1280,49 +1288,49 @@ test "wal: segment discovery rejects a mismatched header id" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-id-mismatch";
     removeWALDir(allocator, dir);
-    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 2);
     defer allocator.free(path);
     defer removeFile(path);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 2, 10);
+    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
     var wrong_id: [8]u8 = undefined;
     std.mem.writeInt(u64, &wrong_id, 9, .little);
     const rc = linux.pwrite(@intCast(segment.fd.?), &wrong_id, wrong_id.len, 8);
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
     segment.destroy();
 
-    try std.testing.expectError(error.InvalidSegmentHeader, segment_manager_mod.SegmentManager.init(allocator, fs_mod.linuxFileSystem(), dir));
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir));
 }
 
 test "wal: segment rejects truncated header" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-truncated-header";
     removeWALDir(allocator, dir);
-    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 1);
     defer allocator.free(path);
     defer removeFile(path);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 1, 1);
+    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
     try segment.truncate(24);
     segment.destroy();
 
-    try std.testing.expectError(error.InvalidSegmentHeader, segment_mod.Segment.open(allocator, fs_mod.linuxFileSystem(), path));
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_mod.Segment.open(allocator, fs_mod.realFileSystem(), path));
 }
 
 test "wal: segment close is idempotent" {
     const allocator = std.testing.allocator;
     const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-close";
     removeWALDir(allocator, dir);
-    _ = try segment_mod.makeDir(fs_mod.linuxFileSystem(), dir);
+    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
     defer _ = linux.rmdir(dir.ptr);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.linuxFileSystem(), dir, 1, 1);
+    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
     defer {
         segment.unlink() catch {};
         segment.destroy();
@@ -1380,7 +1388,7 @@ test "wal: non-empty WAL without metadata fails closed" {
         try wal.sync();
     }
 
-    metadata_store_mod.removeFiles(allocator, fs_mod.linuxFileSystem(), path);
+    metadata_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), path);
 
     try std.testing.expectError(error.MetadataCorrupt, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
 

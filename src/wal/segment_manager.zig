@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const segment_mod = @import("segment.zig");
-const fs_mod = @import("fs.zig");
+const fs_mod = @import("../fs.zig");
 
 const Segment = segment_mod.Segment;
 
@@ -22,9 +22,9 @@ pub const SegmentManager = struct {
     directory_dirty: bool = false,
     dir: [:0]u8,
     allocator: std.mem.Allocator,
-    fs: fs_mod.FileSystem,
+    fs: fs_mod.Fs,
 
-    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.FileSystem, dir: [:0]const u8) !SegmentManager {
+    pub fn init(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u8) !SegmentManager {
         const dir_copy = try allocator.dupeSentinel(u8, dir, 0);
         var sm = SegmentManager{
             .segments = .empty,
