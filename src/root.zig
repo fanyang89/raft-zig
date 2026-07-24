@@ -50,6 +50,7 @@ const raftor_config_mod = @import("raftor_config.zig");
 const ready_processor_mod = @import("ready_processor.zig");
 const raftor_mod = @import("raftor.zig");
 const fs_mod = @import("fs.zig");
+const fs_testing_mod = @import("fs/testing.zig");
 const wal_mod = @import("wal.zig");
 const codec_mod = @import("codec.zig");
 const loopback_transport_mod = @import("loopback_transport.zig");
@@ -212,6 +213,8 @@ pub const FsOpenMode = fs_mod.OpenMode;
 pub const FsDirListing = fs_mod.DirListing;
 pub const FsDirEntryKind = fs_mod.EntryKind;
 pub const realFileSystem = fs_mod.realFileSystem;
+pub const FsTestBackend = fs_testing_mod.Backend;
+pub const FsTestFixture = fs_testing_mod.FsFixture;
 
 pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;

@@ -352,18 +352,18 @@ const linux_vtable: Fs.VTable = .{
 
 test "RealFs round-trips files and directory listings" {
     const allocator = std.testing.allocator;
-    const path = "/tmp/raft-zig-wal-fs-test";
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path}, 0);
+    defer allocator.free(path);
+    const file_path = try std.fmt.allocPrintSentinel(allocator, "{s}/data", .{path}, 0);
+    defer allocator.free(file_path);
     const fs = realFileSystem();
-    _ = fs.makeDir(path) catch {};
-    defer {
-        fs.unlink("/tmp/raft-zig-wal-fs-test/data") catch {};
-        _ = linux.rmdir("/tmp/raft-zig-wal-fs-test");
-    }
-    const handle = try fs.open("/tmp/raft-zig-wal-fs-test/data", .write_truncate);
+    const handle = try fs.open(file_path, .write_truncate);
     try fs.pwriteAll(handle, "data", 0);
     try fs.syncFile(handle);
     try fs.close(handle);
-    const read_handle = try fs.open("/tmp/raft-zig-wal-fs-test/data", .read_only);
+    const read_handle = try fs.open(file_path, .read_only);
     defer fs.close(read_handle) catch {};
     var data: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 4), try fs.preadAll(read_handle, &data, 0));

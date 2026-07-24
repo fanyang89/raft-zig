@@ -15,6 +15,7 @@ const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
 const segment_mod = @import("wal/segment.zig");
 const fs_mod = @import("fs.zig");
+const fs_testing = @import("fs/testing.zig");
 const segment_manager_mod = @import("wal/segment_manager.zig");
 const metadata_store_mod = @import("wal/metadata_store.zig");
 const snapshot_store_mod = @import("wal/snapshot_store.zig");
@@ -1222,16 +1223,6 @@ test "wal: confstate serialize/deserialize round-trip" {
 
 const linux = std.os.linux;
 
-fn removeWALDir(allocator: std.mem.Allocator, dir: [:0]const u8) void {
-    // Best-effort: scan directory and delete segment files.
-    var sm = segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir) catch return;
-    sm.removeAllSegments() catch {};
-    sm.deinit();
-    metadata_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), dir);
-    snapshot_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), dir);
-    _ = linux.rmdir(dir.ptr);
-}
-
 fn removeFile(path: [:0]const u8) void {
     _ = linux.unlink(path.ptr);
 }
@@ -1245,9 +1236,9 @@ fn createEmptyFile(path: [:0]const u8) !void {
 
 test "wal: empty storage exposes the initial term" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-initial-term";
-    removeWALDir(allocator, dir);
-    defer removeWALDir(allocator, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
 
     var wal = try WAL.open(allocator, .{ .dir = dir });
     defer wal.deinit();
@@ -1256,13 +1247,14 @@ test "wal: empty storage exposes the initial term" {
 
 test "wal: segment discovery accepts a compacted prefix" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery";
-    removeWALDir(allocator, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
     _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
 
-    const metadata_path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-discovery/metadata";
+    const metadata_path = try std.fmt.allocPrintSentinel(allocator, "{s}/metadata", .{dir}, 0);
+    defer allocator.free(metadata_path);
     try createEmptyFile(metadata_path);
-    defer removeFile(metadata_path);
 
     const segment2 = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
     segment2.destroy();
@@ -1279,21 +1271,17 @@ test "wal: segment discovery accepts a compacted prefix" {
         try std.testing.expectEqual(@as(u64, 4), next.segment_id);
         try manager.syncAll();
     }
-
-    removeFile(metadata_path);
-    removeWALDir(allocator, dir);
 }
 
 test "wal: segment discovery rejects a mismatched header id" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-id-mismatch";
-    removeWALDir(allocator, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
     _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
-    defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 2);
     defer allocator.free(path);
-    defer removeFile(path);
 
     const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
     var wrong_id: [8]u8 = undefined;
@@ -1307,14 +1295,13 @@ test "wal: segment discovery rejects a mismatched header id" {
 
 test "wal: segment rejects truncated header" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-truncated-header";
-    removeWALDir(allocator, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
     _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
-    defer _ = linux.rmdir(dir.ptr);
 
     const path = try segment_mod.makeFilename(allocator, dir, 1);
     defer allocator.free(path);
-    defer removeFile(path);
 
     const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
     try segment.truncate(24);
@@ -1325,10 +1312,10 @@ test "wal: segment rejects truncated header" {
 
 test "wal: segment close is idempotent" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-close";
-    removeWALDir(allocator, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
     _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
-    defer _ = linux.rmdir(dir.ptr);
 
     const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
     defer {
@@ -1347,8 +1334,9 @@ test "wal: segment close is idempotent" {
 
 test "wal: storage sync propagates a closed segment" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-sync-error";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         const storage = try WALStorage.open(allocator, path);
@@ -1356,8 +1344,6 @@ test "wal: storage sync propagates a closed segment" {
         storage.wal.segment_manager.getCurrent().?.close();
         try std.testing.expectError(error.SegmentNotOpen, storage.asWritableStorage().sync());
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: storage preserves I/O error categories" {
@@ -1372,8 +1358,9 @@ test "wal: storage preserves I/O error categories" {
 
 test "wal: non-empty WAL without metadata fails closed" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-recover";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1391,14 +1378,13 @@ test "wal: non-empty WAL without metadata fails closed" {
     metadata_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), path);
 
     try std.testing.expectError(error.MetadataCorrupt, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: compact removes old entries" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-compact";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1431,14 +1417,13 @@ test "wal: compact removes old entries" {
         // Entries below firstIndex are compacted.
         try std.testing.expectError(error.Compacted, wal.readEntries(allocator, 1, 3, null));
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: suffix overwrite is idempotent and restart-safe" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-overwrite";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
@@ -1485,14 +1470,13 @@ test "wal: suffix overwrite is idempotent and restart-safe" {
         try std.testing.expectEqualStrings("new-c", entries[2].data);
         try std.testing.expectEqual(@as(u64, 2), entries[2].term);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: compaction deletes only complete prefix segments" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-segment-compact";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
@@ -1520,14 +1504,13 @@ test "wal: compaction deletes only complete prefix segments" {
         try wal.sync();
         try std.testing.expectEqual(@as(u64, 6), wal.segment_manager.current_segment_id);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: compaction keeps a segment that crosses the boundary" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-straddling-compact";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1549,14 +1532,13 @@ test "wal: compaction keeps a segment that crosses the boundary" {
         try std.testing.expectEqual(@as(u64, 4), wal.lastIndex());
         try std.testing.expectEqual(@as(u64, 1), try wal.term(3));
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: WALStorage applyLocalSnapshot compacts" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-snap-compact";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1604,14 +1586,13 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
         }
         try std.testing.expectEqual(@as(usize, 2), entries.len);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: incoming snapshot replaces the previous log generation" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-incoming-snapshot";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1661,14 +1642,13 @@ test "wal: incoming snapshot replaces the previous log generation" {
         try iface.append(allocator, &.{.{ .index = 4, .term = 5, .data = @constCast("new") }});
         try iface.sync();
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery rejects a missing committed snapshot file" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-missing-snapshot";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1682,15 +1662,17 @@ test "wal: recovery rejects a missing committed snapshot file" {
         });
     }
 
-    removeFile("/tmp/raft-zig-wal-test-missing-snapshot/snapshot-1-2.snap");
+    const snapshot_path = try std.fmt.allocPrintSentinel(allocator, "{s}/snapshot-1-2.snap", .{path}, 0);
+    defer allocator.free(snapshot_path);
+    removeFile(snapshot_path);
     try std.testing.expectError(error.WalMetadataCorrupt, WALStorage.open(allocator, path));
-    removeWALDir(allocator, path);
 }
 
 test "wal: restart recovers entries and hardstate via WALStorage" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-restart";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     // First session: write entries + hardstate.
     {
@@ -1722,14 +1704,13 @@ test "wal: restart recovers entries and hardstate via WALStorage" {
         try std.testing.expectEqual(@as(u64, 1), rs_copy.hard_state.vote);
         try std.testing.expectEqual(@as(u64, 2), rs_copy.hard_state.commit);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: incarnation reservation survives metadata rewrites and restart" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-incarnation";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1754,14 +1735,13 @@ test "wal: incarnation reservation survives metadata rewrites and restart" {
         ws.wal.incarnation = std.math.maxInt(u64);
         try std.testing.expectError(error.IncarnationExhausted, ws.asWritableStorage().reserveIncarnation());
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery truncates a torn active tail" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-torn-tail";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1785,14 +1765,13 @@ test "wal: recovery truncates a torn active tail" {
         try wal.sync();
         try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery truncates a corrupt record envelope in the active tail" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-corrupt-tail-envelope";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1818,14 +1797,13 @@ test "wal: recovery truncates a corrupt record envelope in the active tail" {
         try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
         try std.testing.expectEqual(@as(u64, 2), wal.hard_state.commit);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery rejects corruption in a middle segment" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-middle-corruption";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 80 });
@@ -1844,13 +1822,13 @@ test "wal: recovery rejects corruption in a middle segment" {
     }
 
     try std.testing.expectError(error.CorruptEntryRecord, WAL.open(allocator, .{ .dir = path, .segment_size = 80 }));
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery rejects a committed suffix loss" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-committed-loss";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1869,13 +1847,13 @@ test "wal: recovery rejects a committed suffix loss" {
     }
 
     try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery rejects an entry index gap" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-entry-gap";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1892,13 +1870,13 @@ test "wal: recovery rejects an entry index gap" {
     }
 
     try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery rejects a duplicate entry index" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-entry-duplicate";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
@@ -1915,13 +1893,13 @@ test "wal: recovery rejects a duplicate entry index" {
     }
 
     try std.testing.expectError(error.Fatal, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
-    removeWALDir(allocator, path);
 }
 
 test "wal: recovery cleans up every allocation failure" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-recovery-oom";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
     {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
@@ -1948,13 +1926,13 @@ test "wal: recovery cleans up every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(allocator, Recovery.run, .{path});
-    removeWALDir(allocator, path);
 }
 
 test "wal: WALStorage vtable dispatches correctly" {
     const allocator = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/raft-zig-wal-test-vtable";
-    removeWALDir(allocator, path);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
 
     {
         var ws = try WALStorage.open(allocator, path);
@@ -1982,8 +1960,6 @@ test "wal: WALStorage vtable dispatches correctly" {
         defer rs_copy.deinit(allocator);
         try std.testing.expectEqual(@as(u64, 1), rs_copy.hard_state.commit);
     }
-
-    removeWALDir(allocator, path);
 }
 
 test "fuzz: WAL record and payload decoders" {

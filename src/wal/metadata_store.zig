@@ -1,5 +1,6 @@
 const std = @import("std");
 const fs_mod = @import("../fs.zig");
+const fs_testing = @import("../fs/testing.zig");
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
@@ -185,14 +186,11 @@ fn makePath(allocator: std.mem.Allocator, dir: [:0]const u8, basename: []const u
 
 test "metadata store round-trips and rejects corruption" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-metadata-store-test";
-    const fs = fs_mod.realFileSystem();
-    removeFiles(allocator, fs, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
+    const fs = fixture.fs();
     _ = try fs.makeDir(dir);
-    defer {
-        removeFiles(allocator, fs, dir);
-        _ = std.os.linux.rmdir(dir.ptr);
-    }
 
     var store = try MetadataStore.init(allocator, fs, dir);
     defer store.deinit();

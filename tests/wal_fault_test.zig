@@ -4,25 +4,14 @@ const fault = @import("harness/fault_fs.zig");
 
 const Fs = raft.Fs;
 
-fn cleanupDirectory(allocator: std.mem.Allocator, path: [:0]const u8) void {
-    const fs = raft.realFileSystem();
-    var listing = fs.listDir(allocator, path) catch return;
-    defer listing.deinit();
-    var child_buffer: [512]u8 = undefined;
-    for (listing.entries.items) |entry| {
-        const child = std.fmt.bufPrintZ(&child_buffer, "{s}/{s}", .{ path, entry.name }) catch continue;
-        fs.unlink(child) catch {};
-    }
-    _ = std.os.linux.rmdir(path.ptr);
-}
-
 test "FaultFs retries interrupted and short positional I/O" {
     const allocator = std.testing.allocator;
-    const path = "/tmp/raft-zig-scripted-wal-io";
-    const file_path = "/tmp/raft-zig-scripted-wal-io/data";
-    const base = raft.realFileSystem();
-    cleanupDirectory(allocator, path);
-    defer cleanupDirectory(allocator, path);
+    var fixture = try raft.FsTestFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    const file_path = try std.fmt.allocPrintSentinel(allocator, "{s}/data", .{path}, 0);
+    defer allocator.free(file_path);
+    const base = fixture.fs();
     _ = try base.makeDir(path);
     const write_handle = try base.open(file_path, .write_truncate);
 
@@ -85,12 +74,11 @@ test "FaultFs metadata faults recover an atomic incarnation" {
         .{ .operation = .sync_dir, .effect = .fail_after, .expected_incarnation = 2 },
     };
 
-    for (cases, 0..) |case, case_index| {
-        const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/raft-zig-scripted-wal-{d}", .{case_index}, 0);
-        defer allocator.free(path);
-        cleanupDirectory(allocator, path);
-        defer cleanupDirectory(allocator, path);
-        const base = raft.realFileSystem();
+    for (cases) |case| {
+        var fixture = try raft.FsTestFixture.init(allocator, .real);
+        defer fixture.deinit();
+        const path = fixture.walDir();
+        const base = fixture.fs();
 
         var initial = try raft.WAL.open(allocator, .{ .dir = path, .fs = base });
         try std.testing.expectEqual(@as(u64, 1), try initial.reserveIncarnation());

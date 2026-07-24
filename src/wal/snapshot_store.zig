@@ -1,5 +1,6 @@
 const std = @import("std");
 const fs_mod = @import("../fs.zig");
+const fs_testing = @import("../fs/testing.zig");
 
 const types = @import("../core/types.zig");
 
@@ -181,14 +182,11 @@ fn isSnapshotFilename(name: []const u8) bool {
 
 test "snapshot store round-trips complete snapshots" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-test";
-    const fs = fs_mod.realFileSystem();
-    removeFiles(allocator, fs, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
+    const fs = fixture.fs();
     _ = try fs.makeDir(dir);
-    defer {
-        removeFiles(allocator, fs, dir);
-        _ = std.os.linux.rmdir(dir.ptr);
-    }
 
     var store = try SnapshotStore.init(allocator, fs, dir);
     defer store.deinit();
@@ -217,14 +215,11 @@ test "snapshot store round-trips complete snapshots" {
 
 test "snapshot store rejects corruption and metadata mismatch" {
     const allocator = std.testing.allocator;
-    const dir: [:0]const u8 = "/tmp/raft-zig-snapshot-store-corruption-test";
-    const fs = fs_mod.realFileSystem();
-    removeFiles(allocator, fs, dir);
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
+    const fs = fixture.fs();
     _ = try fs.makeDir(dir);
-    defer {
-        removeFiles(allocator, fs, dir);
-        _ = std.os.linux.rmdir(dir.ptr);
-    }
 
     var store = try SnapshotStore.init(allocator, fs, dir);
     defer store.deinit();

@@ -1,5 +1,5 @@
 const std = @import("std");
-const raft = @import("raft_zig");
+const fs_mod = @import("../fs.zig");
 
 pub const Backend = enum {
     real,
@@ -30,8 +30,8 @@ pub const FsFixture = struct {
         self.* = undefined;
     }
 
-    pub fn fs(_: *const FsFixture) raft.Fs {
-        return raft.realFileSystem();
+    pub fn fs(_: *const FsFixture) fs_mod.Fs {
+        return fs_mod.realFileSystem();
     }
 
     pub fn root(self: *const FsFixture) [:0]const u8 {

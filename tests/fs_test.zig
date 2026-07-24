@@ -1,11 +1,10 @@
 const std = @import("std");
 const raft = @import("raft_zig");
-const fixture_mod = @import("harness/fs_fixture.zig");
 
 const allocator = std.testing.allocator;
 
-fn runFsContract(backend: fixture_mod.Backend) !void {
-    var fixture = try fixture_mod.FsFixture.init(allocator, backend);
+fn runFsContract(backend: raft.FsTestBackend) !void {
+    var fixture = try raft.FsTestFixture.init(allocator, backend);
     defer fixture.deinit();
     const fs = fixture.fs();
     const dir = fixture.walDir();
@@ -49,8 +48,8 @@ fn runFsContract(backend: fixture_mod.Backend) !void {
     try fs.syncDir(dir);
 }
 
-fn runWalRoundTrip(backend: fixture_mod.Backend) !void {
-    var fixture = try fixture_mod.FsFixture.init(allocator, backend);
+fn runWalRoundTrip(backend: raft.FsTestBackend) !void {
+    var fixture = try raft.FsTestFixture.init(allocator, backend);
     defer fixture.deinit();
 
     var wal = try raft.WAL.open(allocator, .{ .dir = fixture.walDir(), .fs = fixture.fs() });

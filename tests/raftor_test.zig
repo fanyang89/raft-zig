@@ -6,7 +6,6 @@
 const std = @import("std");
 const raft = @import("raft_zig");
 const fault = @import("harness/fault_fs.zig");
-const fixture_mod = @import("harness/fs_fixture.zig");
 
 const allocator = std.testing.allocator;
 const Raftor = raft.Raftor;
@@ -243,10 +242,6 @@ fn makeConfig(id: u64) RaftorConfig {
     rc.raft.heartbeat_tick = 1;
     rc.raft.election_timeout_seed = id * 999;
     return rc;
-}
-
-fn removeTestDir(path: []const u8) void {
-    std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
 }
 
 const ProposalTester = struct {
@@ -1022,7 +1017,7 @@ test "raftor: advanced commit survives restart" {
 }
 
 test "raftor: configured filesystem is used for WAL storage" {
-    var fixture = try fixture_mod.FsFixture.init(allocator, .real);
+    var fixture = try raft.FsTestFixture.init(allocator, .real);
     defer fixture.deinit();
     var backend = fault.FaultFs.init(fixture.fs());
     backend.inject(.{ .operation = .make_dir, .occurrence = 1, .effect = .fail_before });
@@ -1040,11 +1035,11 @@ test "raftor: configured filesystem is used for WAL storage" {
 }
 
 test "raftor: WAL restart restores snapshot before replaying its suffix" {
-    const path = "/tmp/raft-zig-raftor-snapshot-restart";
-    removeTestDir(path);
-    defer removeTestDir(path);
+    var fixture = try raft.FsTestFixture.init(allocator, .real);
+    defer fixture.deinit();
     var config = makeConfig(1);
-    config.data_dir = path;
+    config.data_dir = fixture.walDir();
+    config.file_system = fixture.fs();
     config.snapshot_entries_threshold = 0;
 
     var snapshot_index: u64 = 0;
@@ -1107,9 +1102,7 @@ test "raftor: WAL restart restores snapshot before replaying its suffix" {
     }
 
     {
-        const path_z = try allocator.dupeZ(u8, path);
-        defer allocator.free(path_z);
-        var storage = try raft.WALStorage.open(allocator, path_z);
+        var storage = try raft.WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
         defer storage.deinit();
         const iface = storage.asWritableStorage();
         const first = try iface.firstIndex();
