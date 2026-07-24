@@ -275,8 +275,8 @@ test "MarionetteFs satisfies the filesystem contract" {
     try std.testing.expectEqual(@as(u64, 6), try fs.fileSize(handle));
     try fs.truncate(handle, 4);
     try fs.syncFile(handle);
-    try fs.close(handle);
     handle_open = false;
+    try fs.close(handle);
 
     const read_handle = try fs.open("contract/data", .read_only);
     defer fs.close(read_handle) catch {};

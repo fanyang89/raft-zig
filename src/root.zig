@@ -17,6 +17,7 @@
 //!     `wal`, `rpc`) will be added under `src/` as they are ported.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const version_info = @import("version.zig");
 const primitives = @import("core/primitives.zig");
@@ -213,8 +214,9 @@ pub const FsOpenMode = fs_mod.OpenMode;
 pub const FsDirListing = fs_mod.DirListing;
 pub const FsDirEntryKind = fs_mod.EntryKind;
 pub const realFileSystem = fs_mod.realFileSystem;
-pub const FsTestBackend = fs_testing_mod.Backend;
-pub const FsTestFixture = fs_testing_mod.FsFixture;
+
+pub const FsTestBackend = if (builtin.is_test) fs_testing_mod.Backend else void;
+pub const FsTestFixture = if (builtin.is_test) fs_testing_mod.FsFixture else void;
 
 pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;

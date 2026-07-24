@@ -144,8 +144,6 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.FsDirListing;
         _ = raft.FsDirEntryKind;
         _ = raft.realFileSystem;
-        _ = raft.FsTestBackend;
-        _ = raft.FsTestFixture;
         _ = raft.WalFileSystem;
         _ = raft.linuxWalFileSystem;
     }

@@ -25,8 +25,8 @@ fn runFsContract(backend: raft.FsTestBackend) !void {
     try std.testing.expectEqual(@as(u64, 6), try fs.fileSize(write_handle));
     try fs.truncate(write_handle, 4);
     try fs.syncFile(write_handle);
-    try fs.close(write_handle);
     write_open = false;
+    try fs.close(write_handle);
 
     const read_handle = try fs.open(path, .read_only);
     defer fs.close(read_handle) catch {};
@@ -53,7 +53,10 @@ fn runWalRoundTrip(backend: raft.FsTestBackend) !void {
     defer fixture.deinit();
 
     var wal = try raft.WAL.open(allocator, .{ .dir = fixture.walDir(), .fs = fixture.fs() });
+    var wal_open = true;
+    defer if (wal_open) wal.deinit();
     try std.testing.expectEqual(@as(u64, 1), try wal.reserveIncarnation());
+    wal_open = false;
     wal.deinit();
 
     var reopened = try raft.WAL.open(allocator, .{ .dir = fixture.walDir(), .fs = fixture.fs() });

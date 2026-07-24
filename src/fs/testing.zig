@@ -1,8 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const fs_mod = @import("../fs.zig");
 
+comptime {
+    std.debug.assert(builtin.is_test);
+}
+
 pub const Backend = enum {
+    /// Host filesystem rooted at a unique std.testing.tmpDir directory.
     real,
+    /// Same RealFs implementation, rooted at a unique /dev/shm directory.
     tmpfs,
 };
 
@@ -45,12 +52,7 @@ pub const FsFixture = struct {
     fn initReal(allocator: std.mem.Allocator) !FsFixture {
         var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp_dir.cleanup();
-        const root_path = try std.fmt.allocPrintSentinel(
-            allocator,
-            ".zig-cache/tmp/{s}",
-            .{tmp_dir.sub_path},
-            0,
-        );
+        const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
         errdefer allocator.free(root_path);
         const wal_path = try std.fmt.allocPrintSentinel(allocator, "{s}/wal", .{root_path}, 0);
         return .{
@@ -69,7 +71,10 @@ pub const FsFixture = struct {
         _ = std.base64.url_safe.Encoder.encode(&encoded, &random_bytes);
         const root_path = try std.fmt.allocPrintSentinel(allocator, "/dev/shm/raft-zig-{s}", .{encoded}, 0);
         errdefer allocator.free(root_path);
-        std.Io.Dir.cwd().createDir(std.testing.io, root_path, .default_dir) catch return error.SkipZigTest;
+        std.Io.Dir.cwd().createDir(std.testing.io, root_path, .default_dir) catch |err| return switch (err) {
+            error.FileNotFound => error.SkipZigTest,
+            else => |other| other,
+        };
         errdefer std.Io.Dir.cwd().deleteTree(std.testing.io, root_path) catch {};
         const wal_path = try std.fmt.allocPrintSentinel(allocator, "{s}/wal", .{root_path}, 0);
         return .{

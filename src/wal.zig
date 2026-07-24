@@ -1250,19 +1250,19 @@ test "wal: segment discovery accepts a compacted prefix" {
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
     defer fixture.deinit();
     const dir = fixture.walDir();
-    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
+    _ = try segment_mod.makeDir(fixture.fs(), dir);
 
     const metadata_path = try std.fmt.allocPrintSentinel(allocator, "{s}/metadata", .{dir}, 0);
     defer allocator.free(metadata_path);
     try createEmptyFile(metadata_path);
 
-    const segment2 = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
+    const segment2 = try segment_mod.Segment.create(allocator, fixture.fs(), dir, 2, 10);
     segment2.destroy();
-    const segment3 = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 3, 20);
+    const segment3 = try segment_mod.Segment.create(allocator, fixture.fs(), dir, 3, 20);
     segment3.destroy();
 
     {
-        var manager = try segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir);
+        var manager = try segment_manager_mod.SegmentManager.init(allocator, fixture.fs(), dir);
         defer manager.deinit();
         try std.testing.expectEqual(@as(usize, 2), manager.count());
         try std.testing.expectEqual(@as(u64, 2), manager.segments.items[0].id);
@@ -1278,19 +1278,19 @@ test "wal: segment discovery rejects a mismatched header id" {
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
     defer fixture.deinit();
     const dir = fixture.walDir();
-    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
+    _ = try segment_mod.makeDir(fixture.fs(), dir);
 
     const path = try segment_mod.makeFilename(allocator, dir, 2);
     defer allocator.free(path);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 2, 10);
+    const segment = try segment_mod.Segment.create(allocator, fixture.fs(), dir, 2, 10);
     var wrong_id: [8]u8 = undefined;
     std.mem.writeInt(u64, &wrong_id, 9, .little);
     const rc = linux.pwrite(@intCast(segment.fd.?), &wrong_id, wrong_id.len, 8);
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
     segment.destroy();
 
-    try std.testing.expectError(error.InvalidSegmentHeader, segment_manager_mod.SegmentManager.init(allocator, fs_mod.realFileSystem(), dir));
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_manager_mod.SegmentManager.init(allocator, fixture.fs(), dir));
 }
 
 test "wal: segment rejects truncated header" {
@@ -1298,16 +1298,16 @@ test "wal: segment rejects truncated header" {
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
     defer fixture.deinit();
     const dir = fixture.walDir();
-    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
+    _ = try segment_mod.makeDir(fixture.fs(), dir);
 
     const path = try segment_mod.makeFilename(allocator, dir, 1);
     defer allocator.free(path);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
+    const segment = try segment_mod.Segment.create(allocator, fixture.fs(), dir, 1, 1);
     try segment.truncate(24);
     segment.destroy();
 
-    try std.testing.expectError(error.InvalidSegmentHeader, segment_mod.Segment.open(allocator, fs_mod.realFileSystem(), path));
+    try std.testing.expectError(error.InvalidSegmentHeader, segment_mod.Segment.open(allocator, fixture.fs(), path));
 }
 
 test "wal: segment close is idempotent" {
@@ -1315,9 +1315,9 @@ test "wal: segment close is idempotent" {
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
     defer fixture.deinit();
     const dir = fixture.walDir();
-    _ = try segment_mod.makeDir(fs_mod.realFileSystem(), dir);
+    _ = try segment_mod.makeDir(fixture.fs(), dir);
 
-    const segment = try segment_mod.Segment.create(allocator, fs_mod.realFileSystem(), dir, 1, 1);
+    const segment = try segment_mod.Segment.create(allocator, fixture.fs(), dir, 1, 1);
     defer {
         segment.unlink() catch {};
         segment.destroy();
@@ -1375,7 +1375,7 @@ test "wal: non-empty WAL without metadata fails closed" {
         try wal.sync();
     }
 
-    metadata_store_mod.removeFiles(allocator, fs_mod.realFileSystem(), path);
+    metadata_store_mod.removeFiles(allocator, fixture.fs(), path);
 
     try std.testing.expectError(error.MetadataCorrupt, WAL.open(allocator, .{ .dir = path, .segment_size = 4096 }));
 }
