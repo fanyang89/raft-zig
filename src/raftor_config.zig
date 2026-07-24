@@ -1,8 +1,7 @@
 //! Configuration for the Raftor orchestration layer.
 //!
-//! Ports `include/raftpp/raftor/raftor_config.h`. Wraps a `raft.Config` and
-//! adds orchestration knobs: node identity, listen address, initial peers,
-//! tick interval, snapshot thresholds.
+//! Wraps a `raft.Config` and adds orchestration knobs: node identity, listen
+//! address, initial peers, tick interval, snapshot thresholds.
 
 const std = @import("std");
 

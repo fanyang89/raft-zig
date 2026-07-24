@@ -1,8 +1,7 @@
 //! Proposal and read-index tracking with callbacks.
 //!
-//! Ports `include/raftpp/raftor/proposal_tracker.h`. When a user proposes
-//! data or requests a read-index, the tracker registers a callback keyed by
-//! the entry's context bytes. When the corresponding entry is applied (or
+//! When a user proposes data or requests a read-index, the tracker registers a
+//! callback keyed by the entry's context bytes. When the corresponding entry is applied (or
 //! the read-index is confirmed), the callback fires.
 //!
 //! Thread safety is omitted: Zig 0.16's single-threaded event loop model

@@ -1,6 +1,5 @@
 //! In-memory buffer for entries not yet persisted to Storage.
 //!
-//! Ports `include/raftpp/core/unstable_log.h` and `lib/core/unstable_log.cc`.
 //! `Unstable` is the write-back buffer sitting in front of `Storage`. It
 //! tracks entries with indices `>= offset` plus an optional pending snapshot.
 //! RaftLog delegates term/first/last queries to it before falling through to
@@ -93,7 +92,7 @@ pub const Unstable = struct {
 
     /// Mark the current tail entries as persisted. The contract asserts that
     /// the caller-supplied `(index, term)` exactly matches the in-memory tail;
-    /// mismatches panic, matching raftpp's `PANIC`/`ASSERT` behavior.
+    /// mismatches panic.
     pub fn stableEntries(self: *Unstable, index: u64, term: u64) void {
         std.debug.assert(self.snapshot == null);
         if (self.entries.items.len == 0) {

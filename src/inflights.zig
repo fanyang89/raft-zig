@@ -1,8 +1,7 @@
 //! In-flight message tracker for Raft replication.
 //!
-//! Ports `include/raftpp/core/inflights.h` and `lib/core/inflights.cc`. The
-//! tracker is a fixed-capacity ring buffer of entry indices that the leader
-//! has sent to a follower but not yet seen acknowledged. Capacity can be
+//! The tracker is a fixed-capacity ring buffer of entry indices that the
+//! leader has sent to a follower but not yet seen acknowledged. Capacity can be
 //! resized at runtime; the buffer is lazily allocated on the first `add`.
 
 const std = @import("std");
@@ -128,7 +127,7 @@ pub const Inflights = struct {
     }
 
     /// Append `inflight` to the ring. Panics if the buffer is full — callers
-    /// must check `full()` first, matching raftpp's `PANIC("inflights full")`.
+    /// must check `full()` first.
     pub fn add(self: *Inflights, allocator: std.mem.Allocator, inflight: u64) !void {
         if (self.full()) {
             @panic("inflights full");

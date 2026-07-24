@@ -1,10 +1,9 @@
-//! Plain Zig structs mirroring the raftpp Cap'n Proto message types.
+//! Plain owned Zig structs for Raft wire and in-memory types.
 //!
-//! raftpp binds its wire types to Cap'n Proto generated structs via the aliases
-//! in `core/types.h`. raft-zig keeps the same field names and shapes but uses
-//! owned Zig structs so the core consensus logic has no external schema
-//! dependency. A future `codec` module can serialize these structs onto the
-//! wire (protobuf, capnp, or a custom framing) without changing the core API.
+//! Field names and shapes follow the conventional Raft message layout. The
+//! core consensus logic has no external schema dependency; a future `codec`
+//! module can serialize these structs onto the wire (protobuf, capnp, or a
+//! custom framing) without changing the core API.
 
 const std = @import("std");
 
@@ -13,15 +12,14 @@ const primitives = @import("primitives.zig");
 pub const invalid_index = primitives.invalid_index;
 pub const invalid_id = primitives.invalid_id;
 
-/// Raft log entry kind. Mirrors `EntryType` in `proto/raftpp.capnp`.
+/// Raft log entry kind.
 pub const EntryType = enum(u8) {
     normal = 0,
     conf_change = 1,
     conf_change_v2 = 2,
 };
 
-/// Internal Raft message kind. Mirrors `MessageType` in `proto/raftpp.capnp`.
-/// The numeric values are stable on the wire.
+/// Internal Raft message kind. The numeric values are stable on the wire.
 pub const MessageType = enum(u8) {
     hup = 0,
     beat = 1,

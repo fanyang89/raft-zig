@@ -1,4 +1,4 @@
-//! Quorum math tests, ported from `ref/raftpp/tests/datadriven/quorum_test.cc`.
+//! Quorum math tests.
 //!
 //! Each test case is a parameterized row mirroring a directive in the original
 //! testdata files. We exercise `MajorityConfig`, `JointConfiguration`, both

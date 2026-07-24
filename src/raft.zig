@@ -1,11 +1,5 @@
 //! Raft consensus state machine.
 //!
-//! Ports `include/raftpp/core/raft.h`, `lib/core/raft.cc`,
-//! `include/raftpp/core/raft_core.h`, and `lib/core/raft_core.cc` into a
-//! single Zig struct. raftpp splits the implementation across a `RaftCore`
-//! base class (shared helpers) and a `Raft` subclass (the FSM); Zig has no
-//! inheritance, so both are merged here.
-//!
 //! The state machine is single-threaded by contract. Callers drive it via
 //! `step(message)` (push an inbound message) and `tick()` (advance time by one
 //! tick). Outbound messages accumulate in `self.messages`; the integrator is
@@ -73,7 +67,7 @@ const SoftState = @import("core/state_role.zig").SoftState;
 const log = std.log.scoped(.raft_zig);
 
 // ===========================================================================
-// Campaign type strings (mirror raftpp's constants)
+// Campaign type strings.
 // ===========================================================================
 
 pub const campaign_pre_election = "CampaignPreElection";
@@ -87,7 +81,7 @@ pub const CampaignType = enum { pre_election, election, transfer };
 // ===========================================================================
 
 /// Tracks the total bytes of uncommitted entries so a leader doesn't accept
-/// an unbounded backlog. Ports `UncommittedState` from raftpp.
+/// an unbounded backlog.
 pub const UncommittedState = struct {
     max_uncommitted_size: u64,
     uncommitted_size: u64 = 0,
@@ -1792,7 +1786,7 @@ pub const Raft = struct {
     fn resetRandomizedElectionTimeout(self: *Raft) void {
         const lo = self.min_election_timeout;
         const hi = self.max_election_timeout;
-        // [lo, hi - 1] inclusive, matching raftpp.
+        // [lo, hi - 1] inclusive.
         const span = if (hi > lo) hi - lo else 1;
         const r = self.prng.random().uintLessThan(usize, span);
         const t = lo + r;

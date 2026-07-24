@@ -1,6 +1,5 @@
 //! Top-level cluster configuration wrapper.
 //!
-//! Ports `include/raftpp/core/tracker_conf.h` and `lib/core/tracker_conf.cc`.
 //! `TrackerConfiguration` layers learners on top of `JointConfiguration`:
 //!   * `voters` (incoming/outgoing majorities)
 //!   * `learners` (current learner set)

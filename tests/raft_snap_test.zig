@@ -1,8 +1,6 @@
 //! Raft snapshot lifecycle tests.
 //!
-//! Ports key scenarios from `ref/raftpp/tests/raft_snap_test.cc` — the
-//! snapshot installation, abort, and tracker-rebuild paths that are currently
-//! 100% uncovered in raft-zig.
+//! Snapshot installation, abort, and tracker-rebuild paths.
 
 const std = @import("std");
 const raft = @import("raft_zig");

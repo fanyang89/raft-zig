@@ -1,6 +1,5 @@
 //! Membership change logic: enter/leave joint consensus, simple add/remove.
 //!
-//! Ports `include/raftpp/core/conf_changer.h` and `lib/core/conf_changer.cc`.
 //! `ConfChanger` is given a `ProgressTracker` reference and produces a new
 //! `(TrackerConfiguration, MapChange)` pair without mutating the tracker.
 //! The caller invokes `ProgressTracker.applyConf` to commit the result.
@@ -78,7 +77,7 @@ pub const IncrChangeMap = struct {
     }
 };
 
-/// Validate a proposed configuration against raftpp's invariants:
+/// Validate a proposed configuration against these invariants:
 ///   * every voter/learner has a Progress entry
 ///   * a learner can't also be a voter
 ///   * learners_next must remain within outgoing voters

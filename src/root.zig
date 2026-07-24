@@ -4,7 +4,7 @@
 //! applications and integrations depend on. Lower-level modules are also
 //! exported for experimentation but may evolve before 1.0.
 //!
-//! The port mirrors the layered architecture of raftpp:
+//! Layered architecture:
 //!   * `core/`     — plain data types, errors, roles, status snapshots, and
 //!                    entry-sizing utilities.
 //!   * `inflights` — per-follower in-flight tracking ring buffer.
@@ -13,8 +13,9 @@
 //!   * `storage` / `memory_storage` — `Storage` / `WritableStorage` vtables
 //!     and the default in-memory backend.
 //!   * `read_only` — linearizable read-index queue.
-//!   * Future layers (`log`, `progress`, `raft`, `raw_node`, `raftor`,
-//!     `wal`, `rpc`) will be added under `src/` as they are ported.
+//!   * `log`, `progress`, `raft`, `raw_node`, `raftor`, `wal`, `rpc` — the
+//!     consensus log, replication tracking, state machine, user-facing API,
+//!     orchestration loop, write-ahead log, and pluggable transport.
 
 const std = @import("std");
 const builtin = @import("builtin");

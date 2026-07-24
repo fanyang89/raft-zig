@@ -1,8 +1,8 @@
 //! Storage interface and entry-query context types.
 //!
-//! Ports `include/raftpp/core/storage.h` and `lib/core/storage.cc`. Raft core
-//! uses `Storage` for read-only access; the orchestration layer persists
-//! entries, hardstate, and snapshots via `WritableStorage`. The interface is a
+//! Raft core uses `Storage` for read-only access; the orchestration layer
+//! persists entries, hardstate, and snapshots via `WritableStorage`. The
+//! interface is a
 //! vtable struct so custom backends (`MemoryStorage`, `WALStorage`, user
 //! implementations) plug in without inheritance.
 
@@ -139,8 +139,8 @@ pub const GetEntriesContext = union(GetEntriesFor) {
     commit_by_vote: void,
     empty: struct { can_async: bool },
 
-    /// Mirrors `GetEntriesContext::CanAsync()` in raftpp. Only `send_append`
-    /// and `empty.can_async = true` may trigger async LogTemporarilyUnavailable.
+    /// Only `send_append` and `empty.can_async = true` may trigger async
+    /// LogTemporarilyUnavailable.
     pub fn canAsync(self: GetEntriesContext) bool {
         return switch (self) {
             .empty => |e| e.can_async,

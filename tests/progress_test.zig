@@ -2,8 +2,7 @@
 //!
 //! Per-follower Progress behavior is covered inline in `src/progress.zig`.
 //! This file adds higher-level scenarios that exercise Progress inside a
-//! ProgressTracker, mirroring the integration cases in raftpp's
-//! `tests/progress_test.cc`.
+//! ProgressTracker.
 
 const std = @import("std");
 const raft = @import("raft_zig");

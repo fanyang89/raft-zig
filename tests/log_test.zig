@@ -1,4 +1,4 @@
-//! RaftLog integration suite, ported from `ref/raftpp/tests/log_test.cc`.
+//! RaftLog integration suite.
 //!
 //! Each test case constructs a fresh MemoryStorage + RaftLog and exercises one
 //! aspect of the log contract: append/commit/slice/term/restore/maybeAppend/

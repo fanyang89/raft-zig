@@ -1,8 +1,7 @@
 //! Raft node configuration + validation.
 //!
-//! Ports `include/raftpp/core/raft_config.h` and `lib/core/raft_config.cc`.
-//! Holds the user-tunable knobs that `Raft.init` consumes. `Validate` mirrors
-//! raftpp's checks and returns the first violation as a Zig error.
+//! Holds the user-tunable knobs that `Raft.init` consumes. `validate` checks
+//! invariants and returns the first violation as a Zig error.
 
 const std = @import("std");
 
@@ -13,11 +12,10 @@ const primitives = @import("core/primitives.zig");
 const Error = error_model.Error;
 const ReadOnlyOption = read_only_mod.ReadOnlyOption;
 
-/// Default heartbeat spacing in ticks. Mirrors `kHeartbeatTick` in raftpp.
+/// Default heartbeat spacing in ticks.
 pub const default_heartbeat_tick: usize = 2;
 
-/// A full Raft configuration. Field names mirror raftpp's `Config` struct so
-/// the public API stays familiar.
+/// A full Raft configuration.
 pub const Config = struct {
     /// Node identity. Must be non-zero and present in the initial peer set.
     id: u64 = 0,
@@ -96,7 +94,7 @@ pub const Config = struct {
     }
 };
 
-/// Mirrors `DefaultConfig()` in raftpp: zeroed id, safe defaults. Tests use
+/// Safe default configuration: zeroed id and conservative defaults. Tests use
 /// this and then patch `id` and `election_tick`/`heartbeat_tick` as needed.
 pub fn defaultConfig() Config {
     return .{};

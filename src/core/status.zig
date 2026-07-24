@@ -1,8 +1,7 @@
 //! Public Status snapshot of a Raft node.
 //!
-//! Mirrors `Status` in `include/raftpp/core/status.h`. The `progress` field is
-//! left as an opaque pointer for now; the `ProgressTracker` module fills it in
-//! once that layer is ported.
+//! The `progress` field is left as an opaque pointer; the `ProgressTracker`
+//! module fills it in.
 
 const std = @import("std");
 

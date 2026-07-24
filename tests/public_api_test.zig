@@ -161,7 +161,7 @@ test "default message type is hup" {
     try std.testing.expectEqual(raft.MessageType.hup, m.msg_type);
 }
 
-test "get entries context canAsync mirrors raftpp" {
+test "get entries context canAsync flag" {
     try std.testing.expectEqual(true, raft.GetEntriesContext.empty_(true).canAsync());
     try std.testing.expectEqual(false, raft.GetEntriesContext.empty_(false).canAsync());
 }

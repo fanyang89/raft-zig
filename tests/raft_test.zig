@@ -1,7 +1,6 @@
 //! Raft FSM integration tests.
 //!
-//! Subset of `ref/raftpp/tests/raft_test.cc` and `raft_paper_test.cc`, run
-//! through the lightweight Network harness in `tests/harness/network.zig`.
+//! Run through the lightweight Network harness in `tests/harness/network.zig`.
 //! These tests verify the core scenarios: leader election, log replication,
 //! single-node commit, candidate concede, leader election in one round RPC,
 //! the Figure-8 commit rule, and dynamic membership add.

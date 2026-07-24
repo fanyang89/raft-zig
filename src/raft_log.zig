@@ -1,8 +1,8 @@
 //! Combined log view over an Unstable buffer and a durable Storage.
 //!
-//! Ports `include/raftpp/core/raft_log.h` and `lib/core/raft_log.cc`. RaftLog
-//! is the consensus layer's log abstraction: it stitches together an in-memory
-//! `Unstable` buffer (uncommitted entries + pending snapshot) with a pluggable
+//! RaftLog is the consensus layer's log abstraction: it stitches together an
+//! in-memory `Unstable` buffer (uncommitted entries + pending snapshot) with a
+//! pluggable
 //! read-only `Storage` backend (MemoryStorage, WAL, custom).
 //!
 //! All entries returned from this module are freshly allocated clones; the
@@ -57,9 +57,7 @@ pub const RaftLog = struct {
     max_apply_unpersisted_log_limit: u64,
     allocator: std.mem.Allocator,
 
-    /// Construct from a Storage and the unpersisted-log apply limit from
-    /// raftpp's `Config`. The full `Config` struct is ported with the raft
-    /// state machine in a later phase.
+    /// Construct from a Storage and the unpersisted-log apply limit.
     pub fn init(
         allocator: std.mem.Allocator,
         store: Storage,

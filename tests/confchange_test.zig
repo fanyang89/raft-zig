@@ -1,4 +1,4 @@
-//! ConfChanger tests, ported from `ref/raftpp/tests/datadriven/confchange_test.cc`.
+//! ConfChanger tests.
 //!
 //! The original testdata files use a textual directive DSL (e.g.
 //! `simple v1 l2 r3`). We inline the same scenarios as Zig parameterized
@@ -222,8 +222,7 @@ test "confchange: joint_learners_next promoted on leave" {
     try simpleOk(&tr, &.{"v2"}, 0);
 
     // Enter joint: demote 1 to learner_next while removing from incoming.
-    // Per raftpp semantics, MakeLearner on a voter in outgoing puts it in
-    // learners_next.
+    // MakeLearner on a voter in outgoing puts it in learners_next.
     try enterJointOk(&tr, false, &.{"l1"}, 0);
     try std.testing.expect(tr.conf.learners_next.contains(1));
 

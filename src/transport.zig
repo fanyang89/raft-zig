@@ -1,8 +1,7 @@
 //! Pluggable transport interface for Raft message passing.
 //!
-//! Ports `include/raftpp/raftor/rpc/transport.h`. The transport routes
-//! outbound messages by their `to` field and invokes a callback for inbound
-//! messages. `NoopTransport` is a process-local implementation that collects
+//! The transport routes outbound messages by their `to` field and invokes a
+//! callback for inbound messages. `NoopTransport` is a process-local implementation that collects
 //! sent messages for test inspection.
 
 const std = @import("std");

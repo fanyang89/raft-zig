@@ -1,8 +1,8 @@
 //! Single WAL segment file abstraction.
 //!
-//! Ports `ref/raftpp/lib/raftor/wal/segment.{h,cc}`. Each Segment owns
-//! one file descriptor and manages byte-level append/read/sync/truncate.
-//! It knows nothing about Raft records — that's the WAL layer's job.
+//! Each Segment owns one file descriptor and manages byte-level
+//! append/read/sync/truncate. It knows nothing about Raft records — that's
+//! the WAL layer's job.
 
 const std = @import("std");
 const fs_mod = @import("../fs.zig");

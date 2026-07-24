@@ -1,6 +1,5 @@
 //! Joint consensus configuration: pair of MajorityConfigs.
 //!
-//! Ports `include/raftpp/core/joint_conf.h` and `lib/core/joint_conf.cc`.
 //! `JointConfiguration` holds an incoming majority (the new config) and an
 //! outgoing majority (the previous config). Joint consensus requires both
 //! majorities to agree during a membership transition.

@@ -1,7 +1,6 @@
 //! User-facing RawNode API: wraps Raft with Ready/Advance batching.
 //!
-//! Ports `include/raftpp/core/raw_node.h` and `lib/core/raw_node.cc`. The
-//! application drives Raft through three concepts:
+//! The application drives Raft through three concepts:
 //!
 //!   * `tick()` — advance time by one tick; the returned bool indicates a
 //!     state change worth flushing.
@@ -116,8 +115,7 @@ pub const Ready = struct {
     /// Pending snapshot the caller must persist before calling advance.
     snapshot: ?Snapshot = null,
     /// True when the underlying Raft is not the leader; in that case the
-    /// Ready's outbound messages must be sent after entries are persisted
-    /// (matches raftpp's `is_persisted_msg`).
+    /// Ready's outbound messages must be sent after entries are persisted.
     is_persisted_msg: bool = false,
     /// Light portion (committed entries + outbound messages). Owned.
     light: LightReady = .{},
@@ -499,9 +497,8 @@ pub const RawNode = struct {
     pub fn onEntriesFetched(self: *RawNode, ctx: anytype) void {
         // Async entry-fetch callback; we don't expose GetEntriesContext here.
         // The integrator should call this with the context returned from a
-        // LogTemporarilyUnavailable error. The body mirrors raftpp's
-        // implementation: re-issue SendAppend / SendAppendAggressively if we
-        // are still the leader at the same term.
+        // LogTemporarilyUnavailable error. Re-issue SendAppend /
+        // SendAppendAggressively if we are still the leader at the same term.
         _ = self;
         _ = ctx;
         // Implementation intentionally minimal; full async-WAL support lands
@@ -524,7 +521,7 @@ pub const Status = struct {
 };
 
 // ===========================================================================
-// HardState equality (replaces raftpp's capnp_util::equal<msg::HardState>)
+// HardState equality
 // ===========================================================================
 
 fn hardStateEql(a: HardState, b: HardState) bool {

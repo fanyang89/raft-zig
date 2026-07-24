@@ -1,8 +1,7 @@
 //! Top-level Raftor orchestration: ties RawNode, ReadyProcessor, Transport,
 //! and StateMachine into a complete Raft server.
 //!
-//! Ports `include/raftpp/raftor/raftor.h` and `lib/raftor/raftor.cc` with
-//! major simplifications:
+//! Design choices:
 //!   * Uses MemoryStorage instead of WAL (durable storage arrives later).
 //!   * Accepts any Transport implementation (NoopTransport for single-node,
 //!     LoopbackTransport for multi-node testing, future TCP for production).

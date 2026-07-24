@@ -1,8 +1,6 @@
 //! Error model for raft-zig.
 //!
-//! raftpp uses a variant `RaftError` type carrying either enum codes or
-//! message-carrying structs (`InvalidConfigError`, `ConfChangeError`,
-//! `FatalError`). Zig error unions cannot carry payloads, so we split the model:
+//! Zig error unions cannot carry payloads, so the model is split:
 //!
 //! * Enum-style failures use the `Error` error set below. They compose with
 //!   `try` and stay zero-cost.
@@ -16,7 +14,7 @@ const std = @import("std");
 /// Universal error set for raft-zig. Every public API that can fail returns one
 /// of these values.
 pub const Error = error{
-    // Storage errors (mirror StorageErrorCode in raftpp).
+    // Storage errors.
     Compacted,
     Unavailable,
     LogTemporarilyUnavailable,
@@ -63,7 +61,7 @@ pub const Error = error{
     // RaftLog errors.
     ZeroEntriesInSlice,
 
-    // Raft state machine errors (mirror RaftErrorCode in raftpp).
+    // Raft state machine errors.
     StepLocalMsg,
     StepPeerNotFound,
     ProposalDropped,
@@ -76,7 +74,7 @@ pub const Error = error{
     IncompatibleStorage,
     ConfChangeParseError,
 
-    // RPC transport errors (mirror RpcErrorCode in raftpp).
+    // RPC transport errors.
     AddressPortMissing,
     AddressPortInvalid,
     AddressPortOutOfRange,
@@ -95,7 +93,7 @@ pub const Error = error{
     MessageTooLarge,
     Timeout,
 
-    // Config validation errors (mirror ConfigErrorCode in raftpp).
+    // Config validation errors.
     InvalidNodeId,
     HeartbeatTickTooSmall,
     ElectionTickTooSmall,
@@ -105,7 +103,7 @@ pub const Error = error{
     DataDirectoryEmpty,
     NodeIdNotInInitialPeers,
 
-    // ConfChange validation errors (mirror ConfChangeErrorCode in raftpp).
+    // ConfChange validation errors.
     LearnersNextMustBeEmpty,
     AutoLeaveMustBeFalse,
     ConfigAlreadyJoint,

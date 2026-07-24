@@ -1,6 +1,5 @@
 //! Majority quorum configuration and algorithms.
 //!
-//! Ports `include/raftpp/core/majority_conf.h` and `lib/core/majority_conf.cc`.
 //! `MajorityConfig` is a set of voter IDs plus two quorum computations:
 //!
 //!   * `committedIndex` — sort matched indexes descending, pick the
@@ -87,7 +86,7 @@ pub const MajorityConfig = struct {
     }
 
     /// Sort matched indexes descending and pick the majority-th.
-    /// Empty config returns `(max(u64), false)` — raftpp treats it as
+    /// Empty config returns `(max(u64), false)` — treated as
     /// "everything is committed".
     pub fn committedIndex(
         self: MajorityConfig,

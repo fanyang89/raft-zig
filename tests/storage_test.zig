@@ -1,4 +1,4 @@
-//! MemoryStorage test suite, ported from `ref/raftpp/tests/storage_test.cc`.
+//! MemoryStorage test suite.
 //!
 //! These cases describe the storage contract external callers depend on:
 //! index/term lookups across compaction boundaries, entry slicing with size
@@ -60,7 +60,7 @@ test "storage: entries slice and limit behavior" {
         .{ .lo = 4, .hi = 5, .max = null, .want = &.{.{ .idx = 4, .term = 4 }} },
         .{ .lo = 4, .hi = 6, .max = null, .want = &.{ .{ .idx = 4, .term = 4 }, .{ .idx = 5, .term = 5 } } },
         .{ .lo = 4, .hi = 7, .max = null, .want = &.{ .{ .idx = 4, .term = 4 }, .{ .idx = 5, .term = 5 }, .{ .idx = 6, .term = 6 } } },
-        // Even with max=0 the first entry is returned (raftpp contract).
+        // Even with max=0 the first entry is returned.
         .{ .lo = 4, .hi = 7, .max = 0, .want = &.{.{ .idx = 4, .term = 4 }} },
         // Cap of 2*overhead keeps two entries (each entry has no payload).
         .{ .lo = 4, .hi = 7, .max = 2 * raft.entry_message_overhead, .want = &.{ .{ .idx = 4, .term = 4 }, .{ .idx = 5, .term = 5 } } },

@@ -1,9 +1,7 @@
 //! Top-level ProgressTracker: owns config + per-peer Progress + vote tally.
 //!
-//! Ports `include/raftpp/core/progress_tracker.h` and
-//! `lib/core/progress_tracker.cc`. Tracks replication state for every peer,
-//! computes quorum outcomes, and applies configuration changes produced by
-//! the ConfChanger.
+//! Tracks replication state for every peer, computes quorum outcomes, and
+//! applies configuration changes produced by the ConfChanger.
 
 const std = @import("std");
 

@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-/// StateRole mirrors `StateRole` in raftpp. The numeric values are private;
-/// they are not transmitted on the wire directly.
+/// Raft node role. The numeric values are private; they are not transmitted on
+/// the wire directly.
 pub const StateRole = enum(u8) {
     follower = 0,
     candidate = 1,

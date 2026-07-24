@@ -1,12 +1,11 @@
 //! Segmented Write-Ahead Log with CRC32C integrity.
 //!
-//! Ports `ref/raftpp/lib/raftor/wal/` with multi-file segmentation:
-//! entries are split across `segment-NNNNNN.wal` files in a directory.
+//! Entries are split across `segment-NNNNNN.wal` files in a directory.
 //! Compaction deletes old segment files, reclaiming disk space.
 //!
-//! Record format matches raftpp exactly (magic "WAL1", CRC32C over
-//! type+flags+length+padding+payload). In-memory entries are retained for
-//! reads, while WALIndex tracks segment and byte offsets for truncation.
+//! Record format: magic "WAL1", CRC32C over type+flags+length+padding+payload.
+//! In-memory entries are retained for reads, while WALIndex tracks segment and
+//! byte offsets for truncation.
 
 const std = @import("std");
 

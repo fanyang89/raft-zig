@@ -1,8 +1,8 @@
 //! Application-supplied state machine interface.
 //!
-//! Ports `include/raftpp/raftor/state_machine.h`. Users implement this to
-//! receive committed entries, create/restore snapshots, and react to
-//! leadership changes. The interface is a vtable so any Zig type with the
+//! Users implement this to receive committed entries, create/restore
+//! snapshots, and react to leadership changes. The interface is a vtable so
+//! any Zig type with the
 //! right methods can plug in.
 
 const std = @import("std");

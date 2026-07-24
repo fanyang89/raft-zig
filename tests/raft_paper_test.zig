@@ -1,7 +1,6 @@
 //! Raft paper test scenarios.
 //!
-//! Ports key scenarios from `ref/raftpp/tests/raft_paper_test.cc` — the
-//! formal Raft safety properties (Section 5 of the paper): term handling,
+//! The formal Raft safety properties (Section 5 of the paper): term handling,
 //! vote granting, quorum commit, and election timeout distribution.
 
 const std = @import("std");

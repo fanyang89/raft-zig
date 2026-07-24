@@ -1,8 +1,8 @@
 //! Vote outcome enumeration and acknowledged-index lookup interface.
 //!
-//! Ports `include/raftpp/core/ack_indexer.h`. `AckedIndexer` is the read-only
-//! interface used by quorum math in `majority_conf` / `joint_conf`; the
-//! concrete `AckIndexer` is a thin map wrapper, while `ProgressMap` (added in
+//! `AckedIndexer` is the read-only interface used by quorum math in
+//! `majority_conf` / `joint_conf`; the concrete `AckIndexer` is a thin map
+//! wrapper, while `ProgressMap` (added in
 //! the progress module) implements the same vtable backed by live Progress
 //! state.
 

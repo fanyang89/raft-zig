@@ -2,13 +2,13 @@
 
 const std = @import("std");
 
-/// Sentinel for an unknown or invalid log index. Matches `kInvalidIndex` in raftpp.
+/// Sentinel for an unknown or invalid log index.
 pub const invalid_index: u64 = 0;
 
-/// Sentinel for an unknown or invalid node id. Matches `kInvalidId` in raftpp.
+/// Sentinel for an unknown or invalid node id.
 pub const invalid_id: u64 = 0;
 
-/// Default heartbeat interval in ticks. Matches `kHeartbeatTick` in raftpp.
+/// Default heartbeat interval in ticks.
 pub const default_heartbeat_tick: usize = 2;
 
 test "sentinel constants are zero" {

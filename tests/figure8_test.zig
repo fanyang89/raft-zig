@@ -13,8 +13,7 @@
 //!       But if a majority has NOT replicated the term-4 entry, the term-2
 //!       entry is NOT committed — even if S1 crashes again.
 //!
-//! Ports the key assertion from `ref/raftpp/tests/raft_paper_test.cc`:
-//! "leader only commits log from current term".
+//! Key assertion: "leader only commits log from current term".
 
 const std = @import("std");
 const raft = @import("raft_zig");

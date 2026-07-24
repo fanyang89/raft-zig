@@ -1,8 +1,7 @@
 //! Manages a collection of WAL segment files in a directory.
 //!
-//! Ports `ref/raftpp/lib/raftor/wal/segment_manager.{h,cc}`. The manager
-//! owns Segment instances, handles segment rolling, and supports deleting
-//! old segments during compaction. Segments are stored in a sorted
+//! The manager owns Segment instances, handles segment rolling, and supports
+//! deleting old segments during compaction. Segments are stored in a sorted
 //! ArrayList for deterministic iteration order.
 
 const std = @import("std");

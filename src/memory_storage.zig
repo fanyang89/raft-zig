@@ -1,12 +1,8 @@
 //! In-memory Storage backend.
 //!
-//! Ports `include/raftpp/core/memory_storage.h` and
-//! `lib/core/memory_storage.cc`. `MemoryStorageCore` holds the actual state;
-//! `MemoryStorage` is the public wrapper.
+//! `MemoryStorageCore` holds the actual state; `MemoryStorage` is the public
+//! wrapper.
 //!
-//! raftpp guards every entry point with `std::mutex`. Zig 0.16 dropped the
-//! blocking `std.Thread.Mutex` in favor of Io-integrated locks, which conflicts
-//! with the explicit-allocator, no-hidden-runtime style this module mirrors.
 //! Raft core is a single-threaded event loop by design, so the storage API is
 //! documented as not safe to call concurrently from multiple threads — callers
 //! that need cross-thread access must wrap it (for example with a queue plus a
@@ -67,7 +63,7 @@ pub const MemoryStorageCore = struct {
     }
 
     /// Update hard_state.commit/term to the entry at `index`. Asserts the entry
-    /// exists, matching raftpp's `ASSERT(HasEntryAt(...))`.
+    /// exists.
     pub fn commitTo(self: *MemoryStorageCore, index: u64) void {
         std.debug.assert(self.hasEntryAt(index));
         const diff = index - self.firstIndex();

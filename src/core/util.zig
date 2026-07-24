@@ -1,9 +1,8 @@
 //! Utility helpers for entry sizing and slicing.
 //!
-//! Ports `include/raftpp/core/util.h` and `lib/core/util.cc`. The size metric
-//! is an approximation: raftpp uses serialized Cap'n Proto bytes; we use
-//! `data.len + context.len + entry_message_overhead` to keep the same
-//! threshold-based truncation semantics for `LimitSize`.
+//! The size metric is an approximation: it uses
+//! `data.len + context.len + entry_message_overhead` to keep threshold-based
+//! truncation semantics for `LimitSize`.
 
 const std = @import("std");
 
@@ -19,8 +18,7 @@ const ConfChangeType = types.ConfChangeType;
 const ConfChangeTransition = types.ConfChangeTransition;
 
 /// Fixed overhead added to data/context length to approximate the serialized
-/// size of an Entry (header + index/term/type fields). Matches raftpp's
-/// `kEntryMessageOverhead` constant.
+/// size of an Entry (header + index/term/type fields).
 pub const entry_message_overhead: usize = 12;
 
 pub const IndexTerm = struct {
@@ -40,7 +38,7 @@ pub fn entryApproximateSize(ent: Entry) usize {
 }
 
 /// Truncate `entries` so the total approximate size stays at or below `max`.
-/// Always keeps at least one entry to make progress, matching raftpp.
+/// Always keeps at least one entry so replication can make progress.
 pub fn limitSize(entries: *[]Entry, max: ?u64) void {
     if (entries.len <= 1) return;
     const cap = max orelse return;
@@ -122,14 +120,13 @@ test "isContinuousEntries detects gap" {
 }
 
 // ===========================================================================
-// Entry checksum (CRC32C, matches raftpp's wal::CRC32C)
+// Entry checksum (CRC32C)
 // ===========================================================================
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
 /// Compute the CRC32C checksum of an entry's wire-identifying fields:
-/// entry_type, context, then data. Matches `ComputeEntryChecksum` in
-/// `include/raftpp/raftor/entry_checksum.h`.
+/// entry_type, context, then data.
 pub fn computeEntryChecksum(entry: Entry) u32 {
     var crc = Crc32Iscsi.init();
     const entry_type_word: u32 = @intFromEnum(entry.entry_type);
@@ -140,7 +137,7 @@ pub fn computeEntryChecksum(entry: Entry) u32 {
 }
 
 /// Empty normal entries (no data, no context) are exempt from checksumming
-/// because raftpp historically allows them through without verification.
+/// for parity with established interop behavior.
 pub fn isChecksumExemptEntry(entry: Entry) bool {
     return entry.entry_type == .normal and entry.data.len == 0 and entry.context.len == 0;
 }

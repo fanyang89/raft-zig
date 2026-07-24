@@ -1,8 +1,8 @@
 //! RawNode integration tests.
 //!
-//! Subset of `ref/raftpp/tests/raw_node_test.cc`. Each test drives a single
-//! RawNode through Campaign → GetReady → persist → Advance, exercising the
-//! Ready protocol, propose/conf-change/transfer-leader wrappers, and the
+//! Each test drives a single RawNode through Campaign → GetReady → persist →
+//! Advance, exercising the Ready protocol, propose/conf-change/transfer-leader
+//! wrappers, and the
 //! restart-from-snapshot path.
 
 const std = @import("std");
@@ -35,7 +35,7 @@ fn makeConfig(id: u64) Config {
 }
 
 /// Drive `node` through one campaign → leader transition, persisting every
-/// Ready along the way. Mirrors raftpp's `CampaignSingleNodeLeader`.
+/// Ready along the way.
 fn campaignLeader(node: *RawNode, storage: *MemoryStorage) !void {
     try node.campaign();
     while (true) {
@@ -167,8 +167,7 @@ test "raw_node: restart from snapshot applies ConfState" {
     defer node.deinit();
 
     try std.testing.expectEqual(@as(u64, 100), node.raftConst().raft_log.committed);
-    // After applying a snapshot at index N, raft_log.applied is N (matches
-    // raftpp which initializes applied to firstIndex - 1 = N).
+    // After applying a snapshot at index N, raft_log.applied is N.
     try std.testing.expectEqual(@as(u64, 100), node.raftConst().raft_log.applied);
 }
 

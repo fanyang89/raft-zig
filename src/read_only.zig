@@ -1,7 +1,6 @@
 //! Linearizable read-index queue.
 //!
-//! Ports `include/raftpp/core/read_only.h` and `lib/core/read_only.cc`. The
-//! leader tracks pending read-index requests keyed by their opaque context
+//! The leader tracks pending read-index requests keyed by their opaque context
 //! bytes; quorum ACKs are recorded per request; `advance(ctx)` releases all
 //! earlier requests in insertion order.
 //!
@@ -77,7 +76,7 @@ pub const ReadOnly = struct {
 
     /// Register a new read-index request. Silently no-ops on duplicate context
     /// or on a message with no entries (the context bytes come from
-    /// `req.entries[0].data`, matching raftpp).
+    /// `req.entries[0].data`).
     pub fn addRequest(self: *ReadOnly, index: u64, req: Message, self_id: u64) !void {
         if (req.entries.len == 0) return;
         const ctx = req.entries[0].data;

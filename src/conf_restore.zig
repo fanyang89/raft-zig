@@ -1,6 +1,5 @@
 //! Restore a ProgressTracker from a serialized ConfState.
 //!
-//! Ports `include/raftpp/core/conf_restore.h` and `lib/core/conf_restore.cc`.
 //! Used after a snapshot install (or fresh start) to rebuild the cluster
 //! configuration from a wire-format ConfState.
 

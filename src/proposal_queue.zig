@@ -1,8 +1,7 @@
 //! Thread-safe queues for cross-thread proposal and read-index submission.
 //!
-//! Ports the `ProposalQueue` and `ReadIndexQueue` from
-//! `include/raftpp/raftor/proposal_tracker.h`. Users can call `push()` from
-//! any thread; the event loop thread drains via `tryPop()`.
+//! Users can call `push()` from any thread; the event loop thread drains via
+//! `tryPop()`.
 //!
 //! Uses `std.atomic.Mutex` (spinlock) since Zig 0.16 removed
 //! `std.Thread.Mutex`. Contention is brief (O(1) push/pop).

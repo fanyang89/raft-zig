@@ -1,7 +1,6 @@
 //! Per-follower replication progress + ProgressMap.
 //!
-//! Ports `include/raftpp/core/progress.h` and `lib/core/progress.cc`. A
-//! `Progress` tracks how closely a follower replicates the leader's log:
+//! A `Progress` tracks how closely a follower replicates the leader's log:
 //!   * `matched` — highest index confirmed received.
 //!   * `next_idx` — next entry to send.
 //!   * `state` — Probe / Replicate / Snapshot, with state-specific flow control.
