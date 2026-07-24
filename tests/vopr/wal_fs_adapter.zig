@@ -1,7 +1,8 @@
 const std = @import("std");
 const mar = @import("marionette");
 const raft = @import("raft_zig");
-const MarionetteWalFs = @import("marionette_fs.zig").MarionetteFs;
+const MarionetteFs = @import("marionette_fs.zig").MarionetteFs;
+const MarionetteWalFs = MarionetteFs;
 
 fn noopRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
@@ -255,7 +256,46 @@ fn runSuffixOverwriteCrashPoint(allocator: std.mem.Allocator, crash_after_ops: u
     return !victim.completed;
 }
 
-test "Marionette WalFs reopens the production WAL format" {
+test "MarionetteFs satisfies the filesystem contract" {
+    const allocator = std.testing.allocator;
+    var world = try mar.World.init(allocator, .{ .seed = 0x4653, .tick_ns = 1 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 512, .min_latency_ns = 1 } });
+    try sim.registerProcess(0, .{ .ptr = sim.control.world, .restart = noopRestart });
+    var backend = MarionetteFs.init(sim.env.io(), sim.env.disk);
+    const fs = backend.fs();
+    try std.testing.expect(try fs.makeDir("contract"));
+    try std.testing.expect(!try fs.makeDir("contract"));
+
+    const handle = try fs.open("contract/data", .create_exclusive);
+    var handle_open = true;
+    defer if (handle_open) fs.close(handle) catch {};
+    try std.testing.expectError(error.OpenFailed, fs.open("contract/data", .create_exclusive));
+    try fs.pwriteAll(handle, "abcdef", 0);
+    try std.testing.expectEqual(@as(u64, 6), try fs.fileSize(handle));
+    try fs.truncate(handle, 4);
+    try fs.syncFile(handle);
+    try fs.close(handle);
+    handle_open = false;
+
+    const read_handle = try fs.open("contract/data", .read_only);
+    defer fs.close(read_handle) catch {};
+    var data: [4]u8 = undefined;
+    try std.testing.expectEqual(data.len, try fs.preadAll(read_handle, &data, 0));
+    try std.testing.expectEqualStrings("abcd", &data);
+    var listing = try fs.listDir(allocator, "contract");
+    defer listing.deinit();
+    try std.testing.expectEqual(@as(usize, 1), listing.entries.items.len);
+    try std.testing.expectEqualStrings("data", listing.entries.items[0].name);
+    try fs.rename("contract/data", "contract/renamed");
+    try fs.syncDir("contract");
+    try std.testing.expectError(error.FileNotFound, fs.open("contract/data", .read_only));
+    try fs.unlink("contract/renamed");
+    try fs.unlink("contract/renamed");
+    try fs.syncDir("contract");
+}
+
+test "MarionetteFs reopens the production WAL format" {
     const allocator = std.testing.allocator;
     var world = try mar.World.init(allocator, .{ .seed = 0x57414C, .tick_ns = 1 });
     defer world.deinit();
