@@ -3,6 +3,7 @@ const mar = @import("marionette");
 const raft = @import("raft_zig");
 const MarionetteFs = @import("marionette_fs.zig").MarionetteFs;
 const MarionetteWalFs = MarionetteFs;
+const fault_witness = @import("fault_witness.zig");
 
 fn noopRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
@@ -443,8 +444,8 @@ test "WAL crash recovery never accepts a reordered suffix with gaps" {
     var backend = MarionetteWalFs.init(fixture.sim.env.io(), fixture.sim.env.disk);
     var wal = try raft.WAL.open(allocator, .{ .dir = "wal", .fs = backend.fileSystem() });
     try wal.append(&.{
-        .{ .index = 1, .term = 1 },
-        .{ .index = 2, .term = 1 },
+        .{ .index = 1, .term = 1, .data = @constCast("one") },
+        .{ .index = 2, .term = 1, .data = @constCast("two") },
     });
     try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
     try wal.sync();
@@ -454,6 +455,15 @@ test "WAL crash recovery never accepts a reordered suffix with gaps" {
         .{ .index = 4, .term = 2, .data = @constCast("four") },
     });
     try fixture.sim.control.disk.crash();
+
+    // Fault witness: the reorder fault must have observably fired, otherwise
+    // the recovery assertions below would pass even with the fault silently
+    // dropped. Two unsynced entries produce two pending writes that the disk
+    // shuffles at crash time.
+    const witness = fault_witness.collectCrashWitness(fixture.world.traceBytes());
+    try std.testing.expect(witness.pending_writes > 0);
+    try std.testing.expect(witness.reordered > 0);
+
     wal.deinit();
     try restartAfterCrash(fixture.sim);
 
@@ -468,6 +478,11 @@ test "WAL crash recovery never accepts a reordered suffix with gaps" {
     for (entries, 1..) |entry, expected_index| {
         try std.testing.expectEqual(@as(u64, @intCast(expected_index)), entry.index);
     }
+
+    // Committed-prefix anchor: the synced entries survive the crash intact.
+    try std.testing.expectEqual(@as(usize, 2), @min(entries.len, 2));
+    try std.testing.expectEqualStrings("one", entries[0].data);
+    try std.testing.expectEqualStrings("two", entries[1].data);
 }
 
 test "WAL crash recovery ignores a segment whose directory entry was lost" {
@@ -594,5 +609,24 @@ fn fuzzWalCrashRecovery(_: void, smith: *std.testing.Smith) !void {
             try std.testing.expectEqual(committed, wal.snapshot_metadata.index);
             _ = try wal.term(committed);
         }
+
+        // Committed-prefix data anchor: the stable entry recorded this round
+        // must still carry its exact bytes after recovery (when it has not
+        // been compacted below firstIndex).
+        if (wal.firstIndex() <= committed) {
+            const anchor = try wal.readEntries(allocator, committed, committed + 1, null);
+            defer {
+                for (anchor) |*entry| entry.deinit(allocator);
+                allocator.free(anchor);
+            }
+            try std.testing.expectEqual(@as(usize, 1), anchor.len);
+            try std.testing.expectEqualStrings(&stable_data, anchor[0].data);
+        }
     }
+
+    // Fault witness: across all rounds the crash faults must have observably
+    // fired at least once, otherwise the recovery loop would pass even with
+    // every pending write silently landing in order.
+    const witness = fault_witness.collectCrashWitness(fixture.world.traceBytes());
+    try std.testing.expect(witness.fired());
 }

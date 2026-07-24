@@ -2,6 +2,7 @@ const std = @import("std");
 const mar = @import("marionette");
 const raft = @import("raft_zig");
 const adapter = @import("raft_adapter.zig");
+const fault_witness = @import("fault_witness.zig");
 
 const node_count = 3;
 
@@ -324,6 +325,14 @@ fn powerLossScenario(case: *Case) !void {
         .crash_lost_metadata_rate = .always(),
     });
     try case.control().disk.crash();
+
+    // Fault witness: the crash path must have executed. (Pending writes are
+    // not guaranteed here because the cluster converged and synced before the
+    // kill, so we assert the crash event itself, not that data was lost.)
+    {
+        const witness = fault_witness.collectCrashWitness(case.control().world.traceBytes());
+        try std.testing.expect(witness.crashes >= 1);
+    }
     try case.control().disk.restart();
     try case.control().disk.setFaults(.{});
     for (0..node_count) |index| try case.app.sim.restartProcess(@intCast(index));
@@ -334,6 +343,21 @@ fn powerLossScenario(case: *Case) !void {
     try driveUntilAppliedConverges(case, 1_000, required_completed);
     case.app.minimum_completed_proposals = required_completed;
     case.app.minimum_terminated_proposals = 2;
+
+    // Committed-prefix anchor: the entry committed before the power loss must
+    // survive on every node. The convergence check only compares nodes against
+    // each other, so without this anchor a consistent loss of
+    // "before-power-loss" would go undetected.
+    for (case.app.nodes) |node| {
+        var found = false;
+        for (node.state_machine.applied.items) |item| {
+            if (std.mem.eql(u8, item, "before-power-loss")) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }
 
 fn aliveCount(cluster: *const Cluster) usize {
