@@ -175,7 +175,7 @@
 {"id":"raft_test.go::TestOldMessages","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
 {"id":"raft_test.go::TestPastElectionTimeout","path":"raft_test.go","category":"election","status":"planned","rationale":"The elapsed-time boundary matrix for pastElectionTimeout remains to be tested."}
 {"id":"raft_test.go::TestPreCampaignWhileLeader","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
-{"id":"raft_test.go::TestPreVoteFromAnyState","path":"raft_test.go","category":"pre-vote","status":"adapted","target":"tests/upstream/etcd_raft/cases/pre_vote_test.zig","rationale":"Covers pre-vote immutability across all Raft roles."}
+{"id":"raft_test.go::TestPreVoteFromAnyState","path":"raft_test.go","category":"pre-vote","status":"adapted","target":"tests/upstream/etcd_raft/cases/pre_vote_test.zig","rationale":"Covers pre-vote immutability across all Raft roles and asserts exactly one pre-vote response with reject==false."}
 {"id":"raft_test.go::TestPreVoteMigrationCanCompleteElection","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}
 {"id":"raft_test.go::TestPreVoteMigrationWithFreeStuckPreCandidate","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}
 {"id":"raft_test.go::TestPreVoteWithCheckQuorum","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}

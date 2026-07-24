@@ -81,6 +81,19 @@ test "etcd/raft: pre-vote does not mutate any role" {
             .log_term = last_term,
         });
 
+        // Upstream TestPreVoteFromAnyState asserts the request is answered with
+        // exactly one pre-vote response and reject == false.
+        var responses: usize = 0;
+        var reject_seen = false;
+        for (net.pending.items) |msg| {
+            if (msg.msg_type == .request_pre_vote_response and msg.to == 1 and msg.from == 2) {
+                responses += 1;
+                if (msg.reject) reject_seen = true;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), responses);
+        try std.testing.expect(!reject_seen);
+
         try std.testing.expectEqual(state_before, target.raft.state);
         try std.testing.expectEqual(term_before, target.raft.term);
         try std.testing.expectEqual(vote_before, target.raft.vote);
