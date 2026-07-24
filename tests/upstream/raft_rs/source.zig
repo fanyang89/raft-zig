@@ -6,7 +6,12 @@ pub const upstream: manifest.Source = .{
     .revision = "ad13f3d90780f53aea2488c6a4b76c0d334bf136",
     .license = "Apache-2.0",
     .policy = "Adapt only deltas from etcd/raft and historical regressions.",
-    .inventory = "",
-    .expected_case_count = 0,
-    .expected_status_counts = .{},
+    .inventory = @embedFile("cases.jsonl"),
+    .expected_case_count = 263,
+    .expected_status_counts = .{
+        .covered_elsewhere = 218,
+        .excluded = 2,
+        .blocked = 6,
+        .planned = 37,
+    },
 };
