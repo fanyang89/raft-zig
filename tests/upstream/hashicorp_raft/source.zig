@@ -6,7 +6,12 @@ pub const upstream: manifest.Source = .{
     .revision = "dd30865f162c68ee31130c7f8ee1047e9122f2ec",
     .license = "MPL-2.0",
     .policy = "Clean-room reimplementation of externally observable behavior only.",
-    .inventory = "",
-    .expected_case_count = 0,
-    .expected_status_counts = .{},
+    .inventory = @embedFile("cases.jsonl"),
+    .expected_case_count = 184,
+    .expected_status_counts = .{
+        .covered_elsewhere = 27,
+        .excluded = 89,
+        .blocked = 22,
+        .planned = 46,
+    },
 };
