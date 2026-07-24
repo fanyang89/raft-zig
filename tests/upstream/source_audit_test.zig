@@ -1,8 +1,11 @@
+const std = @import("std");
 const manifest = @import("upstream_manifest");
 
 test "upstream source manifests are valid" {
-    try manifest.audit(@import("etcd_raft/source.zig").upstream);
-    try manifest.audit(@import("raft_rs/source.zig").upstream);
-    try manifest.audit(@import("openraft/source.zig").upstream);
-    try manifest.audit(@import("hashicorp_raft/source.zig").upstream);
+    try manifest.auditAll(std.testing.allocator, &.{
+        @import("etcd_raft/source.zig").upstream,
+        @import("raft_rs/source.zig").upstream,
+        @import("openraft/source.zig").upstream,
+        @import("hashicorp_raft/source.zig").upstream,
+    });
 }

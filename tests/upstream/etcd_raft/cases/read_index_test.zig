@@ -5,6 +5,8 @@ const network = @import("raft_test_network");
 const allocator = std.testing.allocator;
 const Message = raft.Message;
 
+pub const inventory_target = "tests/upstream/etcd_raft/cases/read_index_test.zig";
+
 fn hup(id: u64) Message {
     return .{ .msg_type = .hup, .from = id, .to = id };
 }

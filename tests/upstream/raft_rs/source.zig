@@ -6,5 +6,7 @@ pub const upstream: manifest.Source = .{
     .revision = "ad13f3d90780f53aea2488c6a4b76c0d334bf136",
     .license = "Apache-2.0",
     .policy = "Adapt only deltas from etcd/raft and historical regressions.",
-    .cases = &.{},
+    .inventory = "",
+    .expected_case_count = 0,
+    .expected_status_counts = .{},
 };

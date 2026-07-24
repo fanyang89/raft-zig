@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const upstream_specs = [_]TestSpec{
+        .{ .name = "upstream-manifest", .source = "tests/upstream/source_manifest.zig" },
         .{ .name = "upstream-source-audit", .source = "tests/upstream/source_audit_test.zig" },
         .{ .name = "upstream-etcd-raft", .source = "tests/upstream/etcd_raft/suite_test.zig" },
         .{ .name = "upstream-raft-rs", .source = "tests/upstream/raft_rs/suite_test.zig" },
@@ -105,6 +106,7 @@ pub fn build(b: *std.Build) void {
     });
     const upstream_step = b.step("test-upstream", "Run all adapted upstream test suites");
     const upstream_source_steps = [_]*std.Build.Step{
+        upstream_step,
         upstream_step,
         b.step("test-upstream-etcd-raft", "Run adapted etcd/raft tests"),
         b.step("test-upstream-raft-rs", "Run adapted raft-rs tests"),

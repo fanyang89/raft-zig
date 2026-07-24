@@ -5,6 +5,8 @@ const network = @import("raft_test_network");
 const Message = raft.Message;
 const StateRole = raft.StateRole;
 
+pub const inventory_target = "tests/upstream/etcd_raft/cases/pre_vote_test.zig";
+
 fn hup(id: u64) Message {
     return .{ .msg_type = .hup, .from = id, .to = id };
 }
