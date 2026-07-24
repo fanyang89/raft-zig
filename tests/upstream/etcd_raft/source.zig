@@ -7,11 +7,12 @@ pub const upstream: manifest.Source = .{
     .license = "Apache-2.0",
     .policy = "Primary baseline; adapt behavior with attribution.",
     .inventory = @embedFile("cases.jsonl"),
-    .expected_case_count = 16,
+    .expected_case_count = 262,
     .expected_status_counts = .{
         .adapted = 12,
-        .excluded = 1,
-        .blocked = 1,
-        .planned = 2,
+        .covered_elsewhere = 140,
+        .excluded = 15,
+        .blocked = 2,
+        .planned = 93,
     },
 };

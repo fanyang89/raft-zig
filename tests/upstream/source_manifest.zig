@@ -227,7 +227,8 @@ fn auditCategory(category: []const u8) !void {
 
 fn auditTarget(target: []const u8) !void {
     try auditPath(target);
-    if (!std.mem.startsWith(u8, target, "tests/") or !std.mem.endsWith(u8, target, ".zig")) {
+    const in_source_tree = std.mem.startsWith(u8, target, "src/") or std.mem.startsWith(u8, target, "tests/");
+    if (!in_source_tree or !std.mem.endsWith(u8, target, ".zig")) {
         return error.InvalidTarget;
     }
 }
