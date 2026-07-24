@@ -1,11 +1,11 @@
 const std = @import("std");
 const raft = @import("raft_zig");
-const scripted = @import("harness/scripted_wal_fs.zig");
+const fault = @import("harness/fault_fs.zig");
 
-const Fs = raft.WalFileSystem;
+const Fs = raft.Fs;
 
 fn cleanupDirectory(allocator: std.mem.Allocator, path: [:0]const u8) void {
-    const fs = raft.linuxWalFileSystem();
+    const fs = raft.realFileSystem();
     var listing = fs.listDir(allocator, path) catch return;
     defer listing.deinit();
     var child_buffer: [512]u8 = undefined;
@@ -16,27 +16,30 @@ fn cleanupDirectory(allocator: std.mem.Allocator, path: [:0]const u8) void {
     _ = std.os.linux.rmdir(path.ptr);
 }
 
-test "ScriptedWalFs retries interrupted and short positional I/O" {
+test "FaultFs retries interrupted and short positional I/O" {
     const allocator = std.testing.allocator;
     const path = "/tmp/raft-zig-scripted-wal-io";
     const file_path = "/tmp/raft-zig-scripted-wal-io/data";
-    const base = raft.linuxWalFileSystem();
+    const base = raft.realFileSystem();
     cleanupDirectory(allocator, path);
     defer cleanupDirectory(allocator, path);
     _ = try base.makeDir(path);
     const write_handle = try base.open(file_path, .write_truncate);
 
-    var backend = scripted.ScriptedWalFs.init(base);
-    const fs = backend.fileSystem();
+    var backend = fault.FaultFs.init(base);
+    const fs = backend.fs();
     backend.setScript(&.{
         .{ .operation = .pwrite, .occurrence = 1, .effect = .interrupted },
         .{ .operation = .pwrite, .occurrence = 2, .effect = .{ .short = 2 } },
     });
     try fs.pwriteAll(write_handle, "abcdef", 0);
+    try backend.assertConsumed();
     backend.inject(.{ .operation = .pwrite, .occurrence = 1, .effect = .{ .short = 2 } });
     try fs.pwriteAll(write_handle, "ghijkl", 6);
+    try backend.assertConsumed();
     backend.inject(.{ .operation = .pwrite, .occurrence = 1, .effect = .zero });
     try std.testing.expectError(error.WriteFailed, fs.pwriteAll(write_handle, "x", 12));
+    try backend.assertConsumed();
     try base.close(write_handle);
 
     const read_handle = try base.open(file_path, .read_only);
@@ -45,17 +48,19 @@ test "ScriptedWalFs retries interrupted and short positional I/O" {
     backend.inject(.{ .operation = .pread, .occurrence = 1, .effect = .interrupted });
     try std.testing.expectEqual(buffer.len, try fs.preadAll(read_handle, &buffer, 0));
     try std.testing.expectEqualStrings("abcdefghijkl", &buffer);
+    try backend.assertConsumed();
     backend.inject(.{ .operation = .pread, .occurrence = 1, .effect = .{ .short = 3 } });
     try std.testing.expectEqual(buffer.len, try fs.preadAll(read_handle, &buffer, 0));
     try std.testing.expectEqualStrings("abcdefghijkl", &buffer);
+    try backend.assertConsumed();
 }
 
-test "ScriptedWalFs metadata faults recover an atomic incarnation" {
+test "FaultFs metadata faults recover an atomic incarnation" {
     const allocator = std.testing.allocator;
     const Case = struct {
-        operation: scripted.Operation,
+        operation: fault.Operation,
         occurrence: u32 = 1,
-        effect: scripted.Effect,
+        effect: fault.Effect,
         expected_incarnation: u64,
         succeeds: bool = false,
     };
@@ -85,14 +90,14 @@ test "ScriptedWalFs metadata faults recover an atomic incarnation" {
         defer allocator.free(path);
         cleanupDirectory(allocator, path);
         defer cleanupDirectory(allocator, path);
-        const base = raft.linuxWalFileSystem();
+        const base = raft.realFileSystem();
 
         var initial = try raft.WAL.open(allocator, .{ .dir = path, .fs = base });
         try std.testing.expectEqual(@as(u64, 1), try initial.reserveIncarnation());
         initial.deinit();
 
-        var backend = scripted.ScriptedWalFs.init(base);
-        var wal = try raft.WAL.open(allocator, .{ .dir = path, .fs = backend.fileSystem() });
+        var backend = fault.FaultFs.init(base);
+        var wal = try raft.WAL.open(allocator, .{ .dir = path, .fs = backend.fs() });
         backend.inject(.{
             .operation = case.operation,
             .occurrence = case.occurrence,
@@ -104,6 +109,7 @@ test "ScriptedWalFs metadata faults recover an atomic incarnation" {
         } else {
             if (result) |_| return error.ExpectedInjectedFailure else |_| {}
         }
+        try backend.assertConsumed();
         wal.deinit();
 
         var recovered = try raft.WAL.open(allocator, .{ .dir = path, .fs = base });

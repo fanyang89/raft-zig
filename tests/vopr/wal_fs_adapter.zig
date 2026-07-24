@@ -1,7 +1,7 @@
 const std = @import("std");
 const mar = @import("marionette");
 const raft = @import("raft_zig");
-const MarionetteWalFs = @import("marionette_wal_fs.zig").MarionetteWalFs;
+const MarionetteWalFs = @import("marionette_fs.zig").MarionetteFs;
 
 fn noopRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 

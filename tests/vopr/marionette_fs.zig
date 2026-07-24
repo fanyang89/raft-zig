@@ -2,31 +2,35 @@ const std = @import("std");
 const mar = @import("marionette");
 const raft = @import("raft_zig");
 
-const Fs = raft.WalFileSystem;
-const FsError = raft.WalFileSystemError;
+const Fs = raft.Fs;
+const FsError = raft.FsError;
 
-pub const MarionetteWalFs = struct {
+pub const MarionetteFs = struct {
     io: std.Io,
     disk: mar.Disk,
     root: std.Io.Dir = .cwd(),
 
-    pub fn init(io: std.Io, disk: mar.Disk) MarionetteWalFs {
+    pub fn init(io: std.Io, disk: mar.Disk) MarionetteFs {
         return .{ .io = io, .disk = disk };
     }
 
-    pub fn fileSystem(self: *MarionetteWalFs) Fs {
+    pub fn fs(self: *MarionetteFs) Fs {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
-    fn cast(ctx: *anyopaque) *MarionetteWalFs {
+    pub fn fileSystem(self: *MarionetteFs) Fs {
+        return self.fs();
+    }
+
+    fn cast(ctx: *anyopaque) *MarionetteFs {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn file(raw_handle: raft.WalFileHandle) std.Io.File {
+    fn file(raw_handle: raft.FileHandle) std.Io.File {
         return .{ .handle = @intCast(raw_handle), .flags = .{ .nonblocking = false } };
     }
 
-    fn handle(opened: std.Io.File) raft.WalFileHandle {
+    fn handle(opened: std.Io.File) raft.FileHandle {
         return @intCast(opened.handle);
     }
 
@@ -61,7 +65,7 @@ pub const MarionetteWalFs = struct {
         return result;
     }
 
-    fn open(ctx: *anyopaque, path: [:0]const u8, mode: raft.WalOpenMode) FsError!raft.WalFileHandle {
+    fn open(ctx: *anyopaque, path: [:0]const u8, mode: raft.FsOpenMode) FsError!raft.FileHandle {
         const self = cast(ctx);
         const opened = switch (mode) {
             .read_only => self.root.openFile(self.io, path, .{}) catch |err| return mapOpenError(err),
@@ -86,33 +90,33 @@ pub const MarionetteWalFs = struct {
         };
     }
 
-    fn pread(ctx: *anyopaque, file_handle: raft.WalFileHandle, buffer: []u8, offset: u64) FsError!usize {
+    fn pread(ctx: *anyopaque, file_handle: raft.FileHandle, buffer: []u8, offset: u64) FsError!usize {
         const self = cast(ctx);
         return file(file_handle).readPositional(self.io, &.{buffer}, offset) catch error.ReadFailed;
     }
 
-    fn pwrite(ctx: *anyopaque, file_handle: raft.WalFileHandle, data: []const u8, offset: u64) FsError!usize {
+    fn pwrite(ctx: *anyopaque, file_handle: raft.FileHandle, data: []const u8, offset: u64) FsError!usize {
         const self = cast(ctx);
         return file(file_handle).writePositional(self.io, &.{data}, offset) catch error.WriteFailed;
     }
 
-    fn fileSize(ctx: *anyopaque, file_handle: raft.WalFileHandle) FsError!u64 {
+    fn fileSize(ctx: *anyopaque, file_handle: raft.FileHandle) FsError!u64 {
         const self = cast(ctx);
         const stat = file(file_handle).stat(self.io) catch return error.StatFailed;
         return stat.size;
     }
 
-    fn truncate(ctx: *anyopaque, file_handle: raft.WalFileHandle, len: u64) FsError!void {
+    fn truncate(ctx: *anyopaque, file_handle: raft.FileHandle, len: u64) FsError!void {
         const self = cast(ctx);
         file(file_handle).setLength(self.io, len) catch return error.TruncateFailed;
     }
 
-    fn syncFile(ctx: *anyopaque, file_handle: raft.WalFileHandle) FsError!void {
+    fn syncFile(ctx: *anyopaque, file_handle: raft.FileHandle) FsError!void {
         const self = cast(ctx);
         file(file_handle).sync(self.io) catch return error.SyncFailed;
     }
 
-    fn close(ctx: *anyopaque, file_handle: raft.WalFileHandle) FsError!void {
+    fn close(ctx: *anyopaque, file_handle: raft.FileHandle) FsError!void {
         const self = cast(ctx);
         file(file_handle).close(self.io);
     }
@@ -150,3 +154,5 @@ pub const MarionetteWalFs = struct {
         .sync_dir = syncDir,
     };
 };
+
+pub const MarionetteWalFs = MarionetteFs;

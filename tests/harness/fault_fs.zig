@@ -1,8 +1,8 @@
 const std = @import("std");
 const raft = @import("raft_zig");
 
-const Fs = raft.WalFileSystem;
-const FsError = raft.WalFileSystemError;
+const Fs = raft.Fs;
+const FsError = raft.FsError;
 
 pub const Operation = enum {
     make_dir,
@@ -33,7 +33,7 @@ pub const Fault = struct {
     effect: Effect,
 };
 
-pub const ScriptedWalFs = struct {
+pub const FaultFs = struct {
     const max_faults = 32;
 
     inner: Fs,
@@ -41,30 +41,40 @@ pub const ScriptedWalFs = struct {
     fault_count: usize = 0,
     occurrences: [@typeInfo(Operation).@"enum".fields.len]u32 = @splat(0),
 
-    pub fn init(inner: Fs) ScriptedWalFs {
+    pub fn init(inner: Fs) FaultFs {
         return .{ .inner = inner };
     }
 
-    pub fn inject(self: *ScriptedWalFs, fault: Fault) void {
+    pub fn inject(self: *FaultFs, fault: Fault) void {
         self.setScript(&.{fault});
     }
 
-    pub fn setScript(self: *ScriptedWalFs, faults: []const Fault) void {
+    pub fn setScript(self: *FaultFs, faults: []const Fault) void {
         std.debug.assert(faults.len <= max_faults);
         @memcpy(self.faults[0..faults.len], faults);
         self.fault_count = faults.len;
         self.occurrences = @splat(0);
     }
 
-    pub fn fileSystem(self: *ScriptedWalFs) Fs {
+    pub fn fs(self: *FaultFs) Fs {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
-    fn cast(ctx: *anyopaque) *ScriptedWalFs {
+    pub fn fileSystem(self: *FaultFs) Fs {
+        return self.fs();
+    }
+
+    pub fn assertConsumed(self: *const FaultFs) error{FaultNotConsumed}!void {
+        for (self.faults[0..self.fault_count]) |fault| {
+            if (self.occurrences[@intFromEnum(fault.operation)] < fault.occurrence) return error.FaultNotConsumed;
+        }
+    }
+
+    fn cast(ctx: *anyopaque) *FaultFs {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn takeEffect(self: *ScriptedWalFs, operation: Operation) ?Effect {
+    fn takeEffect(self: *FaultFs, operation: Operation) ?Effect {
         const index = @intFromEnum(operation);
         self.occurrences[index] += 1;
         for (self.faults[0..self.fault_count]) |fault| {
@@ -101,7 +111,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn open(ctx: *anyopaque, path: [:0]const u8, mode: raft.WalOpenMode) FsError!raft.WalFileHandle {
+    fn open(ctx: *anyopaque, path: [:0]const u8, mode: raft.FsOpenMode) FsError!raft.FileHandle {
         const self = cast(ctx);
         const effect = self.takeEffect(.open) orelse return self.inner.open(path, mode);
         return switch (effect) {
@@ -115,7 +125,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn pread(ctx: *anyopaque, handle: raft.WalFileHandle, buffer: []u8, offset: u64) FsError!usize {
+    fn pread(ctx: *anyopaque, handle: raft.FileHandle, buffer: []u8, offset: u64) FsError!usize {
         const self = cast(ctx);
         const effect = self.takeEffect(.pread) orelse return self.inner.vtable.pread(self.inner.ctx, handle, buffer, offset);
         return switch (effect) {
@@ -130,7 +140,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn pwrite(ctx: *anyopaque, handle: raft.WalFileHandle, data: []const u8, offset: u64) FsError!usize {
+    fn pwrite(ctx: *anyopaque, handle: raft.FileHandle, data: []const u8, offset: u64) FsError!usize {
         const self = cast(ctx);
         const effect = self.takeEffect(.pwrite) orelse return self.inner.vtable.pwrite(self.inner.ctx, handle, data, offset);
         return switch (effect) {
@@ -145,7 +155,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn fileSize(ctx: *anyopaque, handle: raft.WalFileHandle) FsError!u64 {
+    fn fileSize(ctx: *anyopaque, handle: raft.FileHandle) FsError!u64 {
         const self = cast(ctx);
         const effect = self.takeEffect(.file_size) orelse return self.inner.fileSize(handle);
         return switch (effect) {
@@ -158,7 +168,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn truncate(ctx: *anyopaque, handle: raft.WalFileHandle, len: u64) FsError!void {
+    fn truncate(ctx: *anyopaque, handle: raft.FileHandle, len: u64) FsError!void {
         const self = cast(ctx);
         const effect = self.takeEffect(.truncate) orelse return self.inner.truncate(handle, len);
         return switch (effect) {
@@ -171,7 +181,7 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn syncFile(ctx: *anyopaque, handle: raft.WalFileHandle) FsError!void {
+    fn syncFile(ctx: *anyopaque, handle: raft.FileHandle) FsError!void {
         const self = cast(ctx);
         const effect = self.takeEffect(.sync_file) orelse return self.inner.syncFile(handle);
         return switch (effect) {
@@ -184,16 +194,14 @@ pub const ScriptedWalFs = struct {
         };
     }
 
-    fn close(ctx: *anyopaque, handle: raft.WalFileHandle) FsError!void {
+    fn close(ctx: *anyopaque, handle: raft.FileHandle) FsError!void {
         const self = cast(ctx);
         const effect = self.takeEffect(.close) orelse return self.inner.close(handle);
+        try self.inner.close(handle);
         return switch (effect) {
             .interrupted => error.Interrupted,
             .fail_before, .short, .zero => error.CloseFailed,
-            .fail_after => result: {
-                try self.inner.close(handle);
-                break :result error.CloseFailed;
-            },
+            .fail_after => error.CloseFailed,
         };
     }
 
@@ -251,3 +259,5 @@ pub const ScriptedWalFs = struct {
         .sync_dir = syncDir,
     };
 };
+
+pub const ScriptedWalFs = FaultFs;

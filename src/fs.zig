@@ -62,6 +62,7 @@ pub const Fs = struct {
         file_size: *const fn (*anyopaque, Handle) Error!u64,
         truncate: *const fn (*anyopaque, Handle, u64) Error!void,
         sync_file: *const fn (*anyopaque, Handle) Error!void,
+        /// Consumes the handle even when an error is returned.
         close: *const fn (*anyopaque, Handle) Error!void,
         rename: *const fn (*anyopaque, [:0]const u8, [:0]const u8) Error!void,
         unlink: *const fn (*anyopaque, [:0]const u8) Error!void,
@@ -138,6 +139,7 @@ pub const Fs = struct {
         };
     }
 
+    /// The handle is invalid after this call, including error returns.
     pub fn close(self: Fs, handle: Handle) Error!void {
         return self.vtable.close(self.ctx, handle);
     }
