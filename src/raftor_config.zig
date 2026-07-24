@@ -8,6 +8,7 @@ const std = @import("std");
 
 const raft_config_mod = @import("raft_config.zig");
 const raw_node_mod = @import("raw_node.zig");
+const fs_mod = @import("fs.zig");
 
 const Config = raft_config_mod.Config;
 const Peer = raw_node_mod.Peer;
@@ -23,6 +24,9 @@ pub const RaftorConfig = struct {
     initial_peers: []const Peer = &.{},
     /// Data directory for future WAL storage. MemoryStorage ignores it.
     data_dir: []const u8 = "",
+    /// Borrowed filesystem used when `data_dir` is non-empty. The default uses
+    /// the host filesystem. A custom backend must outlive the Raftor.
+    file_system: ?fs_mod.Fs = null,
     /// Interval between ticks in milliseconds. The event loop sleeps this
     /// long when idle.
     tick_interval_ms: u64 = 100,
@@ -53,4 +57,5 @@ test "raftor config defaults" {
     try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
     try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_entries_threshold);
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
+    try std.testing.expectEqual(@as(?fs_mod.Fs, null), c.file_system);
 }

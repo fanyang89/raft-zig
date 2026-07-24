@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const raft = @import("raft_zig");
+const fault = @import("harness/fault_fs.zig");
+const fixture_mod = @import("harness/fs_fixture.zig");
 
 const allocator = std.testing.allocator;
 const Raftor = raft.Raftor;
@@ -1017,6 +1019,24 @@ test "raftor: advanced commit survives restart" {
     const restarted = try Raftor.createWithDependencies(allocator, config, .restart, dependencies);
     defer restarted.destroy();
     try std.testing.expectEqual(sm.last_applied_index, restarted.getStatus().applied_index);
+}
+
+test "raftor: configured filesystem is used for WAL storage" {
+    var fixture = try fixture_mod.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    var backend = fault.FaultFs.init(fixture.fs());
+    backend.inject(.{ .operation = .make_dir, .occurrence = 1, .effect = .fail_before });
+    var config = makeConfig(1);
+    config.data_dir = fixture.walDir();
+    config.file_system = backend.fs();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    try std.testing.expectError(
+        error.WalCreateDirectoryFailed,
+        Raftor.create(allocator, config, sm.stateMachine()),
+    );
+    try backend.assertConsumed();
 }
 
 test "raftor: WAL restart restores snapshot before replaying its suffix" {

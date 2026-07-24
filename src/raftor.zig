@@ -16,6 +16,7 @@ const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
 const storage_mod = @import("storage.zig");
 const memory_storage_mod = @import("memory_storage.zig");
+const fs_mod = @import("fs.zig");
 const wal_mod = @import("wal.zig");
 const raft_config_mod = @import("raft_config.zig");
 const raft_mod = @import("raft.zig");
@@ -847,7 +848,11 @@ fn openStorage(allocator: std.mem.Allocator, config: RaftorConfig) Error!Storage
     const wal_dir = try allocator.allocSentinel(u8, config.data_dir.len, 0);
     defer allocator.free(wal_dir);
     @memcpy(wal_dir[0..config.data_dir.len], config.data_dir);
-    return .{ .wal = try WALStorage.open(allocator, wal_dir) };
+    return .{ .wal = try WALStorage.openWithFs(
+        allocator,
+        wal_dir,
+        config.file_system orelse fs_mod.realFileSystem(),
+    ) };
 }
 
 fn detectStartupMode(allocator: std.mem.Allocator, storage: storage_mod.WritableStorage) Error!StartupMode {
