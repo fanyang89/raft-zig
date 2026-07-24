@@ -1475,7 +1475,7 @@ pub const Raft = struct {
         return true;
     }
 
-    fn broadcastAppend(self: *Raft) Error!void {
+    pub fn broadcastAppend(self: *Raft) Error!void {
         const ids = try self.collectPeerIds();
         defer self.allocator.free(ids);
         for (ids) |id| {

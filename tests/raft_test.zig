@@ -124,39 +124,61 @@ test "raft: log replication to followers" {
 }
 
 test "raft: leader steps down when quorum lost" {
-    var net = try network_mod.newNetwork(&.{ 1, 2, 3 });
+    var net = try network_mod.newNetworkWithOptions(&.{ 1, 2, 3 }, .{ .check_quorum = true });
     defer net.deinit();
 
     var hup_msg = hup(1);
     try net.send(&.{hup_msg});
     freeMsg(&hup_msg);
 
-    // Block all messages from reaching followers. After enough ticks the
-    // leader should lose quorum and step down (check_quorum is off by default
-    // so this test only verifies the leader stays leader without progress).
-    try net.ignoreMessageType(.append);
-    try net.ignoreMessageType(.heartbeat);
-
     const p1 = net.getPeer(1).?;
     try std.testing.expectEqual(StateRole.leader, p1.raft.state);
+
+    // Isolate the leader so it stops receiving heartbeat responses. With
+    // check_quorum enabled it must lose quorum and step down within an
+    // election timeout. Drive ticks through the harness (which also runs the
+    // safety checks) rather than poking the FSM directly.
+    try net.isolate(1);
+
+    var ticks: usize = 0;
+    while (ticks < 100 and p1.raft.state == .leader) : (ticks += 1) {
+        _ = try net.tickPeer(1);
+    }
+    try std.testing.expectEqual(StateRole.follower, p1.raft.state);
 }
 
-test "raft: follower vote rejects stale candidate" {
+test "raft: follower rejects stale-candidate vote" {
     var net = try network_mod.newNetwork(&.{ 1, 2, 3 });
     defer net.deinit();
 
-    // Elect 1.
     var hup_msg = hup(1);
     try net.send(&.{hup_msg});
     freeMsg(&hup_msg);
 
-    // Node 2 attempts to campaign but its term is older; the network has
-    // already moved past. The vote request from 2 should be rejected.
-    // (In our simple harness, campaigning at a lower term doesn't happen
-    // automatically; we just verify that 1 is still leader.)
-    const p1 = net.getPeer(1).?;
-    try std.testing.expectEqual(StateRole.leader, p1.raft.state);
-    try std.testing.expectEqual(@as(u64, 1), p1.raft.term);
+    // Advance the log so voters have an up-to-date entry to compare against.
+    var prop = try propose(1, "x");
+    try net.send(&.{prop});
+    freeMsg(&prop);
+
+    const p3 = net.getPeer(3).?;
+    const voter_term = p3.raft.term;
+    try std.testing.expect(voter_term >= 1);
+
+    // A candidate at a higher term but with a stale log (term 0, index 0)
+    // requests node 3's vote.
+    try net.stepLocal(3, .{
+        .msg_type = .request_vote,
+        .from = 2,
+        .to = 3,
+        .term = voter_term + 1,
+        .index = 0,
+        .log_term = 0,
+    });
+
+    // Node 3 adopted the higher term but must NOT have granted its vote: the
+    // candidate's log is not up-to-date.
+    try std.testing.expectEqual(voter_term + 1, p3.raft.term);
+    try std.testing.expectEqual(@as(u64, 0), p3.raft.vote);
 }
 
 test "raft: heartbeat advances follower commit" {
@@ -167,21 +189,23 @@ test "raft: heartbeat advances follower commit" {
     try net.send(&.{hup_msg});
     freeMsg(&hup_msg);
 
-    const p2 = net.getPeer(2).?;
-    const committed_before = p2.raft.raft_log.committed;
-    try std.testing.expectEqual(@as(u64, 1), committed_before);
+    // Follower 3 is partitioned while the leader commits a new entry with
+    // the other two nodes.
+    try net.isolate(3);
+    var prop = try propose(1, "x");
+    try net.send(&.{prop});
+    freeMsg(&prop);
 
-    // Drive a few heartbeats by ticking the leader.
-    const p1 = net.getPeer(1).?;
-    var i: usize = 0;
-    while (i < 3) : (i += 1) {
-        _ = try p1.raft.tick();
-        // Drain any outbound messages and dispatch them.
-        var outbound = try allocator.alloc(Message, p1.raft.messages.items.len);
-        for (p1.raft.messages.items, 0..) |m, j| outbound[j] = m;
-        p1.raft.messages.clearRetainingCapacity();
-        try net.send(outbound);
-        for (outbound) |*m| freeMsg(m);
-        allocator.free(outbound);
+    try std.testing.expectEqual(@as(u64, 2), net.getPeer(1).?.raft.raft_log.committed);
+    try std.testing.expectEqual(@as(u64, 1), net.getPeer(3).?.raft.raft_log.committed);
+
+    // Recover and drive heartbeat rounds through the harness. The leader's
+    // heartbeat triggers catch-up appends that advance 3's commit index.
+    net.recover();
+    var ticks: usize = 0;
+    while (ticks < 30 and net.getPeer(3).?.raft.raft_log.committed < 2) : (ticks += 1) {
+        _ = try net.tickPeer(1);
+        _ = try net.runUntilIdle(100);
     }
+    try std.testing.expectEqual(@as(u64, 2), net.getPeer(3).?.raft.raft_log.committed);
 }

@@ -1,8 +1,10 @@
-//! Raft flow control tests.
+//! Inflights backpressure unit tests.
 //!
-//! Ports key scenarios from `ref/raftpp/tests/raft_flow_control_test.cc` —
-//! validates inflights backpressure: the mechanism that prevents a leader
-//! from flooding a slow follower with unbounded in-flight AppendEntries.
+//! These exercise the `Inflights` / `Progress` windowing primitives directly
+//! (fill/pause, slide-on-ack, heartbeat frees-one-slot, probe-state bypass).
+//! They are intentionally unit-scoped: they do not drive the Raft message
+//! path. End-to-end flow-control coverage through AppendEntries remains
+//! tracked as planned upstream cases (etcd TestMsgAppFlowControl*).
 
 const std = @import("std");
 const raft = @import("raft_zig");

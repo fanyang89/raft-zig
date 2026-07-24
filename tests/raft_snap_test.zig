@@ -113,33 +113,34 @@ test "snap: restore snapshot advances committed index" {
 }
 
 test "snap: pending snapshot pauses replication" {
-    var storage = try newStorage(&.{ 1, 2 });
+    var storage = try newStorage(&.{ 1, 2, 3 });
     defer storage.deinit(allocator);
 
     var node = try raft.Raft.init(allocator, makeConfig(1), storage.asStorage());
     defer node.deinit();
 
-    // Manually set node 2's progress to snapshot state.
-    const pr = node.progress_tracker.getPtr(2).?;
-    pr.state = .snapshot;
-    pr.pending_snapshot = 10;
+    // Make node 1 a real leader so appendEntry/broadcastAppend emit messages.
+    node.becomeCandidate();
+    try node.becomeLeader();
 
-    // While in snapshot state, isPaused returns true → no appends sent.
-    try std.testing.expect(pr.isPaused());
+    // Put node 2's progress into snapshot state (paused); node 3 stays normal.
+    const pr2 = node.progress_tracker.getPtr(2).?;
+    pr2.state = .snapshot;
+    pr2.pending_snapshot = 10;
+    try std.testing.expect(pr2.isPaused());
 
-    // Propose: the leader should not send append to node 2 (paused).
-    var entries = [_]Entry{.{ .term = 1, .index = 1 }};
+    // Propose and broadcast. Replication proceeds to node 3 but must skip the
+    // paused node 2.
+    var entries = [_]Entry{.{ .term = node.term, .index = node.raft_log.lastIndex() + 1 }};
     _ = try node.appendEntry(&entries);
+    try node.broadcastAppend();
 
-    // Tick → broadcastAppend should skip node 2 (paused).
-    _ = try node.tick();
-
-    // Messages should be empty or only contain heartbeats (not appends to 2).
+    var got_append_to_3 = false;
     for (node.messages.items) |m| {
-        if (m.to == 2) {
-            try std.testing.expect(m.msg_type != .append);
-        }
+        if (m.to == 3 and m.msg_type == .append) got_append_to_3 = true;
+        if (m.to == 2) try std.testing.expect(m.msg_type != .append);
     }
+    try std.testing.expect(got_append_to_3);
 }
 
 test "snap: snapshot failure resets to probe" {
