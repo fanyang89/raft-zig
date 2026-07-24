@@ -148,6 +148,7 @@ pub const Raft = struct {
     progress_tracker: ProgressTracker,
     read_only: ReadOnly,
     read_states: std.ArrayList(ReadState),
+    pending_read_index_messages: std.ArrayList(Message),
     messages: std.ArrayList(Message),
 
     // Configuration-derived knobs.
@@ -217,6 +218,7 @@ pub const Raft = struct {
             .progress_tracker = progress_tracker,
             .read_only = ReadOnly.init(allocator, config.read_only_option),
             .read_states = .empty,
+            .pending_read_index_messages = .empty,
             .messages = .empty,
 
             .max_inflight = config.max_inflight_messages,
@@ -276,6 +278,8 @@ pub const Raft = struct {
         self.read_only.deinit();
         for (self.read_states.items) |*rs| rs.deinit(self.allocator);
         self.read_states.deinit(self.allocator);
+        for (self.pending_read_index_messages.items) |*m| m.deinit(self.allocator);
+        self.pending_read_index_messages.deinit(self.allocator);
         for (self.messages.items) |*m| m.deinit(self.allocator);
         self.messages.deinit(self.allocator);
         self.* = undefined;
@@ -732,42 +736,12 @@ pub const Raft = struct {
             },
             .read_index => {
                 if (!self.commitToCurrentTerm()) {
-                    log.debug("node {} has not committed in its term; dropping read index", .{self.id});
+                    log.debug("node {} has not committed in its term; postponing read index", .{self.id});
+                    const cloned = try storage_mod.cloneMessage(self.allocator, m.*);
+                    try self.pending_read_index_messages.append(self.allocator, cloned);
                     return;
                 }
-                if (self.progress_tracker.isSingleton()) {
-                    const read_index = self.raft_log.committed;
-                    if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                        self.send(resp) catch |err| {
-                            var owned = resp;
-                            owned.deinit(self.allocator);
-                            return err;
-                        };
-                    }
-                    return;
-                }
-
-                switch (self.read_only.option) {
-                    .safe => {
-                        if (m.entries.len > 0) {
-                            const ctx_bytes = m.entries[0].data;
-                            // AddRequest clones the message internally.
-                            try self.read_only.addRequest(self.raft_log.committed, m.*, self.id);
-                            _ = ctx_bytes;
-                            try self.broadcastHeartbeatWithCtx(m.entries[0].data);
-                        }
-                    },
-                    .lease_based => {
-                        const read_index = self.raft_log.committed;
-                        if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                            self.send(resp) catch |err| {
-                                var owned = resp;
-                                owned.deinit(self.allocator);
-                                return err;
-                            };
-                        }
-                    },
-                }
+                try self.serveReadIndex(m);
                 return;
             },
             else => {},
@@ -907,6 +881,7 @@ pub const Raft = struct {
             if (self.progress_tracker.getPtr(self.id)) |self_pr| {
                 self_pr.updateCommitted(committed);
             }
+            try self.releasePendingReadIndexMessages();
             return true;
         }
         return false;
@@ -1195,6 +1170,65 @@ pub const Raft = struct {
 
     fn handleReadyReadIndexMsg(self: *Raft, req: Message, index: u64) Error!?Message {
         return self.handleReadyReadIndex(&req, index);
+    }
+
+    pub fn pendingReadIndexCount(self: *const Raft) usize {
+        return self.pending_read_index_messages.items.len;
+    }
+
+    // Serve a ReadIndex request that is now eligible (leader has committed an
+    // entry in its own term). Used both by the step path and by the replay of
+    // postponed requests after a fresh-term commit.
+    fn serveReadIndex(self: *Raft, m: *Message) Error!void {
+        if (self.progress_tracker.isSingleton()) {
+            const read_index = self.raft_log.committed;
+            if (try self.handleReadyReadIndex(m, read_index)) |resp| {
+                self.send(resp) catch |err| {
+                    var owned = resp;
+                    owned.deinit(self.allocator);
+                    return err;
+                };
+            }
+            return;
+        }
+
+        switch (self.read_only.option) {
+            .safe => {
+                if (m.entries.len > 0) {
+                    // AddRequest clones the message internally.
+                    try self.read_only.addRequest(self.raft_log.committed, m.*, self.id);
+                    try self.broadcastHeartbeatWithCtx(m.entries[0].data);
+                }
+            },
+            .lease_based => {
+                const read_index = self.raft_log.committed;
+                if (try self.handleReadyReadIndex(m, read_index)) |resp| {
+                    self.send(resp) catch |err| {
+                        var owned = resp;
+                        owned.deinit(self.allocator);
+                        return err;
+                    };
+                }
+            },
+        }
+    }
+
+    // Replay postponed ReadIndex requests once the leader has committed an
+    // entry in its current term. Mirrors etcd's releasePendingReadIndexMessages.
+    fn releasePendingReadIndexMessages(self: *Raft) Error!void {
+        if (self.pending_read_index_messages.items.len == 0) return;
+        if (!self.commitToCurrentTerm()) return;
+
+        var local = self.pending_read_index_messages;
+        self.pending_read_index_messages = .empty;
+        defer local.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < local.items.len) : (i += 1) {
+            var owned = local.items[i];
+            defer owned.deinit(self.allocator);
+            try self.serveReadIndex(&owned);
+        }
     }
 
     fn hasQuorum(self: *Raft, acks: *std.AutoHashMap(u64, void)) Error!bool {
@@ -1735,6 +1769,10 @@ pub const Raft = struct {
         const opt = self.read_only.option;
         self.read_only.deinit();
         self.read_only = ReadOnly.init(self.allocator, opt);
+
+        // Drop postponed ReadIndex requests: a new term/role cannot serve them.
+        for (self.pending_read_index_messages.items) |*m| m.deinit(self.allocator);
+        self.pending_read_index_messages.clearRetainingCapacity();
 
         self.pending_request_snapshot = invalid_index;
 
