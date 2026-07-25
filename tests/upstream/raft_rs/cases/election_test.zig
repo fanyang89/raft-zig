@@ -10,6 +10,30 @@ const allocator = std.testing.allocator;
 
 pub const inventory_target = "tests/upstream/raft_rs/cases/election_test.zig";
 
+fn seedPeer(peer: *network.Peer, terms: []const u64, hard_state: raft.HardState) !void {
+    const entries = try allocator.alloc(raft.Entry, terms.len);
+    defer allocator.free(entries);
+    for (terms, 0..) |term, index| {
+        entries[index] = .{ .term = term, .index = index + 1 };
+    }
+    try peer.storage.setEntries(allocator, entries);
+    try peer.storage.setHardState(hard_state);
+    peer.raft.term = hard_state.term;
+    peer.raft.vote = hard_state.vote;
+    peer.raft.raft_log.persisted = terms.len;
+    peer.raft.raft_log.unstable.offset = terms.len + 1;
+}
+
+fn expectLogTerms(peer: *network.Peer, expected: []const u64) !void {
+    const entries = try peer.raft.raft_log.allEntries();
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    try std.testing.expectEqual(expected.len, entries.len);
+    for (entries, expected) |entry, term| try std.testing.expectEqual(term, entry.term);
+}
+
 test "raft-rs: newer local last-log term rejects a longer stale candidate" {
     var net = try network.newNetwork(&.{ 1, 2 });
     defer net.deinit();
@@ -72,4 +96,25 @@ test "raft-rs: dueling pre-candidate does not disrupt the leader" {
         try std.testing.expectEqual(want.applied, peer.raft.raft_log.applied);
         try std.testing.expectEqual(want.last_index, peer.raft.raft_log.lastIndex());
     }
+}
+
+test "raft-rs: elected leader overwrites uncommitted higher-term logs" {
+    var net = try network.newNetwork(&.{ 1, 2, 3, 4, 5 });
+    defer net.deinit();
+
+    try seedPeer(net.getPeer(1).?, &.{1}, .{ .term = 1 });
+    try seedPeer(net.getPeer(2).?, &.{1}, .{ .term = 1 });
+    try seedPeer(net.getPeer(3).?, &.{2}, .{ .term = 2 });
+    try seedPeer(net.getPeer(4).?, &.{}, .{ .term = 2, .vote = 3 });
+    try seedPeer(net.getPeer(5).?, &.{}, .{ .term = 2, .vote = 3 });
+
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+    try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(1).?.raft.state);
+    try std.testing.expectEqual(@as(u64, 2), net.getPeer(1).?.raft.term);
+
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+    try std.testing.expectEqual(@as(u64, 3), net.getPeer(1).?.raft.term);
+
+    for (1..6) |id| try expectLogTerms(net.getPeer(id).?, &.{ 1, 3 });
 }

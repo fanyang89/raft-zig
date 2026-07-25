@@ -1400,6 +1400,11 @@ pub const Raft = struct {
             } };
             const ents = self.raft_log.getEntries(pr.next_idx, self.max_message_size, ctx) catch |e| switch (e) {
                 error.LogTemporarilyUnavailable => return false,
+                error.Compacted => {
+                    if (!try self.prepareSendSnapshot(&m, pr, to)) return false;
+                    try self.send(m);
+                    return true;
+                },
                 else => return e,
             };
             defer {
