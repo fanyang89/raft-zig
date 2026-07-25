@@ -48,7 +48,7 @@ test "rpc: failed transport start releases resources" {
         unexpected.destroy();
         return error.TestUnexpectedResult;
     } else |err| {
-        try std.testing.expectEqual(error.ListenFailed, err);
+        try std.testing.expectEqual(error.BindFailed, err);
     }
 }
 

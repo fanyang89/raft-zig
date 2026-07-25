@@ -1,4 +1,4 @@
-//! Thread-safe inbound message queue bridging grpc-lite's libuv thread
+//! Thread-safe inbound message queue bridging grpc-lite's event-loop thread
 //! and the Raftor event loop thread.
 //!
 //! grpc handlers push decoded Messages here; `poll()` drains them on the

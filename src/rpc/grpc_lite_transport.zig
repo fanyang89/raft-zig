@@ -99,7 +99,7 @@ pub const GrpcLiteTransport = struct {
     }
 
     /// grpc handler: decode the unary payload and push to the mailbox.
-    /// Runs on grpc-lite's libuv thread — must not touch raft state.
+    /// Runs on grpc-lite's event-loop thread — must not touch raft state.
     fn handleMessage(
         context: ?*anyopaque,
         response_allocator: std.mem.Allocator,
