@@ -39,3 +39,42 @@ test "HashiCorp Raft: only configured voters contribute voting power" {
     try voters.put(2, {});
     try std.testing.expect(candidate.raft.progress_tracker.hasQuorum(voters));
 }
+
+test "HashiCorp Raft: raft_test.go::TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin" {
+    const high_term: u64 = 7;
+    var net = try network.newNetworkWithConfiguration(.{
+        .peer_ids = &.{ 1, 2, 3 },
+        .voters = &.{ 1, 2 },
+        .learners = &.{3},
+    }, .{ .pre_vote = true });
+    defer net.deinit();
+
+    try net.isolate(3);
+    try net.stepLocal(3, .{
+        .msg_type = .request_vote,
+        .from = 9,
+        .to = 3,
+        .term = high_term,
+    });
+    _ = try net.runUntilIdle(100);
+
+    const learner = net.getPeer(3).?;
+    try std.testing.expectEqual(high_term, learner.raft.term);
+    try net.stepLocal(3, .{ .msg_type = .hup, .from = 3, .to = 3 });
+    try std.testing.expectEqual(raft.StateRole.follower, learner.raft.state);
+    try std.testing.expect(!learner.raft.promotable);
+
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+
+    net.recover();
+    try net.send(&.{.{ .msg_type = .beat, .from = 1, .to = 1 }});
+    try std.testing.expectEqual(high_term, net.getPeer(1).?.raft.term);
+    try std.testing.expectEqual(raft.StateRole.follower, learner.raft.state);
+
+    const digest = try net.converge(64, 1_000);
+    try std.testing.expect(digest.term > high_term);
+    try std.testing.expect(digest.leader_id == 1 or digest.leader_id == 2);
+    try std.testing.expectEqual(raft.StateRole.follower, learner.raft.state);
+    try net.checkSafety();
+}
