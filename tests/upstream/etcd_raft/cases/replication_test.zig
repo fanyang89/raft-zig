@@ -69,3 +69,68 @@ test "etcd/raft: proposals replicate across consecutive leaders" {
         }
     }
 }
+
+test "etcd/raft: delayed rejection cannot move next below matched" {
+    var net = try network.newNetwork(&.{ 1, 2 });
+    defer net.deinit();
+    const leader = net.getPeer(1).?;
+    leader.raft.becomeCandidate();
+    try leader.raft.becomeLeader();
+    const progress = leader.raft.progress_tracker.getPtr(2).?;
+    progress.becomeReplicate();
+
+    var first = try proposal(1, "first");
+    defer first.deinit(allocator);
+    try net.stepLocal(1, first);
+    var second = try proposal(1, "second");
+    defer second.deinit(allocator);
+    try net.stepLocal(1, second);
+
+    try std.testing.expectEqual(@as(usize, 2), net.pendingCount());
+    try std.testing.expectEqual(@as(u64, 0), net.pending.items[0].index);
+    try std.testing.expectEqual(@as(usize, 2), net.pending.items[0].entries.len);
+    try std.testing.expectEqual(@as(u64, 2), net.pending.items[1].index);
+    try std.testing.expectEqual(@as(usize, 1), net.pending.items[1].entries.len);
+    try std.testing.expectEqual(@as(u64, 3), net.pending.items[1].entries[0].index);
+
+    _ = try net.deliverAt(1);
+    try std.testing.expectEqual(@as(usize, 2), net.pendingCount());
+    try std.testing.expect(net.pending.items[1].reject);
+    try std.testing.expectEqual(@as(u64, 2), net.pending.items[1].index);
+    try std.testing.expectEqual(@as(u64, 0), net.pending.items[1].reject_hint);
+
+    _ = try net.deliverAt(0);
+    _ = try net.deliverAt(1);
+    try std.testing.expectEqual(raft.ProgressState.replicate, progress.state);
+    try std.testing.expectEqual(@as(u64, 2), progress.matched);
+    try std.testing.expectEqual(@as(u64, 4), progress.next_idx);
+
+    try std.testing.expectEqual(@as(usize, 2), net.pendingCount());
+    try std.testing.expectEqual(raft.MessageType.append, net.pending.items[1].msg_type);
+    try std.testing.expectEqual(@as(usize, 0), net.pending.items[1].entries.len);
+    try std.testing.expectEqual(@as(u64, 2), net.pending.items[1].commit);
+    try net.dropPending(1);
+
+    try net.stepLocal(1, .{
+        .msg_type = .unreachable_peer,
+        .from = 2,
+        .to = 1,
+    });
+    try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+    try std.testing.expectEqual(@as(u64, 2), progress.matched);
+    try std.testing.expectEqual(@as(u64, 3), progress.next_idx);
+
+    _ = try net.deliverAt(0);
+    try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+    try std.testing.expectEqual(@as(u64, 2), progress.matched);
+    try std.testing.expectEqual(@as(u64, 3), progress.next_idx);
+    try std.testing.expect(progress.paused);
+
+    try std.testing.expectEqual(@as(usize, 1), net.pendingCount());
+    const retry = net.pending.items[0];
+    try std.testing.expectEqual(raft.MessageType.append, retry.msg_type);
+    try std.testing.expectEqual(progress.matched, retry.index);
+    try std.testing.expectEqual(@as(usize, 1), retry.entries.len);
+    try std.testing.expectEqual(@as(u64, 3), retry.entries[0].index);
+    try std.testing.expectEqualStrings("second", retry.entries[0].data);
+}

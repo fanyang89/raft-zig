@@ -216,7 +216,7 @@ pub const Raft = struct {
             .messages = .empty,
 
             .max_inflight = config.max_inflight_messages,
-            .max_message_size = config.max_size_per_message,
+            .max_message_size = config.effectiveMaxSizePerMessage(),
             .check_quorum = config.check_quorum,
             .pre_vote = config.pre_vote,
             .skip_broadcast_commit = config.skip_broadcast_commit,

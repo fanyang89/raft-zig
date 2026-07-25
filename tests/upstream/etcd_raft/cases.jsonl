@@ -167,7 +167,7 @@
 {"id":"raft_test.go::TestLearnerPromotion","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner promotion behavior."}
 {"id":"raft_test.go::TestLearnerReceiveSnapshot","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"The upstream snapshot scenario remains to be adapted."}
 {"id":"raft_test.go::TestLogReplication","path":"raft_test.go","category":"log-replication","status":"adapted","target":"tests/upstream/etcd_raft/cases/replication_test.zig","rationale":"Adapted payload replication across one and two consecutive leaders."}
-{"id":"raft_test.go::TestLogReplicationWithReorderedMessage","path":"raft_test.go","category":"log-replication","status":"planned","rationale":"The upstream log-replication scenario remains to be adapted."}
+{"id":"raft_test.go::TestLogReplicationWithReorderedMessage","path":"raft_test.go","category":"log-replication","status":"adapted","target":"tests/upstream/etcd_raft/cases/replication_test.zig","rationale":"Adapted the delayed rejection regression that clamps next_idx above matched."}
 {"id":"raft_test.go::TestMsgAppRespWaitReset","path":"raft_test.go","category":"append-entries","status":"planned","rationale":"Resetting append-response wait state through actual response processing remains to be tested."}
 {"id":"raft_test.go::TestNewLeaderPendingConfig","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
 {"id":"raft_test.go::TestNodeWithSmallerTermCanCompleteElection","path":"raft_test.go","category":"election","status":"planned","rationale":"The upstream election scenario remains to be adapted."}

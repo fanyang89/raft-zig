@@ -70,6 +70,13 @@ pub const Config = struct {
         return self.max_election_tick;
     }
 
+    pub fn effectiveMaxSizePerMessage(self: Config) u64 {
+        return if (self.max_size_per_message == 0)
+            std.math.maxInt(u64)
+        else
+            self.max_size_per_message;
+    }
+
     pub fn validate(self: Config) Error!void {
         if (self.id == primitives.invalid_id) return error.InvalidNodeId;
         if (self.heartbeat_tick == 0) return error.HeartbeatTickTooSmall;
@@ -86,7 +93,7 @@ pub const Config = struct {
             return error.LeaseBasedReadRequiresCheckQuorum;
         }
 
-        if (self.max_uncommitted_size < self.max_size_per_message) {
+        if (self.max_uncommitted_size < self.effectiveMaxSizePerMessage()) {
             return error.InvalidConfig;
         }
 
@@ -104,6 +111,20 @@ test "validate accepts the default config after patching id" {
     var c = defaultConfig();
     c.id = 1;
     try c.validate();
+}
+
+test "zero max message size validates as unlimited" {
+    var config = defaultConfig();
+    config.id = 1;
+    try config.validate();
+    try std.testing.expectEqual(std.math.maxInt(u64), config.effectiveMaxSizePerMessage());
+
+    config.max_uncommitted_size = 1024;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+
+    config.max_size_per_message = 512;
+    try config.validate();
+    try std.testing.expectEqual(@as(u64, 512), config.effectiveMaxSizePerMessage());
 }
 
 test "validate rejects zero id" {
