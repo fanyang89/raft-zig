@@ -701,7 +701,7 @@ pub const Raft = struct {
                 // if multiple arrive in a single batch.
                 var conf_change_position: ?usize = null;
                 for (m.entries, 0..) |e, i| {
-                    if (e.entry_type == .conf_change_v2) {
+                    if (e.entry_type == .conf_change or e.entry_type == .conf_change_v2) {
                         if (self.hasPendingConf()) {
                             log.debug("node {} dropped ConfChangeV2 while another is pending", .{self.id});
                             return error.ProposalDropped;
@@ -854,7 +854,7 @@ pub const Raft = struct {
             found: *bool,
             pub fn scan(self_: *@This(), entries: []const Entry) Error!bool {
                 for (entries) |e| {
-                    if (e.entry_type == .conf_change_v2) {
+                    if (e.entry_type == .conf_change or e.entry_type == .conf_change_v2) {
                         self_.found.* = true;
                         return false;
                     }
@@ -1467,7 +1467,10 @@ pub const Raft = struct {
         if (!pr.recent_active) return false;
 
         msg.msg_type = .snapshot;
-        const snap = try self.raft_log.getSnapshot(pr.pending_request_snapshot, to);
+        const snap = self.raft_log.getSnapshot(pr.pending_request_snapshot, to) catch |err| switch (err) {
+            error.SnapshotTemporarilyUnavailable => return false,
+            else => return err,
+        };
         if (snap.metadata.index == 0) @panic("need non-empty snapshot");
         pr.becomeSnapshot(snap.metadata.index);
         msg.snapshot = snap;
