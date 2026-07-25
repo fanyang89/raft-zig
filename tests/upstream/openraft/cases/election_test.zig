@@ -138,7 +138,10 @@ test "OpenRaft: heartbeat lease blocks vote until expiration" {
     try std.testing.expectEqual(term_before, follower.storage.core.raft_state.hard_state.term);
     try std.testing.expectEqual(vote_before, follower.storage.core.raft_state.hard_state.vote);
 
-    follower.raft.election_elapsed = follower.raft.election_timeout;
+    follower.raft.randomized_election_timeout = follower.raft.election_timeout + 1;
+    for (0..follower.raft.election_timeout) |_| _ = try net.tickPeer(2);
+    try std.testing.expectEqual(raft.StateRole.follower, follower.raft.state);
+    try std.testing.expectEqual(follower.raft.election_timeout, follower.raft.election_elapsed);
     try net.stepLocal(2, request);
 
     try std.testing.expectEqual(raft.StateRole.follower, follower.raft.state);

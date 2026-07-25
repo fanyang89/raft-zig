@@ -32,11 +32,14 @@ test "HashiCorp Raft: raft_test.go::TestRaft_LeaderFail" {
 
     try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
     try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+    try propose(&net, 1, "committed-before-failover");
+    try std.testing.expect(containsData(net.getPeer(2).?, "committed-before-failover"));
+    const committed_before_failover = net.getPeer(1).?.raft.raft_log.committed;
 
     try net.isolate(1);
     try propose(&net, 1, "abandoned-write");
     try std.testing.expect(containsData(net.getPeer(1).?, "abandoned-write"));
-    try std.testing.expectEqual(@as(u64, 1), net.getPeer(1).?.raft.raft_log.committed);
+    try std.testing.expectEqual(committed_before_failover, net.getPeer(1).?.raft.raft_log.committed);
 
     try net.send(&.{.{ .msg_type = .hup, .from = 2, .to = 2 }});
     try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(2).?.raft.state);
@@ -50,6 +53,7 @@ test "HashiCorp Raft: raft_test.go::TestRaft_LeaderFail" {
     for ([_]u64{ 1, 2, 3 }) |id| {
         const peer = net.getPeer(id).?;
         try std.testing.expect(!containsData(peer, "abandoned-write"));
+        try std.testing.expect(containsData(peer, "committed-before-failover"));
         try std.testing.expect(containsData(peer, "surviving-write"));
     }
     try net.checkSafety();

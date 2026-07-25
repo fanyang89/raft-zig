@@ -697,22 +697,22 @@ pub const Raft = struct {
                 if (!self.progress_tracker.progress.contains(self.id)) return error.ProposalDropped;
                 if (self.lead_transferee != null) return error.ProposalDropped;
 
-                // Detect ConfChangeV2 proposals; reject if one is pending or
+                // Detect configuration proposals; reject if one is pending or
                 // if multiple arrive in a single batch.
                 var conf_change_position: ?usize = null;
                 for (m.entries, 0..) |e, i| {
                     if (e.entry_type == .conf_change or e.entry_type == .conf_change_v2) {
                         if (self.hasPendingConf()) {
-                            log.debug("node {} dropped ConfChangeV2 while another is pending", .{self.id});
+                            log.debug("node {} dropped configuration change while another is pending", .{self.id});
                             return error.ProposalDropped;
                         }
                         if (conf_change_position != null) {
-                            log.debug("node {} dropped multiple ConfChangeV2 entries", .{self.id});
+                            log.debug("node {} dropped multiple configuration changes", .{self.id});
                             return error.ProposalDropped;
                         }
                         conf_change_position = i;
                         if (e.data.len == 0) {
-                            log.debug("node {} dropped ConfChangeV2 without data", .{self.id});
+                            log.debug("node {} dropped configuration change without data", .{self.id});
                             return error.ProposalDropped;
                         }
                     }
@@ -864,7 +864,7 @@ pub const Raft = struct {
         };
         var found = false;
         var finder = Finder{ .found = &found };
-        self.raft_log.scan(low, high, self.max_committed_size_per_ready, GetEntriesContext{ .transfer_leader = {} }, Finder, &finder) catch return false;
+        self.raft_log.scan(low, high, self.max_committed_size_per_ready, GetEntriesContext{ .transfer_leader = {} }, Finder, &finder) catch return true;
         return found;
     }
 
@@ -1387,6 +1387,7 @@ pub const Raft = struct {
 
     fn maybeSendAppend(self: *Raft, to: u64, pr: *Progress, allow_empty: bool) Error!bool {
         if (pr.isPaused()) return false;
+        try self.messages.ensureUnusedCapacity(self.allocator, 1);
 
         var m = Message{ .to = to };
 

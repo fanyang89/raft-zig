@@ -33,6 +33,7 @@ fn installSnapshot(peer: *network.Peer) !void {
     try peer.storage.applySnapshot(allocator, pending);
     peer.raft.raft_log.stableSnapshot(pending.metadata.index);
     peer.raft.onPersistSnapshot(pending.metadata.index);
+    peer.raft.commitApply(pending.metadata.index);
     peer.raft.becomeFollower(11, raft.invalid_id);
     try peer.storage.setHardState(peer.raft.hardState());
 }

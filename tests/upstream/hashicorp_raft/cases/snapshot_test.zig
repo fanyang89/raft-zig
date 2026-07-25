@@ -24,6 +24,7 @@ fn propose(net: *network.Network, id: u64, data: []const u8) !void {
 fn compactCommitted(peer: *network.Peer) !u64 {
     var snapshot = try peer.storage.getSnapshot(allocator, 0, peer.raft.id);
     defer snapshot.deinit(allocator);
+    snapshot.data = try allocator.dupe(u8, "snapshot-state");
     const index = snapshot.metadata.index;
     try peer.storage.applyLocalSnapshot(allocator, snapshot);
     try std.testing.expectEqual(index + 1, peer.storage.core.firstIndex());
@@ -38,18 +39,8 @@ fn containsData(peer: *network.Peer, data: []const u8) bool {
 }
 
 fn sendSnapshot(net: *network.Network, leader: *network.Peer, follower: *network.Peer) !void {
-    const progress = leader.raft.progress_tracker.getPtr(follower.raft.id).?;
-    progress.next_idx = leader.raft.raft_log.firstIndex();
-    try net.stepLocal(leader.raft.id, .{
-        .msg_type = .append_response,
-        .from = follower.raft.id,
-        .to = leader.raft.id,
-        .index = progress.next_idx - 1,
-        .reject = true,
-    });
-    try std.testing.expectEqual(@as(usize, 1), net.pendingCount());
-    try std.testing.expectEqual(raft.MessageType.snapshot, net.pending.items[0].msg_type);
-    try std.testing.expectEqual(network.Delivery.delivered, (try net.deliverOne()).?);
+    try net.send(&.{.{ .msg_type = .beat, .from = leader.raft.id, .to = leader.raft.id }});
+    try std.testing.expectEqualStrings("snapshot-state", follower.storage.core.snapshot_data.data);
 
     try net.stepLocal(leader.raft.id, .{
         .msg_type = .snap_status,

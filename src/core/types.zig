@@ -173,7 +173,10 @@ pub const ConfChangeV2 = struct {
     }
 };
 
-/// Legacy single-shot configuration change. Kept for wire compatibility.
+/// Legacy single-shot configuration change API shape.
+///
+/// raft-zig uses its internal configuration codec rather than upstream wire
+/// encodings when applying configuration entries.
 pub const ConfChange = struct {
     change_type: ConfChangeType = .add_node,
     node_id: u64 = 0,
