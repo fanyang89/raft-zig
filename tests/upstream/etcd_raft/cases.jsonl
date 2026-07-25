@@ -160,11 +160,11 @@
 {"id":"raft_test.go::TestLeaderTransferToUpToDateNode","path":"raft_test.go","category":"leadership-transfer","status":"adapted","target":"tests/upstream/etcd_raft/cases/leadership_transfer_test.zig","rationale":"Transfers leadership to a fully replicated voter."}
 {"id":"raft_test.go::TestLeaderTransferToUpToDateNodeFromFollower","path":"raft_test.go","category":"leadership-transfer","status":"adapted","target":"tests/upstream/etcd_raft/cases/leadership_transfer_test.zig","rationale":"Covers follower forwarding of transfer requests."}
 {"id":"raft_test.go::TestLeaderTransferWithCheckQuorum","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The upstream leadership-transfer scenario remains to be adapted."}
-{"id":"raft_test.go::TestLearnerCampaign","path":"raft_test.go","category":"learner","status":"planned","rationale":"The upstream learner scenario remains to be adapted."}
-{"id":"raft_test.go::TestLearnerCanVote","path":"raft_test.go","category":"learner","status":"planned","rationale":"The upstream learner scenario remains to be adapted."}
-{"id":"raft_test.go::TestLearnerElectionTimeout","path":"raft_test.go","category":"learner","status":"planned","rationale":"The upstream learner scenario remains to be adapted."}
-{"id":"raft_test.go::TestLearnerLogReplication","path":"raft_test.go","category":"learner","status":"planned","rationale":"The upstream learner scenario remains to be adapted."}
-{"id":"raft_test.go::TestLearnerPromotion","path":"raft_test.go","category":"learner","status":"planned","rationale":"The upstream learner scenario remains to be adapted."}
+{"id":"raft_test.go::TestLearnerCampaign","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner campaign eligibility behavior."}
+{"id":"raft_test.go::TestLearnerCanVote","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner vote-response behavior."}
+{"id":"raft_test.go::TestLearnerElectionTimeout","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner election-timeout behavior."}
+{"id":"raft_test.go::TestLearnerLogReplication","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner replication and quorum behavior."}
+{"id":"raft_test.go::TestLearnerPromotion","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner promotion behavior."}
 {"id":"raft_test.go::TestLearnerReceiveSnapshot","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"The upstream snapshot scenario remains to be adapted."}
 {"id":"raft_test.go::TestLogReplication","path":"raft_test.go","category":"log-replication","status":"planned","rationale":"The upstream replication matrix across partitions and quorum availability remains to be tested."}
 {"id":"raft_test.go::TestLogReplicationWithReorderedMessage","path":"raft_test.go","category":"log-replication","status":"planned","rationale":"The upstream log-replication scenario remains to be adapted."}
@@ -184,7 +184,7 @@
 {"id":"raft_test.go::TestProgressLeader","path":"raft_test.go","category":"progress","status":"planned","rationale":"Leader progress initialization for self and followers after election remains to be tested."}
 {"id":"raft_test.go::TestProgressPaused","path":"raft_test.go","category":"progress","status":"covered_elsewhere","target":"tests/raft_flow_control_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestProgressResumeByHeartbeatResp","path":"raft_test.go","category":"heartbeat","status":"planned","rationale":"Resuming paused follower progress by processing a heartbeat response remains to be tested."}
-{"id":"raft_test.go::TestPromotable","path":"raft_test.go","category":"configuration","status":"planned","rationale":"The upstream configuration scenario remains to be adapted."}
+{"id":"raft_test.go::TestPromotable","path":"raft_test.go","category":"configuration","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted voter, learner, and non-member promotability matrix."}
 {"id":"raft_test.go::TestProposal","path":"raft_test.go","category":"proposal","status":"planned","rationale":"Proposal handling across follower, candidate, leader, and unavailable-leader states remains to be tested."}
 {"id":"raft_test.go::TestProposalByProxy","path":"raft_test.go","category":"proposal","status":"planned","rationale":"The upstream proposal scenario remains to be adapted."}
 {"id":"raft_test.go::TestProvideSnap","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"The upstream snapshot scenario remains to be adapted."}
@@ -194,12 +194,12 @@
 {"id":"raft_test.go::TestReadOnlyForNewLeader","path":"raft_test.go","category":"read-index","status":"adapted","target":"tests/upstream/etcd_raft/cases/read_index_test.zig","rationale":"Postpones reads until an entry from the leader's term is committed, then serves them."}
 {"id":"raft_test.go::TestReadOnlyOptionLease","path":"raft_test.go","category":"read-index","status":"excluded","rationale":"raft-zig-core-v1 requires Safe ReadIndex, not lease-based reads."}
 {"id":"raft_test.go::TestReadOnlyOptionSafe","path":"raft_test.go","category":"read-index","status":"adapted","target":"tests/upstream/etcd_raft/cases/read_index_test.zig","rationale":"Covers leader and follower reads with quorum confirmation."}
-{"id":"raft_test.go::TestReadOnlyWithLearner","path":"raft_test.go","category":"read-index","status":"planned","rationale":"Requires learner-aware construction in the deterministic network."}
+{"id":"raft_test.go::TestReadOnlyWithLearner","path":"raft_test.go","category":"read-index","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted Safe ReadIndex quorum behavior with a learner."}
 {"id":"raft_test.go::TestRecvMsgBeat","path":"raft_test.go","category":"heartbeat","status":"planned","rationale":"The upstream heartbeat scenario remains to be adapted."}
 {"id":"raft_test.go::TestRecvMsgPreVote","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}
 {"id":"raft_test.go::TestRecvMsgUnreachable","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"Leader progress fallback after receiving an unreachable notification remains to be tested."}
 {"id":"raft_test.go::TestRecvMsgVote","path":"raft_test.go","category":"voting","status":"covered_elsewhere","target":"tests/raft_paper_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
-{"id":"raft_test.go::TestRemoveLearner","path":"raft_test.go","category":"learner","status":"planned","rationale":"Applying learner removal to Raft progress and configuration state remains to be tested."}
+{"id":"raft_test.go::TestRemoveLearner","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner removal from configuration and progress tracking."}
 {"id":"raft_test.go::TestRemoveNode","path":"raft_test.go","category":"configuration","status":"planned","rationale":"Applying voter removal to Raft progress, quorum, and pending configuration state remains to be tested."}
 {"id":"raft_test.go::TestRestore","path":"raft_test.go","category":"snapshot-restore","status":"planned","rationale":"The full snapshot restore acceptance, rejection, log-match, and configuration matrix remains to be tested."}
 {"id":"raft_test.go::TestRestoreFromSnapMsg","path":"raft_test.go","category":"snapshot-restore","status":"excluded","rationale":"The upstream test is intentionally vacuous and carries an unresolved TODO."}
