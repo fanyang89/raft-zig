@@ -9,10 +9,11 @@ pub const upstream: manifest.Source = .{
     .inventory = @embedFile("cases.jsonl"),
     .expected_case_count = 286,
     .expected_status_counts = .{
-        .reimplemented = 7,
+        .adapted = 1,
+        .reimplemented = 8,
         .covered_elsewhere = 21,
         .excluded = 47,
         .blocked = 11,
-        .planned = 200,
+        .planned = 198,
     },
 };

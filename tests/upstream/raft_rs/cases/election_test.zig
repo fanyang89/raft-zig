@@ -37,3 +37,39 @@ test "raft-rs: newer local last-log term rejects a longer stale candidate" {
     try std.testing.expect(net.pending.items[0].reject);
     try std.testing.expectEqual(@as(u64, 0), peer.storage.core.raft_state.hard_state.vote);
 }
+
+test "raft-rs: dueling pre-candidate does not disrupt the leader" {
+    var net = try network.newNetworkWithOptions(&.{ 1, 2, 3 }, .{ .pre_vote = true });
+    defer net.deinit();
+    try net.cut(1, 3);
+
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+    try net.send(&.{.{ .msg_type = .hup, .from = 3, .to = 3 }});
+
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+    try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(3).?.raft.state);
+
+    net.recover();
+    try net.send(&.{.{ .msg_type = .hup, .from = 3, .to = 3 }});
+
+    const expected = [_]struct {
+        id: u64,
+        state: raft.StateRole,
+        term: u64,
+        committed: u64,
+        applied: u64,
+        last_index: u64,
+    }{
+        .{ .id = 1, .state = .leader, .term = 1, .committed = 1, .applied = 0, .last_index = 1 },
+        .{ .id = 2, .state = .follower, .term = 1, .committed = 1, .applied = 0, .last_index = 1 },
+        .{ .id = 3, .state = .follower, .term = 1, .committed = 0, .applied = 0, .last_index = 0 },
+    };
+    for (expected) |want| {
+        const peer = net.getPeer(want.id).?;
+        try std.testing.expectEqual(want.state, peer.raft.state);
+        try std.testing.expectEqual(want.term, peer.raft.term);
+        try std.testing.expectEqual(want.committed, peer.raft.raft_log.committed);
+        try std.testing.expectEqual(want.applied, peer.raft.raft_log.applied);
+        try std.testing.expectEqual(want.last_index, peer.raft.raft_log.lastIndex());
+    }
+}

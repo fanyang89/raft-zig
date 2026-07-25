@@ -47,6 +47,35 @@ test "OpenRaft: committed log divergence is detected" {
     try std.testing.expectError(error.CommittedLogViolation, net.checkSafety());
 }
 
+test "OpenRaft: higher-term leader missing a committed entry violates leader completeness" {
+    var net = try network.newNetwork(&.{ 1, 2, 3 });
+    defer net.deinit();
+    try net.isolate(2);
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+
+    const witness_peer = net.getPeer(1).?;
+    const missing_peer = net.getPeer(2).?;
+    const committed_index = witness_peer.raft.raft_log.committed;
+    try std.testing.expect(committed_index > 0);
+    try std.testing.expectEqual(@as(u64, 0), missing_peer.raft.raft_log.lastIndex());
+    try net.checkSafety();
+
+    witness_peer.raft.becomeFollower(witness_peer.raft.term, 0);
+    const higher_term = witness_peer.raft.term + 1;
+    missing_peer.raft.term = higher_term;
+    missing_peer.raft.vote = 2;
+    missing_peer.raft.state = .leader;
+    missing_peer.raft.leader_id = 2;
+    missing_peer.raft.raft_log.unstable.offset = committed_index + 1;
+    missing_peer.raft.raft_log.unstable.truncateAndAppend(&.{.{
+        .term = higher_term,
+        .index = committed_index + 1,
+    }});
+
+    try std.testing.expectError(error.Unavailable, missing_peer.raft.raft_log.term(committed_index));
+    try std.testing.expectError(error.LeaderCompletenessViolation, net.checkSafety());
+}
+
 test "OpenRaft: committed index regression is detected" {
     var net = try network.newNetwork(&.{1});
     defer net.deinit();
