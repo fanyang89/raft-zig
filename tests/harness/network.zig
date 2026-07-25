@@ -412,6 +412,14 @@ pub const Network = struct {
     }
 
     fn collectOutput(self: *Network, peer: *Peer) !void {
+        for (peer.raft.messages.items) |message| {
+            if (message.msg_type == .request_vote_response and !message.reject) {
+                const hard_state = peer.storage.core.raft_state.hard_state;
+                if (hard_state.term != message.term or hard_state.vote != message.to) {
+                    return error.UnpersistedVoteResponse;
+                }
+            }
+        }
         try self.pending.ensureUnusedCapacity(allocator, peer.raft.messages.items.len);
         for (peer.raft.messages.items) |message| self.pending.appendAssumeCapacity(message);
         peer.raft.messages.clearRetainingCapacity();
