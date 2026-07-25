@@ -41,7 +41,7 @@ behavior; executing related code or testing a broader component is not enough.
 | Source | Cases | Adapted | Reimplemented | Covered | Planned | Excluded | Blocked |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | etcd/raft | 299 | 20 | 0 | 69 | 180 | 30 | 0 |
-| raft-rs | 263 | 1 | 0 | 100 | 149 | 7 | 6 |
+| raft-rs | 263 | 2 | 0 | 99 | 149 | 7 | 6 |
 | OpenRaft | 286 | 0 | 7 | 21 | 200 | 47 | 11 |
 | HashiCorp Raft | 184 | 0 | 1 | 16 | 57 | 91 | 19 |
-| Total | 1032 | 21 | 8 | 206 | 586 | 175 | 36 |
+| Total | 1032 | 22 | 8 | 205 | 586 | 175 | 36 |

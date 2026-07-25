@@ -33,3 +33,24 @@ test "raft-rs: leadership transfer ignores learners and unknown nodes" {
     try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(2).?.raft.state);
     try std.testing.expectEqual(@as(u64, 2), net.getPeer(1).?.raft.leader_id);
 }
+
+test "raft-rs: candidate requests a learner vote only after local promotion" {
+    var net = try network.newNetworkWithConfiguration(.{
+        .peer_ids = &.{ 1, 2, 3 },
+        .voters = &.{ 1, 2 },
+        .learners = &.{3},
+    }, .{});
+    defer net.deinit();
+    try net.isolate(2);
+
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+    try std.testing.expectEqual(raft.StateRole.candidate, net.getPeer(1).?.raft.state);
+    try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(3).?.raft.state);
+
+    var promote = [_]raft.ConfChangeSingle{.{ .change_type = .add_node, .node_id = 3 }};
+    try net.applyConfChange(1, .{ .changes = &promote });
+    try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
+
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+    try std.testing.expect(net.getPeer(3).?.raft.progress_tracker.conf.learners.contains(3));
+}

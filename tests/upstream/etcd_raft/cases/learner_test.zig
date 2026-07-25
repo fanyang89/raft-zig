@@ -55,6 +55,16 @@ test "etcd/raft: learner does not campaign" {
     try std.testing.expectEqual(@as(u64, 0), learner.raft.term);
     try std.testing.expectEqual(@as(u64, 0), learner.raft.vote);
     try std.testing.expectEqual(@as(usize, 0), net.pendingCount());
+
+    try net.send(&.{hup(1)});
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+    try net.send(&.{.{
+        .msg_type = .timeout_now,
+        .from = 1,
+        .to = 3,
+        .term = net.getPeer(1).?.raft.term,
+    }});
+    try std.testing.expectEqual(raft.StateRole.follower, learner.raft.state);
 }
 
 test "etcd/raft: learner responds to a valid vote request" {
@@ -111,11 +121,24 @@ test "etcd/raft: learner replicates without contributing to commit quorum" {
     try std.testing.expect(net.getPeer(1).?.raft.raft_log.committed > committed_before);
     try std.testing.expect(containsData(net.getPeer(2).?, "learner-only"));
     try std.testing.expect(containsData(net.getPeer(3).?, "learner-only"));
+    try std.testing.expectEqual(
+        net.getPeer(1).?.raft.raft_log.committed,
+        net.getPeer(3).?.raft.raft_log.committed,
+    );
+    try std.testing.expectEqual(
+        net.getPeer(3).?.raft.raft_log.committed,
+        net.getPeer(1).?.raft.progress_tracker.getPtr(3).?.matched,
+    );
 }
 
 test "etcd/raft: learner promotion makes the node promotable" {
     var net = try newLearnerNetwork();
     defer net.deinit();
+    const first_timeout = net.getPeer(1).?.raft.randomized_election_timeout;
+    for (0..first_timeout) |_| _ = try net.tickPeer(1);
+    _ = try net.runUntilIdle(100);
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
+
     var changes = [_]raft.ConfChangeSingle{.{ .change_type = .add_node, .node_id = 3 }};
     try net.applyConfChangeOnAll(.{ .changes = &changes });
     _ = try net.runUntilIdle(100);
@@ -127,8 +150,11 @@ test "etcd/raft: learner promotion makes the node promotable" {
     }
     try std.testing.expect(net.getPeer(3).?.raft.promotable);
 
-    try net.send(&.{hup(3)});
+    const promoted_timeout = net.getPeer(3).?.raft.randomized_election_timeout;
+    for (0..promoted_timeout) |_| _ = try net.tickPeer(3);
+    _ = try net.runUntilIdle(100);
     try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(3).?.raft.state);
+    try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(1).?.raft.state);
 }
 
 test "etcd/raft: only configured voters are promotable" {
@@ -144,11 +170,18 @@ test "etcd/raft: only configured voters are promotable" {
     try std.testing.expect(!net.getPeer(3).?.raft.promotable);
     try std.testing.expect(!net.getPeer(4).?.raft.promotable);
 
-    try net.stepLocal(3, hup(3));
-    try net.stepLocal(4, hup(4));
+    const learner_timeout = net.getPeer(3).?.raft.randomized_election_timeout;
+    for (0..learner_timeout) |_| _ = try net.tickPeer(3);
+    const non_member_timeout = net.getPeer(4).?.raft.randomized_election_timeout;
+    for (0..non_member_timeout) |_| _ = try net.tickPeer(4);
     try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(3).?.raft.state);
     try std.testing.expectEqual(raft.StateRole.follower, net.getPeer(4).?.raft.state);
     try std.testing.expectEqual(@as(usize, 0), net.pendingCount());
+
+    const voter_timeout = net.getPeer(1).?.raft.randomized_election_timeout;
+    for (0..voter_timeout) |_| _ = try net.tickPeer(1);
+    _ = try net.runUntilIdle(100);
+    try std.testing.expectEqual(raft.StateRole.leader, net.getPeer(1).?.raft.state);
 }
 
 test "etcd/raft: learner is excluded from Safe ReadIndex quorum" {
@@ -178,6 +211,24 @@ test "etcd/raft: learner is excluded from Safe ReadIndex quorum" {
         try std.testing.expectEqual(@as(usize, 0), net.getPeer(1).?.raft.read_states.items.len);
         try std.testing.expectEqual(@as(usize, 1), net.getPeer(1).?.raft.read_only.pendingReadCount());
     }
+    {
+        var net = try newLearnerNetwork();
+        defer net.deinit();
+        try net.send(&.{hup(1)});
+        const committed = net.getPeer(1).?.raft.raft_log.committed;
+
+        var request = try readIndex(3, "learner-forwarded");
+        defer request.deinit(allocator);
+        try net.send(&.{request});
+
+        const learner = net.getPeer(3).?;
+        try std.testing.expectEqual(@as(usize, 1), learner.raft.read_states.items.len);
+        try std.testing.expectEqual(committed, learner.raft.read_states.items[0].index);
+        try std.testing.expectEqualStrings(
+            "learner-forwarded",
+            learner.raft.read_states.items[0].request_ctx,
+        );
+    }
 }
 
 test "etcd/raft: removing learner removes its progress" {
@@ -197,4 +248,20 @@ test "etcd/raft: removing learner removes its progress" {
 
     try net.stepLocal(1, .{ .msg_type = .beat, .from = 1, .to = 1 });
     for (net.pending.items) |message| try std.testing.expect(message.to != 3);
+
+    var singleton = try network.newNetworkWithConfiguration(.{
+        .peer_ids = &.{ 1, 2 },
+        .voters = &.{1},
+        .learners = &.{2},
+    }, .{});
+    defer singleton.deinit();
+    var remove_learner = [_]raft.ConfChangeSingle{.{ .change_type = .remove_node, .node_id = 2 }};
+    try singleton.applyConfChange(1, .{ .changes = &remove_learner });
+    var remove_voter = [_]raft.ConfChangeSingle{.{ .change_type = .remove_node, .node_id = 1 }};
+    try std.testing.expectError(
+        error.RemovedAllVoters,
+        singleton.applyConfChange(1, .{ .changes = &remove_voter }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), singleton.getPeer(1).?.raft.progress_tracker.conf.voters.incoming.count());
+    try std.testing.expect(singleton.getPeer(1).?.raft.progress_tracker.conf.voters.contains(1));
 }

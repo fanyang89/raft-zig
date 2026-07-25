@@ -7,12 +7,18 @@ pub const inventory_target = "tests/upstream/openraft/cases/invariants_test.zig"
 test "OpenRaft: duplicate leaders in one term violate election safety" {
     var net = try network.newNetwork(&.{ 1, 2 });
     defer net.deinit();
-    for ([_]u64{ 1, 2 }) |id| {
-        const peer = net.getPeer(id).?;
-        peer.raft.term = 1;
-        peer.raft.state = .leader;
-        peer.raft.leader_id = id;
-    }
+    const first = net.getPeer(1).?;
+    first.raft.term = 1;
+    first.raft.state = .leader;
+    first.raft.leader_id = 1;
+    try net.checkSafety();
+
+    first.raft.state = .follower;
+    first.raft.leader_id = 0;
+    const second = net.getPeer(2).?;
+    second.raft.term = 1;
+    second.raft.state = .leader;
+    second.raft.leader_id = 2;
 
     try std.testing.expectError(error.ElectionSafetyViolation, net.checkSafety());
 }
