@@ -106,7 +106,7 @@
 {"id":"raft_snap_test.go::TestSnapshotSucceed","path":"raft_snap_test.go","category":"snapshot","status":"covered_elsewhere","target":"tests/raft_snap_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestAddLearner","path":"raft_test.go","category":"learner","status":"covered_elsewhere","target":"tests/raw_node_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestAddNode","path":"raft_test.go","category":"configuration","status":"covered_elsewhere","target":"tests/raw_node_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
-{"id":"raft_test.go::TestAddNodeCheckQuorum","path":"raft_test.go","category":"configuration","status":"planned","rationale":"The upstream configuration scenario remains to be adapted."}
+{"id":"raft_test.go::TestAddNodeCheckQuorum","path":"raft_test.go","category":"configuration","status":"adapted","target":"tests/upstream/etcd_raft/cases/configuration_test.zig","rationale":"Adapted the one-period check-quorum grace granted to a newly added voter."}
 {"id":"raft_test.go::TestAllServerStepdown","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
 {"id":"raft_test.go::TestBcastBeat","path":"raft_test.go","category":"heartbeat","status":"planned","rationale":"The upstream heartbeat scenario remains to be adapted."}
 {"id":"raft_test.go::TestCampaignWhileLeader","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
@@ -118,10 +118,10 @@
 {"id":"raft_test.go::TestCandidateSelfVoteAfterLostElectionPreVote","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}
 {"id":"raft_test.go::TestCannotCommitWithoutNewTermEntry","path":"raft_test.go","category":"commit","status":"covered_elsewhere","target":"tests/figure8_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestCommit","path":"raft_test.go","category":"commit","status":"planned","rationale":"The upstream quorum-size and match-index commit matrix remains to be tested."}
-{"id":"raft_test.go::TestCommitAfterRemoveNode","path":"raft_test.go","category":"configuration","status":"planned","rationale":"The upstream configuration scenario remains to be adapted."}
+{"id":"raft_test.go::TestCommitAfterRemoveNode","path":"raft_test.go","category":"configuration","status":"adapted","target":"tests/upstream/etcd_raft/cases/configuration_test.zig","rationale":"Adapted committing a leader suffix after voter removal shrinks the quorum."}
 {"id":"raft_test.go::TestCommitWithoutNewTermEntry","path":"raft_test.go","category":"commit","status":"covered_elsewhere","target":"tests/figure8_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestConfChangeCheckBeforeCampaign","path":"raft_test.go","category":"configuration","status":"excluded","rationale":"The V1 protobuf configuration-entry path is outside the target wire format."}
-{"id":"raft_test.go::TestConfChangeV2CheckBeforeCampaign","path":"raft_test.go","category":"configuration","status":"planned","rationale":"The upstream configuration scenario remains to be adapted."}
+{"id":"raft_test.go::TestConfChangeV2CheckBeforeCampaign","path":"raft_test.go","category":"configuration","status":"adapted","target":"tests/upstream/etcd_raft/cases/configuration_test.zig","rationale":"Adapted election and transfer campaign suppression while ConfChangeV2 remains unapplied."}
 {"id":"raft_test.go::TestDisruptiveFollower","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
 {"id":"raft_test.go::TestDisruptiveFollowerPreVote","path":"raft_test.go","category":"pre-vote","status":"planned","rationale":"The upstream pre-vote scenario remains to be adapted."}
 {"id":"raft_test.go::TestDuelingCandidates","path":"raft_test.go","category":"election","status":"planned","rationale":"The upstream election scenario remains to be adapted."}
@@ -143,7 +143,7 @@
 {"id":"raft_test.go::TestLeaderIncreaseNext","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"Increasing follower next_idx as append messages are emitted in replicate state remains to be tested."}
 {"id":"raft_test.go::TestLeaderMsgAppSelfAckAfterTermChange","path":"raft_test.go","category":"append-entries","status":"planned","rationale":"The upstream append-entries scenario remains to be adapted."}
 {"id":"raft_test.go::TestLeaderStepdownWhenQuorumActive","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"The upstream check-quorum scenario remains to be adapted."}
-{"id":"raft_test.go::TestLeaderStepdownWhenQuorumLost","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"A check-quorum leader stepping down after an election timeout without quorum activity remains to be tested."}
+{"id":"raft_test.go::TestLeaderStepdownWhenQuorumLost","path":"raft_test.go","category":"check-quorum","status":"covered_elsewhere","target":"tests/raft_test.zig","rationale":"Equivalent check-quorum stepdown behavior is covered by the local Raft test."}
 {"id":"raft_test.go::TestLeaderSupersedingWithCheckQuorum","path":"raft_test.go","category":"check-quorum","status":"planned","rationale":"The upstream check-quorum scenario remains to be adapted."}
 {"id":"raft_test.go::TestLeaderTransferAfterSnapshot","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The deterministic network now supports snapshot safety checks; the leadership-transfer-after-snapshot scenario awaits adaptation."}
 {"id":"raft_test.go::TestLeaderTransferBack","path":"raft_test.go","category":"leadership-transfer","status":"planned","rationale":"The upstream leadership-transfer scenario remains to be adapted."}
@@ -166,7 +166,7 @@
 {"id":"raft_test.go::TestLearnerLogReplication","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner replication and quorum behavior."}
 {"id":"raft_test.go::TestLearnerPromotion","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner promotion behavior."}
 {"id":"raft_test.go::TestLearnerReceiveSnapshot","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"The upstream snapshot scenario remains to be adapted."}
-{"id":"raft_test.go::TestLogReplication","path":"raft_test.go","category":"log-replication","status":"planned","rationale":"The upstream replication matrix across partitions and quorum availability remains to be tested."}
+{"id":"raft_test.go::TestLogReplication","path":"raft_test.go","category":"log-replication","status":"adapted","target":"tests/upstream/etcd_raft/cases/replication_test.zig","rationale":"Adapted payload replication across one and two consecutive leaders."}
 {"id":"raft_test.go::TestLogReplicationWithReorderedMessage","path":"raft_test.go","category":"log-replication","status":"planned","rationale":"The upstream log-replication scenario remains to be adapted."}
 {"id":"raft_test.go::TestMsgAppRespWaitReset","path":"raft_test.go","category":"append-entries","status":"planned","rationale":"Resetting append-response wait state through actual response processing remains to be tested."}
 {"id":"raft_test.go::TestNewLeaderPendingConfig","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"The upstream raft-core scenario remains to be adapted."}
@@ -200,7 +200,7 @@
 {"id":"raft_test.go::TestRecvMsgUnreachable","path":"raft_test.go","category":"raft-core","status":"planned","rationale":"Leader progress fallback after receiving an unreachable notification remains to be tested."}
 {"id":"raft_test.go::TestRecvMsgVote","path":"raft_test.go","category":"voting","status":"covered_elsewhere","target":"tests/raft_paper_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestRemoveLearner","path":"raft_test.go","category":"learner","status":"adapted","target":"tests/upstream/etcd_raft/cases/learner_test.zig","rationale":"Adapted learner removal from configuration and progress tracking."}
-{"id":"raft_test.go::TestRemoveNode","path":"raft_test.go","category":"configuration","status":"planned","rationale":"Applying voter removal to Raft progress, quorum, and pending configuration state remains to be tested."}
+{"id":"raft_test.go::TestRemoveNode","path":"raft_test.go","category":"configuration","status":"covered_elsewhere","target":"tests/confchange_test.zig","rationale":"Equivalent voter removal and last-voter rejection behavior is covered by ConfChanger tests."}
 {"id":"raft_test.go::TestRestore","path":"raft_test.go","category":"snapshot-restore","status":"planned","rationale":"The full snapshot restore acceptance, rejection, log-match, and configuration matrix remains to be tested."}
 {"id":"raft_test.go::TestRestoreFromSnapMsg","path":"raft_test.go","category":"snapshot-restore","status":"excluded","rationale":"The upstream test is intentionally vacuous and carries an unresolved TODO."}
 {"id":"raft_test.go::TestRestoreIgnoreSnapshot","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"The upstream snapshot scenario remains to be adapted."}
@@ -211,7 +211,7 @@
 {"id":"raft_test.go::TestSendAppendForProgressProbe","path":"raft_test.go","category":"progress","status":"planned","rationale":"sendAppend behavior and probe pause transitions remain to be tested through emitted messages."}
 {"id":"raft_test.go::TestSendAppendForProgressReplicate","path":"raft_test.go","category":"progress","status":"planned","rationale":"sendAppend behavior, optimistic next_idx updates, and inflight tracking in replicate state remain to be tested."}
 {"id":"raft_test.go::TestSendAppendForProgressSnapshot","path":"raft_test.go","category":"snapshot","status":"planned","rationale":"Selecting and emitting a snapshot when follower progress is behind compacted storage remains to be tested."}
-{"id":"raft_test.go::TestSingleNodeCandidate","path":"raft_test.go","category":"election","status":"planned","rationale":"The single-node candidate transition and self-vote behavior remain to be asserted before leader promotion."}
+{"id":"raft_test.go::TestSingleNodeCandidate","path":"raft_test.go","category":"election","status":"covered_elsewhere","target":"tests/raft_test.zig","rationale":"Equivalent single-node election behavior is covered by the local Raft test."}
 {"id":"raft_test.go::TestSingleNodeCommit","path":"raft_test.go","category":"commit","status":"covered_elsewhere","target":"tests/raft_test.zig","rationale":"Equivalent behavior is covered by the referenced raft-zig tests."}
 {"id":"raft_test.go::TestSingleNodePreCandidate","path":"raft_test.go","category":"election","status":"planned","rationale":"The upstream election scenario remains to be adapted."}
 {"id":"raft_test.go::TestSlowNodeRestore","path":"raft_test.go","category":"snapshot-restore","status":"planned","rationale":"The deterministic network now supports snapshot safety checks; the slow-node snapshot-restore scenario awaits adaptation."}

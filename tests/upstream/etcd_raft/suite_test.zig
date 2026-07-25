@@ -5,6 +5,8 @@ const pre_vote = @import("cases/pre_vote_test.zig");
 const leadership_transfer = @import("cases/leadership_transfer_test.zig");
 const read_index = @import("cases/read_index_test.zig");
 const learner = @import("cases/learner_test.zig");
+const configuration = @import("cases/configuration_test.zig");
+const replication = @import("cases/replication_test.zig");
 
 test "etcd/raft source metadata" {
     try manifest.audit(std.testing.allocator, source.upstream);
@@ -13,6 +15,8 @@ test "etcd/raft source metadata" {
         leadership_transfer.inventory_target,
         read_index.inventory_target,
         learner.inventory_target,
+        configuration.inventory_target,
+        replication.inventory_target,
     });
 }
 
@@ -21,4 +25,6 @@ test {
     _ = leadership_transfer;
     _ = read_index;
     _ = learner;
+    _ = configuration;
+    _ = replication;
 }

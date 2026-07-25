@@ -116,6 +116,9 @@ test "confchange: simple_safety error paths" {
 
     // Removing the last voter → RemovedAllVoters.
     try simpleErr(&tr, &.{"r1"}, error.RemovedAllVoters);
+    const voters_after_error = try sortedVoters(&tr);
+    defer allocator.free(voters_after_error);
+    try std.testing.expectEqualSlices(u64, &.{1}, voters_after_error);
 }
 
 test "confchange: simple_promote_demote learner↔voter transitions" {
