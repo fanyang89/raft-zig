@@ -9,7 +9,7 @@ Each inventory entry has one status:
 - `adapted`: implemented from a permissively licensed upstream test.
 - `reimplemented`: independently implemented from observable behavior.
 - `covered_elsewhere`: an existing raft-zig test already covers the behavior.
-- `excluded`: outside the raft-zig-core-v1 scope or implementation-specific.
+- `excluded`: outside scope, implementation-specific, or delegated to the primary baseline by source policy.
 - `blocked`: relevant, but the product or test harness lacks a prerequisite.
 - `planned`: accepted for future implementation.
 
@@ -40,8 +40,8 @@ behavior; executing related code or testing a broader component is not enough.
 
 | Source | Cases | Adapted | Reimplemented | Covered | Planned | Excluded | Blocked |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| etcd/raft | 299 | 36 | 0 | 72 | 138 | 50 | 3 |
+| etcd/raft | 299 | 36 | 0 | 71 | 139 | 50 | 3 |
 | raft-rs | 263 | 44 | 0 | 111 | 0 | 99 | 9 |
-| OpenRaft | 286 | 5 | 8 | 31 | 65 | 163 | 14 |
-| HashiCorp Raft | 184 | 0 | 9 | 27 | 25 | 104 | 19 |
-| Total | 1032 | 85 | 17 | 241 | 228 | 416 | 45 |
+| OpenRaft | 286 | 5 | 8 | 28 | 72 | 162 | 11 |
+| HashiCorp Raft | 184 | 0 | 9 | 25 | 27 | 104 | 19 |
+| Total | 1032 | 85 | 17 | 235 | 238 | 415 | 42 |
