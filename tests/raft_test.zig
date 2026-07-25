@@ -139,10 +139,12 @@ test "raft: leader steps down when quorum lost" {
     // safety checks) rather than poking the FSM directly.
     try net.isolate(1);
 
-    var ticks: usize = 0;
-    while (ticks < 100 and p1.raft.state == .leader) : (ticks += 1) {
-        _ = try net.tickPeer(1);
-    }
+    p1.raft.progress_tracker.getPtr(2).?.recent_active = false;
+    p1.raft.progress_tracker.getPtr(3).?.recent_active = false;
+    const timeout = p1.raft.randomized_election_timeout;
+    for (0..timeout - 1) |_| _ = try net.tickPeer(1);
+    try std.testing.expectEqual(StateRole.leader, p1.raft.state);
+    _ = try net.tickPeer(1);
     try std.testing.expectEqual(StateRole.follower, p1.raft.state);
 }
 

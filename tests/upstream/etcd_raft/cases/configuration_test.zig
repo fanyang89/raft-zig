@@ -122,6 +122,7 @@ test "etcd/raft: removing a voter can commit the leader suffix" {
     leader.raft.commitApply(conf_index);
     try net.applyConfChange(1, .{ .changes = &changes });
     try std.testing.expectEqual(conf_index + 1, leader.raft.raft_log.committed);
+    try std.testing.expectEqual(leader.raft.hardState(), leader.storage.core.raft_state.hard_state);
     try std.testing.expect(leader.raft.progress_tracker.conf.voters.contains(1));
     try std.testing.expect(!leader.raft.progress_tracker.conf.voters.contains(2));
 

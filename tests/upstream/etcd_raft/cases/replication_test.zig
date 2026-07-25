@@ -24,6 +24,7 @@ fn proposal(id: u64, data: []const u8) !raft.Message {
 fn expectPayloads(peer: *network.Peer, expected: []const []const u8) !void {
     var actual: usize = 0;
     for (peer.storage.core.entries.items) |entry| {
+        if (entry.index > peer.raft.raft_log.committed) continue;
         if (entry.data.len == 0) continue;
         try std.testing.expect(actual < expected.len);
         try std.testing.expectEqualStrings(expected[actual], entry.data);

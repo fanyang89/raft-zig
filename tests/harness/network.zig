@@ -235,7 +235,7 @@ pub const Network = struct {
         var conf_state = try peer.raft.applyConfChange(cc);
         defer conf_state.deinit(allocator);
         try peer.storage.setConfState(allocator, conf_state);
-        try persistPeer(peer);
+        try peer.storage.setHardState(peer.raft.hardState());
         try self.collectOutput(peer);
         self.step_count += 1;
         try self.checkSafety();
