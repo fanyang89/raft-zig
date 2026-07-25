@@ -38,10 +38,10 @@ behavior; executing related code or testing a broader component is not enough.
 
 ## Coverage Snapshot
 
-| Source | Cases | Adapted | Covered | Planned | Excluded | Blocked |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| etcd/raft | 299 | 12 | 69 | 186 | 30 | 2 |
-| raft-rs | 263 | 0 | 93 | 155 | 7 | 8 |
-| OpenRaft | 286 | 0 | 21 | 207 | 47 | 11 |
-| HashiCorp Raft | 184 | 0 | 11 | 60 | 91 | 22 |
-| Total | 1032 | 12 | 194 | 608 | 175 | 43 |
+| Source | Cases | Adapted | Reimplemented | Covered | Planned | Excluded | Blocked |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| etcd/raft | 299 | 20 | 0 | 69 | 180 | 30 | 0 |
+| raft-rs | 263 | 1 | 0 | 100 | 149 | 7 | 6 |
+| OpenRaft | 286 | 0 | 7 | 21 | 200 | 47 | 11 |
+| HashiCorp Raft | 184 | 0 | 1 | 16 | 57 | 91 | 19 |
+| Total | 1032 | 21 | 8 | 206 | 586 | 175 | 36 |
