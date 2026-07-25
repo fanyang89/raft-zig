@@ -50,11 +50,34 @@ pub const NetworkOptions = struct {
     check_quorum: bool = false,
 };
 
+pub const InitialConfiguration = struct {
+    peer_ids: []const u64,
+    voters: []const u64,
+    learners: []const u64 = &.{},
+};
+
+const PeerHistory = struct {
+    term: u64,
+    vote: u64,
+    committed: u64,
+};
+
+const CommittedWitness = struct {
+    entry: raft.Entry,
+    committed_term: u64,
+
+    fn deinit(self: *CommittedWitness) void {
+        self.entry.deinit(allocator);
+    }
+};
+
 pub const Network = struct {
     peers: std.AutoHashMap(u64, *Peer),
     ignored: std.AutoHashMap(MessageType, void),
     blocked: std.AutoHashMap(Link, void),
     observed_leaders: std.AutoHashMap(u64, u64),
+    peer_history: std.AutoHashMap(u64, PeerHistory),
+    committed_witnesses: std.AutoHashMap(u64, CommittedWitness),
     pending: std.ArrayList(Message),
     step_count: usize,
 
@@ -64,6 +87,8 @@ pub const Network = struct {
             .ignored = std.AutoHashMap(MessageType, void).init(allocator),
             .blocked = std.AutoHashMap(Link, void).init(allocator),
             .observed_leaders = std.AutoHashMap(u64, u64).init(allocator),
+            .peer_history = std.AutoHashMap(u64, PeerHistory).init(allocator),
+            .committed_witnesses = std.AutoHashMap(u64, CommittedWitness).init(allocator),
             .pending = .empty,
             .step_count = 0,
         };
@@ -81,6 +106,10 @@ pub const Network = struct {
         self.ignored.deinit();
         self.blocked.deinit();
         self.observed_leaders.deinit();
+        self.peer_history.deinit();
+        var witness_it = self.committed_witnesses.valueIterator();
+        while (witness_it.next()) |witness| witness.deinit();
+        self.committed_witnesses.deinit();
         self.* = undefined;
     }
 
@@ -201,6 +230,21 @@ pub const Network = struct {
         try self.checkSafety();
     }
 
+    pub fn applyConfChange(self: *Network, id: u64, cc: raft.ConfChangeV2) !void {
+        const peer = self.peers.get(id) orelse return error.UnknownPeer;
+        var conf_state = try peer.raft.applyConfChange(cc);
+        defer conf_state.deinit(allocator);
+        try peer.storage.setConfState(allocator, conf_state);
+        try self.collectOutput(peer);
+        try self.checkSafety();
+    }
+
+    pub fn applyConfChangeOnAll(self: *Network, cc: raft.ConfChangeV2) !void {
+        const ids = try self.sortedPeerIds();
+        defer allocator.free(ids);
+        for (ids) |id| try self.applyConfChange(id, cc);
+    }
+
     pub fn runUntilIdle(self: *Network, max_steps: usize) !usize {
         var steps: usize = 0;
         while (self.pending.items.len > 0) {
@@ -220,6 +264,8 @@ pub const Network = struct {
         var peers_it = self.peers.valueIterator();
         while (peers_it.next()) |peer_ptr| {
             const peer = peer_ptr.*;
+            try self.checkPeerHistory(peer);
+            try self.recordCommittedEntries(peer);
             if (raft.checkRaftInvariants(&peer.raft)) |violation| {
                 std.log.err(
                     "node {} invariant failed: {s}, role={s}, term={}, peer={}, expected={}, actual={}",
@@ -245,6 +291,7 @@ pub const Network = struct {
                     return error.ElectionSafetyViolation;
                 }
                 observed.value_ptr.* = peer.raft.id;
+                try self.checkLeaderCompleteness(peer);
             }
         }
 
@@ -390,6 +437,65 @@ pub const Network = struct {
         while (it.next()) |id| : (i += 1) ids[i] = id.*;
         std.mem.sort(u64, ids, {}, std.sort.asc(u64));
         return ids;
+    }
+
+    fn checkPeerHistory(self: *Network, peer: *Peer) !void {
+        const current = PeerHistory{
+            .term = peer.raft.term,
+            .vote = peer.raft.vote,
+            .committed = peer.raft.raft_log.committed,
+        };
+        const history = try self.peer_history.getOrPut(peer.raft.id);
+        if (!history.found_existing) {
+            history.value_ptr.* = current;
+            return;
+        }
+        const previous = history.value_ptr.*;
+        if (current.term < previous.term) return error.TermRegression;
+        if (current.committed < previous.committed) return error.CommitRegression;
+        if (current.term == previous.term and previous.vote != 0 and current.vote != previous.vote) {
+            return error.VoteRegression;
+        }
+        history.value_ptr.* = current;
+    }
+
+    fn recordCommittedEntries(self: *Network, peer: *Peer) !void {
+        const first = peer.storage.core.firstIndex();
+        const committed = peer.raft.raft_log.committed;
+        if (first > committed) return;
+        var index = first;
+        while (true) {
+            const entry = entryAt(peer, index) orelse return error.MissingCommittedEntry;
+            const witness = try self.committed_witnesses.getOrPut(index);
+            if (witness.found_existing) {
+                if (!entriesEqual(witness.value_ptr.entry, entry)) return error.CommittedLogViolation;
+            } else {
+                witness.value_ptr.* = .{
+                    .entry = try raft.cloneEntry(allocator, entry),
+                    .committed_term = peer.raft.term,
+                };
+            }
+            if (index == committed) break;
+            index += 1;
+        }
+    }
+
+    fn checkLeaderCompleteness(self: *Network, leader: *Peer) !void {
+        const first = leader.storage.core.firstIndex();
+        var witness_it = self.committed_witnesses.iterator();
+        while (witness_it.next()) |witness| {
+            const index = witness.key_ptr.*;
+            if (witness.value_ptr.committed_term > leader.raft.term) continue;
+            if (index < first) continue;
+            const term = leader.raft.raft_log.term(index) catch return error.LeaderCompletenessViolation;
+            if (term != witness.value_ptr.entry.term) {
+                std.log.err(
+                    "leader {} term {} has entry term {} at committed index {}, expected term {}",
+                    .{ leader.raft.id, leader.raft.term, term, index, witness.value_ptr.entry.term },
+                );
+                return error.LeaderCompletenessViolation;
+            }
+        }
     }
 };
 
@@ -550,14 +656,23 @@ fn hashLength(hash: *std.hash.Wyhash, len: usize) void {
     hash.update(std.mem.asBytes(&value));
 }
 
-fn createPeer(id: u64, peer_ids: []const u64, options: NetworkOptions) !*Peer {
+fn createPeer(
+    id: u64,
+    voters: []const u64,
+    learners: []const u64,
+    options: NetworkOptions,
+) !*Peer {
     const peer = try allocator.create(Peer);
     errdefer allocator.destroy(peer);
     peer.storage = MemoryStorage.init();
     errdefer peer.storage.deinit(allocator);
 
-    const voters = try allocator.dupe(u64, peer_ids);
-    var conf_state = raft.ConfState{ .voters = voters };
+    const owned_voters = try allocator.dupe(u64, voters);
+    const owned_learners = allocator.dupe(u64, learners) catch |err| {
+        allocator.free(owned_voters);
+        return err;
+    };
+    var conf_state = raft.ConfState{ .voters = owned_voters, .learners = owned_learners };
     defer conf_state.deinit(allocator);
     try peer.storage.setRaftState(allocator, .{ .conf_state = conf_state });
 
@@ -573,16 +688,21 @@ fn createPeer(id: u64, peer_ids: []const u64, options: NetworkOptions) !*Peer {
 }
 
 pub fn newNetwork(peer_ids: []const u64) !Network {
-    return newNetworkWithOptions(peer_ids, .{});
+    return newNetworkWithConfiguration(.{ .peer_ids = peer_ids, .voters = peer_ids }, .{});
 }
 
 pub fn newNetworkWithOptions(peer_ids: []const u64, options: NetworkOptions) !Network {
+    return newNetworkWithConfiguration(.{ .peer_ids = peer_ids, .voters = peer_ids }, options);
+}
+
+pub fn newNetworkWithConfiguration(initial: InitialConfiguration, options: NetworkOptions) !Network {
+    try validateInitialConfiguration(initial);
     var network = Network.init();
     errdefer network.deinit();
 
-    for (peer_ids) |id| {
+    for (initial.peer_ids) |id| {
         if (network.peers.contains(id)) return error.DuplicatePeer;
-        const peer = try createPeer(id, peer_ids, options);
+        const peer = try createPeer(id, initial.voters, initial.learners, options);
         network.peers.put(id, peer) catch |err| {
             peer.deinit();
             allocator.destroy(peer);
@@ -591,4 +711,30 @@ pub fn newNetworkWithOptions(peer_ids: []const u64, options: NetworkOptions) !Ne
     }
     try network.checkSafety();
     return network;
+}
+
+fn validateInitialConfiguration(initial: InitialConfiguration) !void {
+    if (initial.voters.len == 0) return error.EmptyVoterSet;
+    try validateUniqueNonZero(initial.peer_ids, error.DuplicatePeer);
+    try validateUniqueNonZero(initial.voters, error.DuplicateVoter);
+    try validateUniqueNonZero(initial.learners, error.DuplicateLearner);
+    for (initial.voters) |id| {
+        if (!containsId(initial.peer_ids, id)) return error.UnknownVoter;
+        if (containsId(initial.learners, id)) return error.VoterIsLearner;
+    }
+    for (initial.learners) |id| {
+        if (!containsId(initial.peer_ids, id)) return error.UnknownLearner;
+    }
+}
+
+fn validateUniqueNonZero(ids: []const u64, duplicate_error: anyerror) !void {
+    for (ids, 0..) |id, index| {
+        if (id == 0) return error.ZeroPeerId;
+        if (containsId(ids[0..index], id)) return duplicate_error;
+    }
+}
+
+fn containsId(ids: []const u64, id: u64) bool {
+    for (ids) |candidate| if (candidate == id) return true;
+    return false;
 }
