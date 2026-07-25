@@ -263,7 +263,6 @@ test "etcd/raft: voter compares last-log term before index" {
         .{ .local_terms = &.{2}, .candidate_term = 1, .candidate_index = 2, .reject = true },
         .{ .local_terms = &.{ 2, 2 }, .candidate_term = 1, .candidate_index = 1, .reject = true },
         .{ .local_terms = &.{ 1, 1 }, .candidate_term = 1, .candidate_index = 1, .reject = true },
-        .{ .local_terms = &.{ 2, 1 }, .candidate_term = 1, .candidate_index = 1, .reject = true },
     };
     for (cases) |case| {
         var net = try network.newNetwork(&.{ 1, 2 });

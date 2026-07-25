@@ -22,15 +22,20 @@ fn proposal(id: u64, data: []const u8) !raft.Message {
 }
 
 fn expectPayloads(peer: *network.Peer, expected: []const []const u8) !void {
+    const entries = (try peer.raft.raft_log.nextEntries(null)) orelse return error.MissingCommittedEntries;
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
     var actual: usize = 0;
-    for (peer.storage.core.entries.items) |entry| {
-        if (entry.index > peer.raft.raft_log.committed) continue;
+    for (entries) |entry| {
         if (entry.data.len == 0) continue;
         try std.testing.expect(actual < expected.len);
         try std.testing.expectEqualStrings(expected[actual], entry.data);
         actual += 1;
     }
     try std.testing.expectEqual(expected.len, actual);
+    peer.raft.commitApply(peer.raft.raft_log.committed);
 }
 
 test "etcd/raft: proposals replicate across consecutive leaders" {
