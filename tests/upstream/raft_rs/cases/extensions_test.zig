@@ -31,6 +31,20 @@ fn expectProgressCommitted(peer: *network.Peer, expected: [3]u64) !void {
     }
 }
 
+fn clearMessages(node: *raft.Raft) void {
+    for (node.messages.items) |*message| message.deinit(allocator);
+    node.messages.clearRetainingCapacity();
+}
+
+fn persistUnstable(node: *raft.Raft, storage: *raft.MemoryStorage) !void {
+    const entries = node.raft_log.unstable.entries.items;
+    if (entries.len == 0) return;
+    const last = entries[entries.len - 1];
+    try storage.append(allocator, entries);
+    node.raft_log.stableEntries(last.index, last.term);
+    try node.onPersistEntries(last.index, last.term);
+}
+
 test "raft-rs: election priority does not bypass log freshness" {
     const Case = struct {
         logs: [3]bool,
@@ -90,6 +104,170 @@ test "raft-rs: election responds to runtime priority changes" {
         try net.send(&.{.{ .msg_type = .hup, .from = 1, .to = 1 }});
         try std.testing.expectEqual(case.expected_state, peer.raft.state);
     }
+}
+
+test "raft-rs: election tick range" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRawNodeStorage(&storage, &.{ 1, 2, 3 });
+
+    var config = raft.defaultConfig();
+    config.id = 1;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.election_timeout_seed = 42;
+
+    var node = try raft.Raft.init(allocator, config, storage.asStorage());
+    defer node.deinit();
+    var saw_default_min = false;
+    var saw_default_max = false;
+    for (0..1000) |_| {
+        node.becomeFollower(node.term, raft.invalid_id);
+        const timeout = node.randomized_election_timeout;
+        try std.testing.expect(timeout >= config.election_tick);
+        try std.testing.expect(timeout < 2 * config.election_tick);
+        saw_default_min = saw_default_min or timeout == config.election_tick;
+        saw_default_max = saw_default_max or timeout == 2 * config.election_tick - 1;
+    }
+    try std.testing.expect(saw_default_min);
+    try std.testing.expect(saw_default_max);
+
+    config.min_election_tick = config.election_tick;
+    try config.validate();
+
+    config.min_election_tick = config.election_tick - 1;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+
+    config.min_election_tick = config.election_tick;
+    config.max_election_tick = config.election_tick;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+
+    config.min_election_tick = 12;
+    config.max_election_tick = 18;
+    try config.validate();
+    var custom_node = try raft.Raft.init(allocator, config, storage.asStorage());
+    defer custom_node.deinit();
+    var saw_custom_min = false;
+    var saw_custom_max = false;
+    for (0..1000) |_| {
+        custom_node.becomeFollower(custom_node.term, raft.invalid_id);
+        const timeout = custom_node.randomized_election_timeout;
+        try std.testing.expect(timeout >= config.min_election_tick);
+        try std.testing.expect(timeout < config.max_election_tick);
+        saw_custom_min = saw_custom_min or timeout == config.min_election_tick;
+        saw_custom_max = saw_custom_max or timeout == config.max_election_tick - 1;
+    }
+    try std.testing.expect(saw_custom_min);
+    try std.testing.expect(saw_custom_max);
+
+    config.min_election_tick = config.election_tick;
+    config.max_election_tick = config.election_tick + 1;
+    var narrow_node = try raft.Raft.init(allocator, config, storage.asStorage());
+    defer narrow_node.deinit();
+    for (0..100) |_| {
+        narrow_node.becomeFollower(narrow_node.term, raft.invalid_id);
+        try std.testing.expectEqual(config.election_tick, narrow_node.randomized_election_timeout);
+    }
+}
+
+test "raft-rs: batch append messages" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRawNodeStorage(&storage, &.{ 1, 2, 3 });
+
+    var config = raft.defaultConfig();
+    config.id = 1;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.batch_append = true;
+    config.election_timeout_seed = 42;
+    var node = try raft.Raft.init(allocator, config, storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+    try node.becomeLeader();
+
+    try node.broadcastAppend();
+    try std.testing.expectEqual(@as(usize, 2), node.messages.items.len);
+    var replies: [2]raft.Message = undefined;
+    for (node.messages.items, 0..) |message, i| {
+        try std.testing.expectEqual(raft.MessageType.append, message.msg_type);
+        try std.testing.expectEqual(@as(usize, 1), message.entries.len);
+        try std.testing.expectEqual(@as(u64, 1), message.entries[0].index);
+        replies[i] = .{
+            .msg_type = .append_response,
+            .from = message.to,
+            .to = message.from,
+            .term = message.term,
+            .index = message.index + message.entries.len,
+        };
+    }
+    clearMessages(&node);
+    for (&replies) |*reply| try node.step(reply);
+    clearMessages(&node);
+    try persistUnstable(&node, &storage);
+    try std.testing.expectEqual(@as(u64, 1), node.raft_log.committed);
+    clearMessages(&node);
+
+    var payload = "data".*;
+    var proposal_entries = [_]raft.Entry{.{ .data = &payload }};
+    for (0..10) |_| {
+        var proposal = raft.Message{
+            .msg_type = .propose,
+            .from = 1,
+            .to = 1,
+            .entries = &proposal_entries,
+        };
+        try node.step(&proposal);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), node.messages.items.len);
+    for (node.messages.items, 2..) |message, to| {
+        try std.testing.expectEqual(raft.MessageType.append, message.msg_type);
+        try std.testing.expectEqual(@as(u64, 1), message.from);
+        try std.testing.expectEqual(to, message.to);
+        try std.testing.expectEqual(@as(u64, 1), message.term);
+        try std.testing.expectEqual(@as(u64, 1), message.log_term);
+        try std.testing.expectEqual(@as(u64, 1), message.index);
+        try std.testing.expectEqual(@as(u64, 1), message.commit);
+        try std.testing.expectEqual(@as(usize, 10), message.entries.len);
+        for (message.entries, 2..) |entry, index| {
+            try std.testing.expectEqual(index, entry.index);
+            try std.testing.expectEqual(@as(u64, 1), entry.term);
+            try std.testing.expectEqualStrings(&payload, entry.data);
+        }
+
+        const progress = node.progress_tracker.at(to);
+        try std.testing.expectEqual(raft.ProgressState.replicate, progress.state);
+        try std.testing.expectEqual(@as(u64, 1), progress.matched);
+        try std.testing.expectEqual(@as(u64, 12), progress.next_idx);
+        try std.testing.expectEqual(@as(usize, 10), progress.inflights.count);
+    }
+
+    var rejection = raft.Message{
+        .msg_type = .append_response,
+        .from = 2,
+        .to = 1,
+        .term = 1,
+        .index = 2,
+        .reject = true,
+    };
+    try node.step(&rejection);
+    try std.testing.expectEqual(@as(usize, 3), node.messages.items.len);
+    const retry = node.messages.items[2];
+    try std.testing.expectEqual(raft.MessageType.append, retry.msg_type);
+    try std.testing.expectEqual(@as(u64, 2), retry.to);
+    try std.testing.expectEqual(@as(u64, 1), retry.index);
+    try std.testing.expectEqual(@as(u64, 1), retry.log_term);
+    try std.testing.expectEqual(@as(u64, 1), retry.commit);
+    try std.testing.expectEqual(@as(usize, 10), retry.entries.len);
+    try std.testing.expectEqual(@as(u64, 2), retry.entries[0].index);
+    try std.testing.expectEqual(@as(u64, 11), retry.entries[9].index);
+
+    const rejected_progress = node.progress_tracker.at(2);
+    try std.testing.expectEqual(raft.ProgressState.probe, rejected_progress.state);
+    try std.testing.expectEqual(@as(u64, 1), rejected_progress.matched);
+    try std.testing.expectEqual(@as(u64, 2), rejected_progress.next_idx);
+    try std.testing.expect(rejected_progress.paused);
 }
 
 test "raft-rs: group commit requires cross-group replication" {
