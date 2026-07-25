@@ -93,7 +93,7 @@ pub const Config = struct {
             return error.LeaseBasedReadRequiresCheckQuorum;
         }
 
-        if (self.max_uncommitted_size < self.effectiveMaxSizePerMessage()) {
+        if (self.max_uncommitted_size < self.max_size_per_message) {
             return error.InvalidConfig;
         }
 
@@ -120,6 +120,9 @@ test "zero max message size validates as unlimited" {
     try std.testing.expectEqual(std.math.maxInt(u64), config.effectiveMaxSizePerMessage());
 
     config.max_uncommitted_size = 1024;
+    try config.validate();
+
+    config.max_size_per_message = 2048;
     try std.testing.expectError(error.InvalidConfig, config.validate());
 
     config.max_size_per_message = 512;
