@@ -11,9 +11,9 @@ pub const upstream: manifest.Source = .{
     .expected_status_counts = .{
         .adapted = 5,
         .reimplemented = 8,
-        .covered_elsewhere = 21,
-        .excluded = 47,
-        .blocked = 11,
-        .planned = 194,
+        .covered_elsewhere = 31,
+        .excluded = 163,
+        .blocked = 14,
+        .planned = 65,
     },
 };
