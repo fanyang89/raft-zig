@@ -284,10 +284,6 @@ pub const Network = struct {
             if (peer.raft.state == .leader) {
                 const observed = try self.observed_leaders.getOrPut(peer.raft.term);
                 if (observed.found_existing and observed.value_ptr.* != peer.raft.id) {
-                    std.log.err(
-                        "term {} has leaders {} and {}",
-                        .{ peer.raft.term, observed.value_ptr.*, peer.raft.id },
-                    );
                     return error.ElectionSafetyViolation;
                 }
                 observed.value_ptr.* = peer.raft.id;
