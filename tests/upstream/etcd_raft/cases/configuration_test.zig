@@ -50,6 +50,441 @@ fn freeEntries(entries: []raft.Entry) void {
     allocator.free(entries);
 }
 
+const ExpectedProgress = struct {
+    id: u64,
+    next_idx: u64,
+};
+
+const ExpectedTracker = struct {
+    voters: []const u64,
+    voters_outgoing: []const u64 = &.{},
+    learners: []const u64 = &.{},
+    learners_next: []const u64 = &.{},
+    progress: []const ExpectedProgress,
+};
+
+const ProgressValues = struct {
+    matched: u64,
+    next_idx: u64,
+    state: raft.ProgressState,
+};
+
+fn expectTracker(tracker: *raft.ProgressTracker, expected: ExpectedTracker) !void {
+    var state = try tracker.conf.toConfState(allocator);
+    defer state.deinit(allocator);
+
+    try std.testing.expectEqualSlices(u64, expected.voters, state.voters);
+    try std.testing.expectEqualSlices(u64, expected.voters_outgoing, state.voters_outgoing);
+    try std.testing.expectEqualSlices(u64, expected.learners, state.learners);
+    try std.testing.expectEqualSlices(u64, expected.learners_next, state.learners_next);
+    try std.testing.expect(!state.auto_leave);
+    try std.testing.expectEqual(expected.progress.len, tracker.progress.count());
+    for (expected.progress) |want| {
+        const progress = tracker.getPtr(want.id) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(u64, 0), progress.matched);
+        try std.testing.expectEqual(want.next_idx, progress.next_idx);
+        try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+    }
+}
+
+fn nextIndex(last_index: u64) u64 {
+    return @max(last_index, 1);
+}
+
+fn applySimple(
+    tracker: *raft.ProgressTracker,
+    last_index: *u64,
+    changes: []const raft.ConfChangeSingle,
+) !void {
+    var result = try raft.ConfChanger.init(tracker).simple(changes);
+    defer result.deinit(allocator);
+    try tracker.applyConf(result.conf, result.changes, nextIndex(last_index.*));
+    last_index.* += 1;
+}
+
+fn applyEnterJoint(
+    tracker: *raft.ProgressTracker,
+    last_index: *u64,
+    changes: []const raft.ConfChangeSingle,
+) !void {
+    var result = try raft.ConfChanger.init(tracker).enterJoint(false, changes);
+    defer result.deinit(allocator);
+    try tracker.applyConf(result.conf, result.changes, nextIndex(last_index.*));
+    last_index.* += 1;
+}
+
+fn applyLeaveJoint(tracker: *raft.ProgressTracker, last_index: *u64) !void {
+    var result = try raft.ConfChanger.init(tracker).leaveJoint();
+    defer result.deinit(allocator);
+    try tracker.applyConf(result.conf, result.changes, nextIndex(last_index.*));
+    last_index.* += 1;
+}
+
+fn expectMapChanges(actual: []const raft.MapChangeEntry, expected: []const raft.MapChangeEntry) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (actual, expected) |got, want| {
+        try std.testing.expectEqual(want.id, got.id);
+        try std.testing.expectEqual(want.kind, got.kind);
+    }
+}
+
+fn markProgress(tracker: *raft.ProgressTracker, id: u64) ProgressValues {
+    const progress = tracker.at(id);
+    const original = ProgressValues{
+        .matched = progress.matched,
+        .next_idx = progress.next_idx,
+        .state = progress.state,
+    };
+    progress.matched = 37;
+    progress.next_idx = 91;
+    progress.state = .replicate;
+    return original;
+}
+
+fn expectMarkedProgress(tracker: *raft.ProgressTracker, id: u64) !void {
+    const progress = tracker.at(id);
+    try std.testing.expectEqual(@as(u64, 37), progress.matched);
+    try std.testing.expectEqual(@as(u64, 91), progress.next_idx);
+    try std.testing.expectEqual(raft.ProgressState.replicate, progress.state);
+}
+
+fn restoreProgress(tracker: *raft.ProgressTracker, id: u64, original: ProgressValues) void {
+    const progress = tracker.at(id);
+    progress.matched = original.matched;
+    progress.next_idx = original.next_idx;
+    progress.state = original.state;
+}
+
+test "etcd/raft: confchange/testdata/joint_idempotency.txt::TestConfChangeDataDriven" {
+    var tracker = raft.ProgressTracker.init(allocator, 10);
+    defer tracker.deinit();
+    var last_index: u64 = 0;
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+
+    const changes = [_]raft.ConfChangeSingle{
+        .{ .change_type = .remove_node, .node_id = 1 },
+        .{ .change_type = .remove_node, .node_id = 2 },
+        .{ .change_type = .remove_node, .node_id = 9 },
+        .{ .change_type = .add_node, .node_id = 2 },
+        .{ .change_type = .add_node, .node_id = 3 },
+        .{ .change_type = .add_node, .node_id = 4 },
+        .{ .change_type = .add_node, .node_id = 2 },
+        .{ .change_type = .add_node, .node_id = 3 },
+        .{ .change_type = .add_node, .node_id = 4 },
+        .{ .change_type = .add_learner_node, .node_id = 2 },
+        .{ .change_type = .add_learner_node, .node_id = 2 },
+        .{ .change_type = .remove_node, .node_id = 4 },
+        .{ .change_type = .remove_node, .node_id = 4 },
+        .{ .change_type = .add_learner_node, .node_id = 1 },
+        .{ .change_type = .add_learner_node, .node_id = 1 },
+    };
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        var result = try raft.ConfChanger.init(&tracker).enterJoint(false, &changes);
+        defer result.deinit(allocator);
+        try expectMapChanges(result.changes, &.{
+            .{ .id = 2, .kind = .add },
+            .{ .id = 3, .kind = .add },
+            .{ .id = 4, .kind = .add },
+            .{ .id = 4, .kind = .remove },
+        });
+        try tracker.applyConf(result.conf, result.changes, nextIndex(last_index));
+        last_index += 1;
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{3},
+        .voters_outgoing = &.{1},
+        .learners = &.{2},
+        .learners_next = &.{1},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 1 },
+        },
+    });
+
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applyLeaveJoint(&tracker, &last_index);
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{3},
+        .learners = &.{ 1, 2 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 1 },
+        },
+    });
+}
+
+test "etcd/raft: confchange/testdata/joint_learners_next.txt::TestConfChangeDataDriven" {
+    var tracker = raft.ProgressTracker.init(allocator, 10);
+    defer tracker.deinit();
+    var last_index: u64 = 0;
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+
+    const joint_changes = [_]raft.ConfChangeSingle{
+        .{ .change_type = .add_node, .node_id = 2 },
+        .{ .change_type = .add_learner_node, .node_id = 1 },
+    };
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applyEnterJoint(&tracker, &last_index, &joint_changes);
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .voters_outgoing = &.{1},
+        .learners_next = &.{1},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+        },
+    });
+
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applyLeaveJoint(&tracker, &last_index);
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .learners = &.{1},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+        },
+    });
+}
+
+test "etcd/raft: confchange/testdata/simple_idempotency.txt::TestConfChangeDataDriven" {
+    var tracker = raft.ProgressTracker.init(allocator, 10);
+    defer tracker.deinit();
+    var last_index: u64 = 0;
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 1 }});
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 2 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 2 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 2 },
+        },
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_learner_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .learners = &.{1},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 2 },
+        },
+    });
+
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_learner_node, .node_id = 1 }});
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .learners = &.{1},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 2 },
+        },
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .remove_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .progress = &.{.{ .id = 2, .next_idx = 2 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .remove_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .progress = &.{.{ .id = 2, .next_idx = 2 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 3 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{ 2, 3 },
+        .progress = &.{
+            .{ .id = 2, .next_idx = 2 },
+            .{ .id = 3, .next_idx = 7 },
+        },
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .remove_node, .node_id = 3 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .progress = &.{.{ .id = 2, .next_idx = 2 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .remove_node, .node_id = 3 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .progress = &.{.{ .id = 2, .next_idx = 2 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .remove_node, .node_id = 4 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{2},
+        .progress = &.{.{ .id = 2, .next_idx = 2 }},
+    });
+}
+
+test "etcd/raft: confchange/testdata/simple_promote_demote.txt::TestConfChangeDataDriven" {
+    var tracker = raft.ProgressTracker.init(allocator, 10);
+    defer tracker.deinit();
+    var last_index: u64 = 0;
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 1 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 2 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 2 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+        },
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 3 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 2, 3 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 2 },
+        },
+    });
+
+    const demote_promote = [_]raft.ConfChangeSingle{
+        .{ .change_type = .add_learner_node, .node_id = 1 },
+        .{ .change_type = .add_node, .node_id = 1 },
+    };
+    {
+        const original = markProgress(&tracker, 1);
+        defer restoreProgress(&tracker, 1, original);
+        try applySimple(&tracker, &last_index, &demote_promote);
+        try expectMarkedProgress(&tracker, 1);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 2, 3 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 2 },
+        },
+    });
+
+    try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_learner_node, .node_id = 2 }});
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 3 },
+        .learners = &.{2},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 2 },
+        },
+    });
+
+    const promote_demote = [_]raft.ConfChangeSingle{
+        .{ .change_type = .add_node, .node_id = 2 },
+        .{ .change_type = .add_learner_node, .node_id = 2 },
+    };
+    {
+        const original = markProgress(&tracker, 2);
+        defer restoreProgress(&tracker, 2, original);
+        try applySimple(&tracker, &last_index, &promote_demote);
+        try expectMarkedProgress(&tracker, 2);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 3 },
+        .learners = &.{2},
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 2 },
+        },
+    });
+
+    {
+        const original = markProgress(&tracker, 2);
+        defer restoreProgress(&tracker, 2, original);
+        try applySimple(&tracker, &last_index, &.{.{ .change_type = .add_node, .node_id = 2 }});
+        try expectMarkedProgress(&tracker, 2);
+    }
+    try expectTracker(&tracker, .{
+        .voters = &.{ 1, 2, 3 },
+        .progress = &.{
+            .{ .id = 1, .next_idx = 1 },
+            .{ .id = 2, .next_idx = 1 },
+            .{ .id = 3, .next_idx = 2 },
+        },
+    });
+}
+
+test "etcd/raft: confchange/testdata/zero.txt::TestConfChangeDataDriven" {
+    var tracker = raft.ProgressTracker.init(allocator, 10);
+    defer tracker.deinit();
+    var last_index: u64 = 0;
+    const changes = [_]raft.ConfChangeSingle{
+        .{ .change_type = .add_node, .node_id = 1 },
+        .{ .change_type = .remove_node, .node_id = 0 },
+        .{ .change_type = .add_node, .node_id = 0 },
+        .{ .change_type = .add_learner_node, .node_id = 0 },
+    };
+
+    try applySimple(&tracker, &last_index, &changes);
+    try expectTracker(&tracker, .{
+        .voters = &.{1},
+        .progress = &.{.{ .id = 1, .next_idx = 1 }},
+    });
+    try std.testing.expect(tracker.getPtr(0) == null);
+}
+
 test "etcd/raft: newly added voter gets one check-quorum grace period" {
     var net = try network.newNetworkWithConfiguration(.{
         .peer_ids = &.{ 1, 2 },
