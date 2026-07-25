@@ -10,9 +10,9 @@ pub const upstream: manifest.Source = .{
     .expected_case_count = 263,
     .expected_status_counts = .{
         .adapted = 36,
-        .covered_elsewhere = 109,
-        .excluded = 7,
-        .blocked = 6,
-        .planned = 105,
+        .covered_elsewhere = 111,
+        .excluded = 99,
+        .blocked = 9,
+        .planned = 8,
     },
 };
