@@ -5,8 +5,8 @@
 //! pluggable
 //! read-only `Storage` backend (MemoryStorage, WAL, custom).
 //!
-//! All entries returned from this module are freshly allocated clones; the
-//! caller owns them and must deinit each entry plus the backing slice.
+//! All entries returned from this module are owned handles with immutable,
+//! shared data; the caller must deinit each entry plus the backing slice.
 
 const std = @import("std");
 
@@ -23,7 +23,7 @@ const Snapshot = types.Snapshot;
 const Storage = storage_mod.Storage;
 const GetEntriesContext = storage_mod.GetEntriesContext;
 const Unstable = unstable_mod.Unstable;
-const cloneEntry = storage_mod.cloneEntry;
+const shareEntry = storage_mod.shareEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const limitSize = util.limitSize;
 const entryApproximateSize = util.entryApproximateSize;
@@ -226,7 +226,7 @@ pub const RaftLog = struct {
             }
             try cloned.ensureTotalCapacity(self.allocator, to_append.len);
             for (to_append) |e| {
-                try cloned.append(self.allocator, try cloneEntry(self.allocator, e));
+                cloned.appendAssumeCapacity(try shareEntry(self.allocator, e));
             }
             _ = try self.append(cloned.items);
         }
@@ -342,7 +342,7 @@ pub const RaftLog = struct {
             }
             try result.ensureUnusedCapacity(self.allocator, ents.len);
             for (ents) |e| {
-                try result.append(self.allocator, try cloneEntry(self.allocator, e));
+                result.appendAssumeCapacity(try shareEntry(self.allocator, e));
             }
             if (ents.len < unstable_high - low) {
                 return result.toOwnedSlice(self.allocator);
@@ -354,7 +354,7 @@ pub const RaftLog = struct {
             const unstable_ents = self.unstable.slice(lo, high);
             try result.ensureUnusedCapacity(self.allocator, unstable_ents.len);
             for (unstable_ents) |e| {
-                try result.append(self.allocator, try cloneEntry(self.allocator, e));
+                result.appendAssumeCapacity(try shareEntry(self.allocator, e));
             }
         }
 

@@ -63,28 +63,137 @@ pub const ConfChangeTransition = enum(u8) {
 /// A single log entry.
 ///
 /// `data` holds either the application payload (for `normal` entries) or an
-/// encoded `ConfChange`/`ConfChangeV2` (for config entries). `context` is an
-/// opaque application-provided payload. Both buffers are owned by the entry and
-/// released in `deinit`.
+/// encoded `ConfChange`/`ConfChangeV2` (for config entries). Managed data is
+/// immutable and reference-counted so internal Entry handles can share it.
+/// `context` remains independently owned by each Entry handle.
+///
+/// An owned Entry is a linear handle: move it with assignment and then reset
+/// the source, or use `shareEntry`/`cloneEntry` to create another handle.
+/// Handles may be released on different threads only with a thread-safe
+/// allocator.
 pub const Entry = struct {
     entry_type: EntryType = .normal,
     term: u64 = 0,
     index: u64 = 0,
-    data: []u8 = &.{},
+    data: []const u8 = &.{},
     context: []u8 = &.{},
     checksum: u32 = 0,
+    _data_owner: ?*EntryData = null,
+
+    /// Replace empty data with one immutable managed copy.
+    pub fn setDataCopy(self: *Entry, allocator: std.mem.Allocator, data: []const u8) !void {
+        std.debug.assert(self.data.len == 0 and self._data_owner == null);
+        if (data.len == 0) return;
+
+        const owner = try EntryData.createCopy(allocator, data);
+        self.data = owner.data;
+        self._data_owner = owner;
+    }
+
+    /// Transfer an allocator-owned data buffer into this empty Entry.
+    /// Ownership remains with the caller if allocating the owner fails.
+    pub fn adoptData(self: *Entry, allocator: std.mem.Allocator, data: []u8) !void {
+        std.debug.assert(self.data.len == 0 and self._data_owner == null);
+        if (data.len == 0) return;
+
+        const owner = try allocator.create(EntryData);
+        owner.* = .{
+            .allocator = allocator,
+            .references = .init(1),
+            .data = data,
+            .allocation_len = 0,
+        };
+        self.data = data;
+        self._data_owner = owner;
+    }
+
+    /// Create another owned handle that shares managed data and copies context.
+    pub fn share(self: Entry, allocator: std.mem.Allocator) !Entry {
+        var shared = Entry{
+            .entry_type = self.entry_type,
+            .term = self.term,
+            .index = self.index,
+            .checksum = self.checksum,
+        };
+        errdefer shared.deinit(allocator);
+
+        if (self._data_owner) |owner| {
+            self.validateDataOwner(owner);
+            owner.retain();
+            shared.data = self.data;
+            shared._data_owner = owner;
+        } else {
+            try shared.setDataCopy(allocator, self.data);
+        }
+        shared.context = if (self.context.len == 0) &.{} else try allocator.dupe(u8, self.context);
+        return shared;
+    }
 
     pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        if (self.data.len != 0) allocator.free(self.data);
+        if (self._data_owner) |owner| {
+            self.validateDataOwner(owner);
+            owner.release();
+        } else if (self.data.len != 0) {
+            allocator.free(self.data);
+        }
         if (self.context.len != 0) allocator.free(self.context);
         self.data = &.{};
         self.context = &.{};
+        self._data_owner = null;
     }
 
-    /// Reset to a default-constructed entry without freeing buffers; useful for
-    /// stack-allocated entries that never owned memory.
+    fn validateDataOwner(self: Entry, owner: *EntryData) void {
+        if (self.data.ptr != owner.data.ptr or self.data.len != owner.data.len) {
+            @panic("managed Entry.data was modified");
+        }
+    }
+
+    /// Reset without releasing resources after ownership has been moved.
     pub fn reset(self: *Entry) void {
         self.* = .{};
+    }
+};
+
+const EntryData = struct {
+    allocator: std.mem.Allocator,
+    references: std.atomic.Value(usize),
+    data: []u8,
+    allocation_len: usize,
+
+    fn createCopy(allocator: std.mem.Allocator, data: []const u8) !*EntryData {
+        const allocation_len = std.math.add(usize, @sizeOf(EntryData), data.len) catch return error.OutOfMemory;
+        const allocation = try allocator.alignedAlloc(u8, .of(EntryData), allocation_len);
+        const owned = allocation[@sizeOf(EntryData)..];
+        @memcpy(owned, data);
+        const owner: *EntryData = @ptrCast(allocation.ptr);
+        owner.* = .{
+            .allocator = allocator,
+            .references = .init(1),
+            .data = owned,
+            .allocation_len = allocation_len,
+        };
+        return owner;
+    }
+
+    fn retain(self: *EntryData) void {
+        const previous = self.references.fetchAdd(1, .monotonic);
+        if (previous == std.math.maxInt(usize)) @panic("Entry.data reference count overflow");
+    }
+
+    fn release(self: *EntryData) void {
+        const previous = self.references.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+        if (previous != 1) return;
+
+        _ = self.references.load(.acquire);
+        const allocator = self.allocator;
+        if (self.allocation_len == 0) {
+            allocator.free(self.data);
+            allocator.destroy(self);
+        } else {
+            const allocation: [*]align(@alignOf(EntryData)) u8 = @ptrCast(self);
+            allocator.free(allocation[0..self.allocation_len]);
+        }
     }
 };
 
@@ -195,8 +304,9 @@ pub const ConfChange = struct {
 
 /// Message is the unit exchanged between Raft nodes.
 ///
-/// Slice and entry buffers are owned by the sender. Receivers clone via
-/// `clone(allocator)` if the message must outlive the inbound queue.
+/// A Message with owned buffers is a linear handle and must not be duplicated
+/// with plain assignment. Use `cloneMessage` for an independent deep copy.
+/// Internal queues may share immutable Entry data while copying other buffers.
 pub const Message = struct {
     msg_type: MessageType = .hup,
     to: u64 = 0,

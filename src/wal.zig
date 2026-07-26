@@ -33,7 +33,7 @@ const GetEntriesContext = storage_mod.GetEntriesContext;
 const Storage = storage_mod.Storage;
 const WritableStorage = storage_mod.WritableStorage;
 const ClusterMembership = cluster_membership_mod.ClusterMembership;
-const cloneEntry = storage_mod.cloneEntry;
+const shareEntry = storage_mod.shareEntry;
 const cloneConfState = storage_mod.cloneConfState;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 
@@ -248,25 +248,29 @@ fn deserializeEntry(allocator: std.mem.Allocator, data: []const u8) !Entry {
     pos += 4;
     const data_len = std.mem.readInt(u32, data[pos..][0..4], .little);
     pos += 4;
+    const entry_data_start = pos;
     const data_end = std.math.add(usize, pos, data_len) catch return error.EntryParseError;
     const context_header_end = std.math.add(usize, data_end, 4) catch return error.EntryParseError;
     if (data.len < context_header_end) return error.EntryParseError;
-    const entry_data: []u8 = if (data_len > 0) try allocator.dupe(u8, data[pos..data_end]) else &.{};
-    errdefer if (entry_data.len > 0) allocator.free(entry_data);
     pos += data_len;
     const ctx_len = std.mem.readInt(u32, data[pos..][0..4], .little);
     pos += 4;
     const context_end = std.math.add(usize, pos, ctx_len) catch return error.EntryParseError;
     if (data.len != context_end) return error.EntryParseError;
-    const context: []u8 = if (ctx_len > 0) try allocator.dupe(u8, data[pos..context_end]) else &.{};
-    return .{
+    const entry_data: []u8 = if (data_len > 0) try allocator.dupe(u8, data[entry_data_start..data_end]) else &.{};
+    var entry = Entry{
         .entry_type = entry_type,
         .term = term,
         .index = index,
         .checksum = checksum,
-        .data = entry_data,
-        .context = context,
     };
+    entry.adoptData(allocator, entry_data) catch |err| {
+        allocator.free(entry_data);
+        return err;
+    };
+    errdefer entry.deinit(allocator);
+    entry.context = if (ctx_len > 0) try allocator.dupe(u8, data[pos..context_end]) else &.{};
+    return entry;
 }
 
 /// Serialize HardState (term + vote + commit = 24 bytes).
@@ -687,7 +691,7 @@ pub const WAL = struct {
         if (first_new != std.math.add(u64, self.lastIndex(), 1) catch return error.Fatal) return error.Fatal;
 
         for (entries[append_from..]) |entry| {
-            var cloned = try cloneEntry(self.allocator, entry);
+            var cloned = try shareEntry(self.allocator, entry);
             errdefer cloned.deinit(self.allocator);
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
             try self.wal_index.ensureUnusedCapacity(1);
@@ -982,12 +986,8 @@ pub const WAL = struct {
         if (high > self.lastIndex() + 1) return error.Fatal;
         const lo: usize = @intCast(low - offset);
         const hi: usize = @intCast(high - offset);
-        var result = try allocator.alloc(Entry, hi - lo);
-        var actual: usize = 0;
-        for (self.entries.items[lo..hi]) |e| {
-            result[actual] = try cloneEntry(allocator, e);
-            actual += 1;
-        }
+        var result = try storage_mod.shareEntries(allocator, self.entries.items[lo..hi]);
+        var actual = result.len;
         if (max_size) |ms| {
             var view = result[0..actual];
             @import("core/util.zig").limitSize(&view, ms);
@@ -1390,6 +1390,12 @@ test "wal: entry serialize/deserialize round-trip" {
     try std.testing.expectEqual(original.checksum, decoded.checksum);
     try std.testing.expectEqualStrings(original.data, decoded.data);
     try std.testing.expectEqualStrings(original.context, decoded.context);
+
+    var shared = try shareEntry(allocator, decoded);
+    defer shared.deinit(allocator);
+    try std.testing.expectEqual(@intFromPtr(decoded.data.ptr), @intFromPtr(shared.data.ptr));
+    decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("data bytes", shared.data);
 }
 
 test "wal: hardstate serialize/deserialize" {

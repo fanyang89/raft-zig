@@ -16,7 +16,6 @@ const Entry = types.Entry;
 const EntryType = types.EntryType;
 const Snapshot = types.Snapshot;
 const ConfState = types.ConfState;
-const cloneEntry = storage_mod.cloneEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const cloneConfState = storage_mod.cloneConfState;
 
@@ -176,22 +175,7 @@ fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) 
         allocator.free(entries);
     }
     for (0..num_entries) |_| {
-        const entry_type = checkedEnum(EntryType, try decoder.readByte()) orelse return error.InvalidEntryType;
-        const e_term = try decoder.readInt(u64);
-        const e_index = try decoder.readInt(u64);
-        const checksum = try decoder.readInt(u32);
-        const e_data = try decoder.readBytes(allocator);
-        errdefer if (e_data.len > 0) allocator.free(e_data);
-        const e_ctx = try decoder.readBytes(allocator);
-        errdefer if (e_ctx.len > 0) allocator.free(e_ctx);
-        entries[actual_entries] = .{
-            .entry_type = entry_type,
-            .term = e_term,
-            .index = e_index,
-            .checksum = checksum,
-            .data = e_data,
-            .context = e_ctx,
-        };
+        entries[actual_entries] = try decodeEntry(allocator, &decoder);
         actual_entries += 1;
     }
 
@@ -235,6 +219,24 @@ fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) 
         .entries = entries,
         .snapshot = snapshot,
     };
+}
+
+fn decodeEntry(allocator: std.mem.Allocator, decoder: *Decoder) !Entry {
+    var entry = Entry{
+        .entry_type = checkedEnum(EntryType, try decoder.readByte()) orelse return error.InvalidEntryType,
+        .term = try decoder.readInt(u64),
+        .index = try decoder.readInt(u64),
+        .checksum = try decoder.readInt(u32),
+    };
+    errdefer entry.deinit(allocator);
+
+    const data = try decoder.readBytes(allocator);
+    entry.adoptData(allocator, data) catch |err| {
+        allocator.free(data);
+        return err;
+    };
+    entry.context = try decoder.readBytes(allocator);
+    return entry;
 }
 
 /// Decode a framed message (with RPC header). Returns the decoded Message
@@ -416,6 +418,12 @@ test "codec: message round-trip with entries and data" {
     try std.testing.expectEqual(@as(usize, 2), decoded.entries.len);
     try std.testing.expectEqualStrings("hello", decoded.entries[0].data);
     try std.testing.expectEqualStrings("ctx", decoded.entries[1].context);
+
+    var shared = try storage_mod.shareEntry(allocator, decoded.entries[0]);
+    defer shared.deinit(allocator);
+    try std.testing.expectEqual(@intFromPtr(decoded.entries[0].data.ptr), @intFromPtr(shared.data.ptr));
+    decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("hello", shared.data);
 }
 
 test "codec: message with snapshot round-trips" {

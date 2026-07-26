@@ -13,7 +13,7 @@ const storage_mod = @import("storage.zig");
 
 const Entry = types.Entry;
 const Snapshot = types.Snapshot;
-const cloneEntry = storage_mod.cloneEntry;
+const shareEntry = storage_mod.shareEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const entryApproximateSize = util.entryApproximateSize;
 
@@ -145,8 +145,6 @@ pub const Unstable = struct {
             while (i < self.entries.items.len) : (i += 1) {
                 self.entries_size -= entryApproximateSize(self.entries.items[i]);
             }
-            // Drop tail in-place: deinits freed entries, then shrinks len.
-            std.mem.copyForwards(Entry, self.entries.items[0..keep_count], self.entries.items[0..keep_count]);
             i = keep_count;
             while (i < self.entries.items.len) : (i += 1) self.entries.items[i].deinit(self.allocator);
             self.entries.shrinkRetainingCapacity(keep_count);
@@ -154,7 +152,7 @@ pub const Unstable = struct {
 
         self.entries.ensureUnusedCapacity(self.allocator, ents.len) catch @panic("OOM in truncateAndAppend");
         for (ents) |ent| {
-            self.entries.appendAssumeCapacity(cloneEntry(self.allocator, ent) catch @panic("OOM in cloneEntry"));
+            self.entries.appendAssumeCapacity(shareEntry(self.allocator, ent) catch @panic("OOM in shareEntry"));
             self.entries_size += entryApproximateSize(ent);
         }
     }

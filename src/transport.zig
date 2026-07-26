@@ -135,7 +135,7 @@ pub const NoopTransport = struct {
     /// Clone and inject a borrowed message as if it arrived from the network.
     pub fn deliver(self: *NoopTransport, msg: Message) Error!bool {
         if (self.stopped.load(.acquire) or self.callback == null) return false;
-        const cloned = try storage_mod.cloneMessage(self.allocator, msg);
+        const cloned = try storage_mod.shareMessage(self.allocator, msg);
         errdefer {
             var owned = cloned;
             owned.deinit(self.allocator);
@@ -173,7 +173,7 @@ pub const NoopTransport = struct {
             cloned.deinit(self.allocator);
         }
         try cloned.ensureTotalCapacity(self.allocator, messages.len);
-        for (messages) |message| cloned.appendAssumeCapacity(try storage_mod.cloneMessage(self.allocator, message));
+        for (messages) |message| cloned.appendAssumeCapacity(try storage_mod.shareMessage(self.allocator, message));
         try self.sent.ensureUnusedCapacity(self.allocator, cloned.items.len);
         for (cloned.items) |message| self.sent.appendAssumeCapacity(message);
         cloned.clearRetainingCapacity();

@@ -159,15 +159,22 @@ pub const MemoryStorageCore = struct {
             return error.Fatal;
         }
 
+        const shared = try storage_mod.shareEntries(allocator, ents);
+        defer {
+            for (shared) |*entry| entry.deinit(allocator);
+            allocator.free(shared);
+        }
+        try self.entries.ensureUnusedCapacity(allocator, ents.len);
+
         const diff = new_appended - self.firstIndex();
         if (diff < self.entries.items.len) {
             var i: usize = diff;
             while (i < self.entries.items.len) : (i += 1) self.entries.items[i].deinit(allocator);
             self.entries.shrinkRetainingCapacity(diff);
         }
-        try self.entries.ensureUnusedCapacity(allocator, ents.len);
-        for (ents) |ent| {
-            try self.entries.append(allocator, try storage_mod.cloneEntry(allocator, ent));
+        for (shared) |*entry| {
+            self.entries.appendAssumeCapacity(entry.*);
+            entry.reset();
         }
     }
 
@@ -281,7 +288,7 @@ pub const MemoryStorage = struct {
             allocator.free(result);
         }
         for (self.core.entries.items[lo..hi]) |ent| {
-            result[actual_len] = try storage_mod.cloneEntry(allocator, ent);
+            result[actual_len] = try storage_mod.shareEntry(allocator, ent);
             actual_len += 1;
         }
         if (max_size) |m| {
@@ -296,11 +303,18 @@ pub const MemoryStorage = struct {
     }
 
     pub fn setEntries(self: *MemoryStorage, allocator: std.mem.Allocator, src: []const Entry) !void {
+        const shared = try storage_mod.shareEntries(allocator, src);
+        defer {
+            for (shared) |*entry| entry.deinit(allocator);
+            allocator.free(shared);
+        }
+        try self.core.entries.ensureTotalCapacity(allocator, src.len);
+
         for (self.core.entries.items) |*e| e.deinit(allocator);
         self.core.entries.clearRetainingCapacity();
-        try self.core.entries.ensureTotalCapacity(allocator, src.len);
-        for (src) |ent| {
-            try self.core.entries.append(allocator, try storage_mod.cloneEntry(allocator, ent));
+        for (shared) |*entry| {
+            self.core.entries.appendAssumeCapacity(entry.*);
+            entry.reset();
         }
     }
 
@@ -430,7 +444,7 @@ pub const MemoryStorage = struct {
             allocator.free(result);
         }
         for (self.core.entries.items) |ent| {
-            result[actual_len] = try storage_mod.cloneEntry(allocator, ent);
+            result[actual_len] = try storage_mod.shareEntry(allocator, ent);
             actual_len += 1;
         }
         return result;

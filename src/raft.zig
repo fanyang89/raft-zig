@@ -39,7 +39,7 @@ const ConfChangeTransition = types.ConfChangeTransition;
 const ConfChangeType = types.ConfChangeType;
 
 const Storage = storage_mod.Storage;
-const cloneEntry = storage_mod.cloneEntry;
+const shareEntry = storage_mod.shareEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const GetEntriesContext = storage_mod.GetEntriesContext;
 const RaftState = storage_mod.RaftState;
@@ -732,7 +732,8 @@ pub const Raft = struct {
             .read_index => {
                 if (!self.commitToCurrentTerm()) {
                     log.debug("node {} has not committed in its term; postponing read index", .{self.id});
-                    const cloned = try storage_mod.cloneMessage(self.allocator, m.*);
+                    var cloned = try storage_mod.shareMessage(self.allocator, m.*);
+                    errdefer cloned.deinit(self.allocator);
                     try self.pending_read_index_messages.append(self.allocator, cloned);
                     return;
                 }
@@ -1146,11 +1147,14 @@ pub const Raft = struct {
 
         // Build a ReadIndexResp that echoes the request's ctx in its entry data.
         var entries = try self.allocator.alloc(Entry, req.entries.len);
-        for (req.entries, 0..) |e, i| {
-            entries[i] = .{
-                .data = try self.allocator.dupe(u8, e.data),
-                .context = try self.allocator.dupe(u8, e.context),
-            };
+        var initialized: usize = 0;
+        errdefer {
+            for (entries[0..initialized]) |*entry| entry.deinit(self.allocator);
+            self.allocator.free(entries);
+        }
+        for (req.entries) |entry| {
+            entries[initialized] = try shareEntry(self.allocator, entry);
+            initialized += 1;
         }
         return Message{
             .msg_type = .read_index_resp,
@@ -1472,9 +1476,21 @@ pub const Raft = struct {
                 if (new_entries.len > 0) {
                     if (!util.isContinuousEntries(msg.*, new_entries)) return false;
                     // Append the new entries into the existing message.
-                    var combined = try self.allocator.alloc(Entry, msg.entries.len + new_entries.len);
-                    for (msg.entries, 0..) |e, j| combined[j] = e;
-                    for (new_entries, 0..) |e, j| combined[msg.entries.len + j] = try cloneEntry(self.allocator, e);
+                    const combined = try self.allocator.alloc(Entry, msg.entries.len + new_entries.len);
+                    var initialized: usize = 0;
+                    errdefer {
+                        for (combined[0..initialized]) |*entry| entry.deinit(self.allocator);
+                        self.allocator.free(combined);
+                    }
+                    for (msg.entries) |entry| {
+                        combined[initialized] = try shareEntry(self.allocator, entry);
+                        initialized += 1;
+                    }
+                    for (new_entries) |entry| {
+                        combined[initialized] = try shareEntry(self.allocator, entry);
+                        initialized += 1;
+                    }
+                    for (msg.entries) |*entry| entry.deinit(self.allocator);
                     self.allocator.free(msg.entries);
                     msg.entries = combined;
                     const last_idx = combined[combined.len - 1].index;
@@ -1491,9 +1507,7 @@ pub const Raft = struct {
         msg.msg_type = .append;
         msg.index = pr.next_idx - 1;
         msg.log_term = term_;
-        var owned = try self.allocator.alloc(Entry, entries.len);
-        for (entries, 0..) |e, i| owned[i] = try cloneEntry(self.allocator, e);
-        msg.entries = owned;
+        msg.entries = try storage_mod.shareEntries(self.allocator, entries);
         msg.commit = self.raft_log.committed;
         if (entries.len > 0) pr.updateState(entries[entries.len - 1].index) catch {};
     }
@@ -1578,13 +1592,14 @@ pub const Raft = struct {
         const entry_count = std.math.cast(u64, entries.len) orelse return error.Fatal;
         const last_new_index = std.math.add(u64, last_index, entry_count) catch return error.Fatal;
         if (last_new_index == std.math.maxInt(u64)) return error.Fatal;
+        const previous_uncommitted_size = self.uncommitted_state.uncommitted_size;
         if (!self.uncommitted_state.maybeIncreaseUncommittedSize(entries)) return false;
+        errdefer self.uncommitted_state.uncommitted_size = previous_uncommitted_size;
 
-        var owned = try self.allocator.alloc(Entry, entries.len);
-        for (entries, 0..) |src, i| {
-            owned[i] = try cloneEntry(self.allocator, src);
-            owned[i].term = self.term;
-            owned[i].index = last_index + @as(u64, @intCast(i)) + 1;
+        const owned = try storage_mod.shareEntries(self.allocator, entries);
+        for (owned, 0..) |*entry, i| {
+            entry.term = self.term;
+            entry.index = last_index + @as(u64, @intCast(i)) + 1;
         }
         defer {
             for (owned) |*e| e.deinit(self.allocator);
@@ -1720,9 +1735,10 @@ pub const Raft = struct {
             const data = util.encodeConfChangeV2(self.allocator, .{}) catch {
                 @panic("failed to encode auto-leave ConfChangeV2");
             };
-            var entry = Entry{
-                .entry_type = .conf_change_v2,
-                .data = data,
+            var entry = Entry{ .entry_type = .conf_change_v2 };
+            entry.adoptData(self.allocator, data) catch {
+                self.allocator.free(data);
+                @panic("failed to retain auto-leave ConfChangeV2");
             };
             defer entry.deinit(self.allocator);
             _ = self.appendEntry(&.{entry}) catch {

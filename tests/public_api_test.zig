@@ -63,6 +63,8 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.cloneConfState;
         _ = raft.cloneSnapshot;
         _ = raft.cloneEntry;
+        _ = raft.cloneMessage;
+        _ = raft.shareEntry;
         _ = raft.MemoryStorageCore;
         _ = raft.MemoryStorage;
 

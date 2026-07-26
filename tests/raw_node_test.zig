@@ -373,6 +373,89 @@ test "raw_node: committed_entries_pagination respects max_committed_size_per_rea
     try std.testing.expectEqual(@as(usize, 3), total);
 }
 
+test "raw_node: entry data is shared through Ready and MemoryStorage" {
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedStorage(&storage, &.{1});
+
+    var node = try RawNode.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+    try campaignLeader(&node, &storage);
+    try node.propose("", "payload");
+
+    const unstable_data = node.raftConst().raft_log.unstable.entries.items[0].data;
+    var ready = try node.getReady();
+    defer ready.deinit(allocator);
+    try std.testing.expectEqual(@intFromPtr(unstable_data.ptr), @intFromPtr(ready.entries[0].data.ptr));
+
+    try storage.append(allocator, ready.entries);
+    const stored = try storage.allEntries(allocator);
+    defer {
+        for (stored) |*entry| entry.deinit(allocator);
+        allocator.free(stored);
+    }
+    try std.testing.expectEqual(@intFromPtr(ready.entries[0].data.ptr), @intFromPtr(stored[stored.len - 1].data.ptr));
+
+    var light = try node.advance(ready);
+    defer light.deinit(allocator);
+    try std.testing.expectEqual(@intFromPtr(ready.entries[0].data.ptr), @intFromPtr(light.committed_entries[0].data.ptr));
+}
+
+test "raw_node: getReady allocation failures preserve pending data" {
+    var saw_oom = false;
+    var reached_success = false;
+
+    for (0..16) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const node_allocator = failing.allocator();
+        var storage = MemoryStorage.init();
+        defer storage.deinit(node_allocator);
+        var conf_state = raft.ConfState{ .voters = try node_allocator.dupe(u64, &.{1}) };
+        try storage.setRaftState(node_allocator, .{ .conf_state = conf_state });
+        conf_state.deinit(node_allocator);
+
+        var node = try RawNode.init(node_allocator, makeConfig(1), storage.asStorage());
+        defer node.deinit();
+        try node.campaign();
+        while (node.hasReady()) {
+            var ready = try node.getReady();
+            if (ready.entries.len > 0) try storage.append(node_allocator, ready.entries);
+            var light = try node.advance(ready);
+            light.deinit(node_allocator);
+            ready.deinit(node_allocator);
+            node.advanceApply();
+            if (node.raftConst().state == .leader) break;
+        }
+
+        try node.propose("", "payload");
+        try node.readIndex("read-context");
+        failing.fail_index = failing.alloc_index + failure_offset;
+        if (node.getReady()) |ready_value| {
+            var ready = ready_value;
+            defer ready.deinit(node_allocator);
+            try std.testing.expect(ready.entries.len > 0);
+            try std.testing.expectEqualStrings("payload", ready.entries[ready.entries.len - 1].data);
+            try std.testing.expectEqualStrings("read-context", ready.read_states[0].request_ctx);
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            try std.testing.expect(node.hasReady());
+
+            failing.fail_index = std.math.maxInt(usize);
+            var ready = try node.getReady();
+            defer ready.deinit(node_allocator);
+            try std.testing.expect(ready.entries.len > 0);
+            try std.testing.expectEqualStrings("payload", ready.entries[ready.entries.len - 1].data);
+            try std.testing.expectEqualStrings("read-context", ready.read_states[0].request_ctx);
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(reached_success);
+}
+
 test "raw_node: persisting entries advances commit on a single-node leader" {
     var storage = MemoryStorage.init();
     defer storage.deinit(allocator);

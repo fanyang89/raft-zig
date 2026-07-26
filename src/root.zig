@@ -128,6 +128,7 @@ pub const cloneConfState = storage_mod.cloneConfState;
 pub const cloneSnapshot = storage_mod.cloneSnapshot;
 pub const cloneEntry = storage_mod.cloneEntry;
 pub const cloneMessage = storage_mod.cloneMessage;
+pub const shareEntry = storage_mod.shareEntry;
 
 pub const MemoryStorageCore = memory_storage_mod.MemoryStorageCore;
 pub const MemoryStorage = memory_storage_mod.MemoryStorage;

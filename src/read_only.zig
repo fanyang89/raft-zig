@@ -11,6 +11,7 @@
 const std = @import("std");
 
 const types = @import("core/types.zig");
+const storage_mod = @import("storage.zig");
 
 const Message = types.Message;
 
@@ -84,7 +85,7 @@ pub const ReadOnly = struct {
 
         const owned_ctx = try self.allocator.dupe(u8, ctx);
         errdefer self.allocator.free(owned_ctx);
-        var cloned_req = try cloneMessage(self.allocator, req);
+        var cloned_req = try storage_mod.shareMessage(self.allocator, req);
         errdefer cloned_req.deinit(self.allocator);
 
         var acks = std.AutoHashMap(u64, void).init(self.allocator);
@@ -124,8 +125,6 @@ pub const ReadOnly = struct {
     /// `ctx`. Returns an owned list of statuses that the caller must deinit.
     /// Unknown `ctx` yields an empty (but still owned) result.
     pub fn advance(self: *ReadOnly, ctx: []const u8) ![]ReadIndexStatus {
-        var result: std.ArrayList(ReadIndexStatus) = .empty;
-
         var target_idx: ?usize = null;
         for (self.queue.items, 0..) |item, i| {
             if (std.mem.eql(u8, item, ctx)) {
@@ -133,86 +132,25 @@ pub const ReadOnly = struct {
                 break;
             }
         }
-        if (target_idx == null) return result.toOwnedSlice(self.allocator);
+        if (target_idx == null) return self.allocator.alloc(ReadIndexStatus, 0);
 
         const end = target_idx.? + 1;
+        for (self.queue.items[0..end]) |key| {
+            if (!self.pending.contains(key)) return error.Fatal;
+        }
+
+        const result = try self.allocator.alloc(ReadIndexStatus, end);
         var i: usize = 0;
         while (i < end) : (i += 1) {
             const key = self.queue.items[0];
-            const kv = self.pending.fetchRemove(key) orelse return error.Fatal;
-            try result.append(self.allocator, kv.value);
+            const kv = self.pending.fetchRemove(key) orelse unreachable;
+            result[i] = kv.value;
             self.allocator.free(key);
             _ = self.queue.orderedRemove(0);
         }
-        return result.toOwnedSlice(self.allocator);
+        return result;
     }
 };
-
-/// Deep-copy a message and all owned buffers.
-fn cloneMessage(allocator: std.mem.Allocator, src: Message) !Message {
-    var entries = try allocator.alloc(types.Entry, src.entries.len);
-    var actual: usize = 0;
-    errdefer {
-        for (entries[0..actual]) |*e| e.deinit(allocator);
-        allocator.free(entries);
-    }
-    for (src.entries) |e| {
-        entries[actual] = .{
-            .entry_type = e.entry_type,
-            .term = e.term,
-            .index = e.index,
-            .data = try allocator.dupe(u8, e.data),
-            .context = try allocator.dupe(u8, e.context),
-            .checksum = e.checksum,
-        };
-        actual += 1;
-    }
-    errdefer {
-        for (entries) |*e| e.deinit(allocator);
-        allocator.free(entries);
-    }
-    var snapshot: ?types.Snapshot = null;
-    if (src.snapshot) |s| {
-        snapshot = .{
-            .data = try allocator.dupe(u8, s.data),
-            .metadata = .{
-                .index = s.metadata.index,
-                .term = s.metadata.term,
-                .conf_state = .{
-                    .voters = try allocator.dupe(u64, s.metadata.conf_state.voters),
-                    .learners = try allocator.dupe(u64, s.metadata.conf_state.learners),
-                    .voters_outgoing = try allocator.dupe(u64, s.metadata.conf_state.voters_outgoing),
-                    .learners_next = try allocator.dupe(u64, s.metadata.conf_state.learners_next),
-                    .auto_leave = s.metadata.conf_state.auto_leave,
-                },
-            },
-        };
-    }
-    errdefer if (snapshot) |*s| s.deinit(allocator);
-    var context: []u8 = &.{};
-    if (src.context.len != 0) {
-        context = try allocator.dupe(u8, src.context);
-    }
-    errdefer if (context.len != 0) allocator.free(context);
-
-    return .{
-        .msg_type = src.msg_type,
-        .to = src.to,
-        .from = src.from,
-        .term = src.term,
-        .log_term = src.log_term,
-        .index = src.index,
-        .entries = entries,
-        .commit = src.commit,
-        .commit_term = src.commit_term,
-        .snapshot = snapshot,
-        .request_snapshot = src.request_snapshot,
-        .reject = src.reject,
-        .reject_hint = src.reject_hint,
-        .context = context,
-        .priority = src.priority,
-    };
-}
 
 test "read only construction and basic add" {
     var ro = ReadOnly.init(std.testing.allocator, .safe);
@@ -281,6 +219,29 @@ test "read only advance releases earlier requests in order" {
     try std.testing.expectEqual(@as(u64, 300), statuses[2].index);
     try std.testing.expectEqual(@as(u64, 400), statuses[3].index);
     try std.testing.expectEqual(@as(usize, 0), ro.pendingReadCount());
+}
+
+test "read only advance allocation failure preserves pending requests" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var ro = ReadOnly.init(allocator, .safe);
+    defer ro.deinit();
+
+    var entries = [_]types.Entry{.{ .data = "ctx" }};
+    try ro.addRequest(10, .{ .msg_type = .read_index, .entries = &entries }, 1);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, ro.advance("ctx"));
+    try std.testing.expectEqual(@as(usize, 1), ro.pendingReadCount());
+    try std.testing.expectEqualStrings("ctx", ro.lastPendingRequestCtx().?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    const statuses = try ro.advance("ctx");
+    defer {
+        for (statuses) |*status| status.deinit(allocator);
+        allocator.free(statuses);
+    }
+    try std.testing.expectEqual(@as(usize, 1), statuses.len);
 }
 
 test "read only ack set accumulates per request" {

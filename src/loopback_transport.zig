@@ -1,7 +1,7 @@
 //! Process-local multi-node message routing for testing.
 //!
 //! `LoopbackNetwork` holds N `LoopbackTransport` instances keyed by node_id.
-//! `send()` deep-clones each message into the target node's inbox. `pollOne()`
+//! `send()` retains immutable entry data into the target node's inbox. `pollOne()`
 //! delivers one message to the registered callback.
 //! This lets tests simulate multi-node clusters without real TCP.
 
@@ -18,7 +18,6 @@ const MessageType = types.MessageType;
 const Transport = transport_mod.Transport;
 const MessageCallback = transport_mod.MessageCallback;
 const PeerEventCallback = transport_mod.PeerEventCallback;
-const cloneMessage = storage_mod.cloneMessage;
 
 /// Central registry that routes messages between in-process nodes.
 /// Must be heap-allocated (via `create`) so that `LoopbackTransport.network`
@@ -65,7 +64,7 @@ pub const LoopbackNetwork = struct {
         return self.nodes.get(node_id);
     }
 
-    /// Route a single message to the target's inbox (deep clone).
+    /// Route a single owned message to the target's inbox.
     fn route(self: *LoopbackNetwork, msg: Message) Error!void {
         if (self.drop_filter) |f| {
             if (f(msg.from, msg.to, msg.msg_type)) {
@@ -156,7 +155,7 @@ pub const LoopbackTransport = struct {
     fn sendImpl(ctx: *anyopaque, messages: []const Message) Error!void {
         const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
         for (messages) |m| {
-            const cloned = try cloneMessage(self.allocator, m);
+            const cloned = try storage_mod.shareMessage(self.allocator, m);
             try self.network.route(cloned);
         }
     }

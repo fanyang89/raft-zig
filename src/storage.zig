@@ -87,17 +87,35 @@ pub fn cloneSnapshot(allocator: std.mem.Allocator, src: Snapshot) !Snapshot {
 
 /// Copy an Entry (data + context buffers) into fresh allocations.
 pub fn cloneEntry(allocator: std.mem.Allocator, src: Entry) !Entry {
-    const data: []u8 = if (src.data.len == 0) &.{} else try allocator.dupe(u8, src.data);
-    errdefer if (data.len != 0) allocator.free(data);
-    const context: []u8 = if (src.context.len == 0) &.{} else try allocator.dupe(u8, src.context);
-    return .{
+    var result = Entry{
         .entry_type = src.entry_type,
         .term = src.term,
         .index = src.index,
-        .data = data,
-        .context = context,
         .checksum = src.checksum,
     };
+    errdefer result.deinit(allocator);
+    try result.setDataCopy(allocator, src.data);
+    result.context = if (src.context.len == 0) &.{} else try allocator.dupe(u8, src.context);
+    return result;
+}
+
+/// Share immutable Entry data while copying the context buffer.
+pub fn shareEntry(allocator: std.mem.Allocator, src: Entry) !Entry {
+    return src.share(allocator);
+}
+
+pub fn shareEntries(allocator: std.mem.Allocator, src: []const Entry) ![]Entry {
+    var entries = try allocator.alloc(Entry, src.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (entries[0..initialized]) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    for (src) |entry| {
+        entries[initialized] = try shareEntry(allocator, entry);
+        initialized += 1;
+    }
+    return entries;
 }
 
 /// Copy a Message and all nested owned buffers into fresh allocations.
@@ -111,6 +129,38 @@ pub fn cloneMessage(allocator: std.mem.Allocator, src: Message) !Message {
     for (src.entries) |entry| {
         entries[initialized] = try cloneEntry(allocator, entry);
         initialized += 1;
+    }
+
+    var snapshot: ?Snapshot = null;
+    if (src.snapshot) |value| snapshot = try cloneSnapshot(allocator, value);
+    errdefer if (snapshot) |*value| value.deinit(allocator);
+
+    const context: []u8 = if (src.context.len == 0) &.{} else try allocator.dupe(u8, src.context);
+    return .{
+        .msg_type = src.msg_type,
+        .to = src.to,
+        .from = src.from,
+        .term = src.term,
+        .log_term = src.log_term,
+        .index = src.index,
+        .entries = entries,
+        .commit = src.commit,
+        .commit_term = src.commit_term,
+        .snapshot = snapshot,
+        .request_snapshot = src.request_snapshot,
+        .reject = src.reject,
+        .reject_hint = src.reject_hint,
+        .context = context,
+        .priority = src.priority,
+    };
+}
+
+/// Share immutable Entry data while copying all other Message-owned buffers.
+pub fn shareMessage(allocator: std.mem.Allocator, src: Message) !Message {
+    const entries = try shareEntries(allocator, src.entries);
+    errdefer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
     }
 
     var snapshot: ?Snapshot = null;
@@ -543,6 +593,37 @@ test "clone helpers clean up allocation failures" {
             defer cloned.deinit(allocator);
         }
 
+        fn shareEntryAll(allocator: std.mem.Allocator) !void {
+            var source = Entry{};
+            try source.setDataCopy(allocator, "data");
+            defer source.deinit(allocator);
+            source.context = try allocator.dupe(u8, "context");
+
+            var shared = try shareEntry(allocator, source);
+            defer shared.deinit(allocator);
+        }
+
+        fn shareEntriesAll(allocator: std.mem.Allocator) !void {
+            const source = [_]Entry{
+                .{ .data = "first" },
+                .{ .data = "second", .context = @constCast("context") },
+            };
+            const shared = try shareEntries(allocator, &source);
+            defer {
+                for (shared) |*entry| entry.deinit(allocator);
+                allocator.free(shared);
+            }
+        }
+
+        fn shareMessageAll(allocator: std.mem.Allocator) !void {
+            const entries = [_]Entry{.{ .data = "entry" }};
+            var shared = try shareMessage(allocator, .{
+                .entries = @constCast(&entries),
+                .context = @constCast("message-context"),
+            });
+            defer shared.deinit(allocator);
+        }
+
         fn cloneMessageAll(allocator: std.mem.Allocator) !void {
             var entries = [_]Entry{.{
                 .data = @constCast("entry"),
@@ -579,9 +660,64 @@ test "clone helpers clean up allocation failures" {
     };
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneEntryAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.shareEntryAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.shareEntriesAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.shareMessageAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneSnapshotAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneMessageAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneRaftStateAll, .{});
+}
+
+test "shareEntry retains managed data and copies context" {
+    const allocator = std.testing.allocator;
+    var source = Entry{};
+    try source.setDataCopy(allocator, "payload");
+    source.context = try allocator.dupe(u8, "context");
+
+    var first = try shareEntry(allocator, source);
+    var second = try shareEntry(allocator, first);
+    try std.testing.expectEqual(@intFromPtr(source.data.ptr), @intFromPtr(first.data.ptr));
+    try std.testing.expectEqual(@intFromPtr(first.data.ptr), @intFromPtr(second.data.ptr));
+    try std.testing.expect(first.context.ptr != source.context.ptr);
+
+    source.deinit(allocator);
+    try std.testing.expectEqualStrings("payload", first.data);
+    first.deinit(allocator);
+    try std.testing.expectEqualStrings("payload", second.data);
+    second.deinit(allocator);
+}
+
+test "shareEntry copies unmanaged data once" {
+    const source = Entry{ .data = "payload" };
+    var shared = try shareEntry(std.testing.allocator, source);
+    defer shared.deinit(std.testing.allocator);
+
+    try std.testing.expect(shared.data.ptr != source.data.ptr);
+    var retained = try shareEntry(std.testing.allocator, shared);
+    defer retained.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@intFromPtr(shared.data.ptr), @intFromPtr(retained.data.ptr));
+}
+
+test "shared Entry data releases across threads" {
+    const allocator = std.heap.smp_allocator;
+    var source = Entry{};
+    try source.setDataCopy(allocator, "payload");
+    var first = try shareEntry(allocator, source);
+    var second = try shareEntry(allocator, source);
+    source.deinit(allocator);
+
+    const Release = struct {
+        fn run(entry: Entry) void {
+            var owned = entry;
+            owned.deinit(std.heap.smp_allocator);
+        }
+    };
+    const first_thread = try std.Thread.spawn(.{}, Release.run, .{first});
+    first.reset();
+    const second_thread = try std.Thread.spawn(.{}, Release.run, .{second});
+    second.reset();
+    first_thread.join();
+    second_thread.join();
 }
 
 test "cloneMessage deeply copies nested buffers" {

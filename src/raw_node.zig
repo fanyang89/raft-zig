@@ -46,7 +46,7 @@ const Raft = raft_mod.Raft;
 const StateRole = state_role_mod.StateRole;
 const SoftState = state_role_mod.SoftState;
 
-const cloneEntry = storage_mod.cloneEntry;
+const shareEntry = storage_mod.shareEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const setEntryChecksum = util.setEntryChecksum;
 const encodeConfChangeV2 = util.encodeConfChangeV2;
@@ -233,8 +233,11 @@ pub const RawNode = struct {
     }
 
     pub fn readIndex(self: *RawNode, ctx: []const u8) Error!void {
+        var entry = try makeEntryCopy(self.allocator, .normal, ctx, "");
+        errdefer entry.deinit(self.allocator);
         var entries = try self.allocator.alloc(Entry, 1);
-        entries[0] = .{ .data = try self.allocator.dupe(u8, ctx) };
+        entries[0] = entry;
+        entry.reset();
         var m = Message{
             .msg_type = .read_index,
             .entries = entries,
@@ -250,14 +253,31 @@ pub const RawNode = struct {
     }
 
     pub fn propose(self: *RawNode, ctx: []const u8, data: []const u8) Error!void {
-        // Same pattern as proposeConfChange: defer m.deinit handles cleanup.
+        var entry = try makeEntryCopy(self.allocator, .normal, data, ctx);
+        errdefer entry.deinit(self.allocator);
         var entries = try self.allocator.alloc(Entry, 1);
-        var e = Entry{
-            .data = try self.allocator.dupe(u8, data),
-            .context = try self.allocator.dupe(u8, ctx),
+        entries[0] = entry;
+        entry.reset();
+
+        var m = Message{
+            .msg_type = .propose,
+            .from = self.raft.id,
+            .entries = entries,
         };
-        setEntryChecksum(&e);
-        entries[0] = e;
+        defer m.deinit(self.allocator);
+        try self.raft.step(&m);
+    }
+
+    /// Propose a payload allocated by this RawNode's allocator without copying.
+    /// The payload is consumed and cleared even when the proposal fails.
+    pub fn proposeOwned(self: *RawNode, ctx: []const u8, data: *[]u8) Error!void {
+        const owned_data = data.*;
+        data.* = &.{};
+        var entry = try makeEntryAdoptingData(self.allocator, .normal, owned_data, ctx);
+        errdefer entry.deinit(self.allocator);
+        var entries = try self.allocator.alloc(Entry, 1);
+        entries[0] = entry;
+        entry.reset();
 
         var m = Message{
             .msg_type = .propose,
@@ -269,18 +289,12 @@ pub const RawNode = struct {
     }
 
     pub fn proposeConfChange(self: *RawNode, ctx: []const u8, cc: ConfChangeV2) Error!void {
-        // All allocations land inside `m`, which is cleaned up by `defer
-        // m.deinit`. No errdefers — they would double-free the entry data
-        // when defer fires after the errdefer on the error path.
         const cc_bytes = try encodeConfChangeV2(self.allocator, cc);
+        var entry = try makeEntryAdoptingData(self.allocator, .conf_change_v2, cc_bytes, ctx);
+        errdefer entry.deinit(self.allocator);
         var entries = try self.allocator.alloc(Entry, 1);
-        var e = Entry{
-            .entry_type = .conf_change_v2,
-            .data = cc_bytes,
-            .context = try self.allocator.dupe(u8, ctx),
-        };
-        setEntryChecksum(&e);
-        entries[0] = e;
+        entries[0] = entry;
+        entry.reset();
 
         var m = Message{
             .msg_type = .propose,
@@ -335,16 +349,12 @@ pub const RawNode = struct {
     }
 
     pub fn getReady(self: *RawNode) Error!Ready {
-        self.max_number += 1;
+        try self.records.ensureUnusedCapacity(self.allocator, 1);
+        const number = self.max_number + 1;
 
-        var rd = Ready{ .number = self.max_number };
-        var record = ReadyRecord{ .number = self.max_number };
-
-        // On transition to leader, drop any prior records — old pending
-        // persists can no longer be matched.
-        if (self.prev_ss.role != .leader and self.raft.state == .leader) {
-            self.records.clearRetainingCapacity();
-        }
+        var rd = Ready{ .number = number };
+        errdefer rd.deinit(self.allocator);
+        var record = ReadyRecord{ .number = number };
 
         const ss = self.raft.softState();
         if (!ss.eql(self.prev_ss)) rd.ss = ss;
@@ -357,16 +367,23 @@ pub const RawNode = struct {
             rd.hs = hs;
         }
 
+        var moved_read_states = false;
+        errdefer if (moved_read_states) {
+            self.raft.read_states = .fromOwnedSlice(rd.read_states);
+            rd.read_states = &.{};
+        };
         if (self.raft.read_states.items.len > 0) {
             rd.read_states = try self.raft.read_states.toOwnedSlice(self.allocator);
+            moved_read_states = true;
         }
 
+        var commit_since_index = self.commit_since_index;
         if (self.raft.raft_log.unstable.snapshot) |s| {
             if (s.metadata.index > 0) {
                 rd.snapshot = try cloneSnapshot(self.allocator, s);
-                std.debug.assert(self.commit_since_index <= s.metadata.index);
-                self.commit_since_index = s.metadata.index;
-                std.debug.assert(!self.raft.raft_log.hasNextEntriesSince(self.commit_since_index));
+                std.debug.assert(commit_since_index <= s.metadata.index);
+                commit_since_index = s.metadata.index;
+                std.debug.assert(!self.raft.raft_log.hasNextEntriesSince(commit_since_index));
                 record.snapshot = .{ s.metadata.index, s.metadata.term };
                 rd.must_sync = true;
             }
@@ -374,40 +391,50 @@ pub const RawNode = struct {
 
         const unstable_ents = self.raft.raft_log.unstable.entries.items;
         if (unstable_ents.len > 0) {
-            var entries = try self.allocator.alloc(Entry, unstable_ents.len);
-            for (unstable_ents, 0..) |e, i| entries[i] = try cloneEntry(self.allocator, e);
-            rd.entries = entries;
+            rd.entries = try storage_mod.shareEntries(self.allocator, unstable_ents);
             rd.must_sync = true;
             const last = unstable_ents[unstable_ents.len - 1];
             record.last_entry = .{ last.index, last.term };
         }
 
         rd.is_persisted_msg = self.raft.state != .leader;
-        rd.light = try self.getLightReady();
-        try self.records.append(self.allocator, record);
+        rd.light = try self.getLightReadySince(commit_since_index);
+
+        self.max_number = number;
+        // On transition to leader, drop any prior records — old pending
+        // persists can no longer be matched.
+        if (self.prev_ss.role != .leader and self.raft.state == .leader) {
+            self.records.clearRetainingCapacity();
+        }
+        self.records.appendAssumeCapacity(record);
         return rd;
     }
 
     fn getLightReady(self: *RawNode) Error!LightReady {
+        return self.getLightReadySince(self.commit_since_index);
+    }
+
+    fn getLightReadySince(self: *RawNode, commit_since_index: u64) Error!LightReady {
         var rd = LightReady{};
+        errdefer rd.deinit(self.allocator);
         const max_size = self.raft.max_committed_size_per_ready;
 
-        if (try self.raft.raft_log.nextEntriesSince(self.commit_since_index, max_size)) |ents| {
+        if (try self.raft.raft_log.nextEntriesSince(commit_since_index, max_size)) |ents| {
             rd.committed_entries = ents;
-        }
-
-        self.raft.reduceUncommittedSize(rd.committed_entries);
-
-        if (rd.committed_entries.len > 0) {
-            const last = rd.committed_entries[rd.committed_entries.len - 1];
-            std.debug.assert(self.commit_since_index < last.index);
-            self.commit_since_index = last.index;
         }
 
         if (self.raft.messages.items.len > 0) {
             rd.messages = try self.raft.messages.toOwnedSlice(self.allocator);
         }
 
+        self.raft.reduceUncommittedSize(rd.committed_entries);
+        if (rd.committed_entries.len > 0) {
+            const last = rd.committed_entries[rd.committed_entries.len - 1];
+            std.debug.assert(commit_since_index < last.index);
+            self.commit_since_index = last.index;
+        } else {
+            self.commit_since_index = commit_since_index;
+        }
         return rd;
     }
 
@@ -505,6 +532,37 @@ pub const RawNode = struct {
         // with the wal module in a later phase.
     }
 };
+
+fn makeEntryCopy(
+    allocator: std.mem.Allocator,
+    entry_type: types.EntryType,
+    data: []const u8,
+    context: []const u8,
+) !Entry {
+    var entry = Entry{ .entry_type = entry_type };
+    errdefer entry.deinit(allocator);
+    try entry.setDataCopy(allocator, data);
+    entry.context = if (context.len == 0) &.{} else try allocator.dupe(u8, context);
+    setEntryChecksum(&entry);
+    return entry;
+}
+
+fn makeEntryAdoptingData(
+    allocator: std.mem.Allocator,
+    entry_type: types.EntryType,
+    data: []u8,
+    context: []const u8,
+) !Entry {
+    var entry = Entry{ .entry_type = entry_type };
+    entry.adoptData(allocator, data) catch |err| {
+        allocator.free(data);
+        return err;
+    };
+    errdefer entry.deinit(allocator);
+    entry.context = if (context.len == 0) &.{} else try allocator.dupe(u8, context);
+    setEntryChecksum(&entry);
+    return entry;
+}
 
 // ===========================================================================
 // Status snapshot returned by `getStatus`

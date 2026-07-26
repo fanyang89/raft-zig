@@ -75,6 +75,8 @@ Entry checksums use [google/crc32c](https://github.com/google/crc32c), with runt
 
 On Linux, `-Dgperftools=true` replaces the process C allocator with tcmalloc and exposes CPU and heap profiling through the `raft_zig_gperftools` module. This option is incompatible with ThreadSanitizer.
 
+`Entry.data` is immutable and reference-counted inside raft-zig. Borrowed payloads are copied once when entering the Raft pipeline, then shared across Unstable, Ready, storage, WAL, and internal transports. Owned entries are linear handles and must not be duplicated with plain assignment; `cloneEntry` creates a deep copy and `shareEntry` creates another shared handle.
+
 ## Examples
 
 | Example | Description |

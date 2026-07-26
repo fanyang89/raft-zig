@@ -589,15 +589,14 @@ pub const Raftor = struct {
                 proposal_timeout,
             )) |_| null else |err| err;
             self.lifecycle_mutex.unlock();
-            defer {
-                self.allocator.free(item.data);
-                self.allocator.free(item.ctx);
-            }
+            var data = item.data;
+            defer self.allocator.free(data);
+            defer self.allocator.free(item.ctx);
             if (track_error) |err| {
                 item.callback.invoke(.{ .err = err });
                 continue;
             }
-            self.raw_node.propose(item.ctx, item.data) catch |e| {
+            self.raw_node.proposeOwned(item.ctx, &data) catch |e| {
                 self.proposal_tracker.fail(item.ctx, e);
                 if (e != error.ProposalDropped) return e;
             };
