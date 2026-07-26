@@ -123,6 +123,40 @@ jobs:
             .zig-cache/f/**
             .zig-cache/tmp/libfuzzer.log
 
+  wal-durability:
+    name: WAL durability and crash fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Test WAL durability
+        run: mise run wal-durability
+
+      - name: Run bounded WAL crash fuzzing
+        run: mise run fuzz-wal-crash
+
+      - name: Upload WAL crash failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fuzz-wal-crash-failure
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            crash-*
+            leak-*
+            oom-*
+            timeout-*
+            .zig-cache/f/**
+            .zig-cache/tmp/libfuzzer.log
+
   required:
     name: Required
     if: always()
@@ -131,6 +165,7 @@ jobs:
       - core-test
       - sanitizer
       - fuzz
+      - wal-durability
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -140,8 +175,10 @@ jobs:
           CORE_TEST_RESULT: ${{ needs.core-test.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
+          WAL_DURABILITY_RESULT: ${{ needs.wal-durability.result }}
         run: |
           test "$WORKFLOW_LINT_RESULT" = success
           test "$CORE_TEST_RESULT" = success
           test "$SANITIZER_RESULT" = success
           test "$FUZZ_RESULT" = success
+          test "$WAL_DURABILITY_RESULT" = success

@@ -27,6 +27,8 @@ jobs:
             runs: 1M
           - target: sim
             runs: 100K
+          - target: wal-crash
+            runs: 10K
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
