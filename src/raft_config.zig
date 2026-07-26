@@ -48,6 +48,8 @@ pub const Config = struct {
     priority: i64 = 0,
     /// Maximum total bytes of uncommitted entries.
     max_uncommitted_size: u64 = std.math.maxInt(u64),
+    /// Maximum number of uncommitted entries.
+    max_uncommitted_entries: u64 = std.math.maxInt(u64),
     /// Maximum bytes of committed entries returned per Ready.
     max_committed_size_per_ready: u64 = std.math.maxInt(u64),
     /// Allow applying entries that haven't been persisted yet (raft-zig only).
@@ -96,6 +98,7 @@ pub const Config = struct {
         if (self.max_uncommitted_size < self.max_size_per_message) {
             return error.InvalidConfig;
         }
+        if (self.max_uncommitted_entries == 0) return error.InvalidConfig;
 
         return;
     }
@@ -128,6 +131,13 @@ test "zero max message size validates as unlimited" {
     config.max_size_per_message = 512;
     try config.validate();
     try std.testing.expectEqual(@as(u64, 512), config.effectiveMaxSizePerMessage());
+}
+
+test "validate rejects zero max uncommitted entries" {
+    var config = defaultConfig();
+    config.id = 1;
+    config.max_uncommitted_entries = 0;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
 }
 
 test "validate rejects zero id" {

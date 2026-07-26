@@ -80,46 +80,68 @@ pub const CampaignType = enum { pre_election, election, transfer };
 // UncommittedState
 // ===========================================================================
 
-/// Tracks the total bytes of uncommitted entries so a leader doesn't accept
-/// an unbounded backlog.
+/// Tracks uncommitted entries so a leader doesn't accept an unbounded backlog.
 pub const UncommittedState = struct {
     max_uncommitted_size: u64,
+    max_uncommitted_entries: u64,
     uncommitted_size: u64 = 0,
+    uncommitted_entries: u64 = 0,
     last_log_tail_index: u64 = 0,
 
     pub fn isNoLimit(self: UncommittedState) bool {
-        return self.max_uncommitted_size == std.math.maxInt(u64);
+        return self.max_uncommitted_size == std.math.maxInt(u64) and
+            self.max_uncommitted_entries == std.math.maxInt(u64);
     }
 
     pub fn maybeIncreaseUncommittedSize(self: *UncommittedState, entries: []const Entry) bool {
-        if (self.isNoLimit()) return true;
+        const entry_count = std.math.cast(u64, entries.len) orelse return false;
+        const next_entry_count = std.math.add(u64, self.uncommitted_entries, entry_count) catch return false;
+        if (next_entry_count > self.max_uncommitted_entries) return false;
 
         var size: u64 = 0;
-        for (entries) |e| size += e.data.len;
+        if (self.max_uncommitted_size != std.math.maxInt(u64)) {
+            for (entries) |entry| {
+                const entry_size = std.math.cast(u64, entry.data.len) orelse return false;
+                size = std.math.add(u64, size, entry_size) catch return false;
+            }
 
-        if (size == 0 or self.uncommitted_size == 0 or
-            size + self.uncommitted_size <= self.max_uncommitted_size)
-        {
+            if (size != 0 and self.uncommitted_size != 0) {
+                const next_size = std.math.add(u64, self.uncommitted_size, size) catch return false;
+                if (next_size > self.max_uncommitted_size) return false;
+            }
             self.uncommitted_size += size;
-            return true;
         }
-        return false;
+        self.uncommitted_entries = next_entry_count;
+        return true;
     }
 
     pub fn maybeReduceUncommittedSize(self: *UncommittedState, entries: []const Entry) bool {
-        if (self.isNoLimit() or entries.len == 0) return true;
+        if (entries.len == 0) return true;
 
         var size: u64 = 0;
-        for (entries) |e| {
-            if (e.index > self.last_log_tail_index) size += e.data.len;
+        var entry_count: u64 = 0;
+        for (entries) |entry| {
+            if (entry.index <= self.last_log_tail_index) continue;
+            entry_count += 1;
+            if (self.max_uncommitted_size != std.math.maxInt(u64)) size += entry.data.len;
         }
 
-        if (size > self.uncommitted_size) {
-            self.uncommitted_size = 0;
-            return false;
+        var valid = true;
+        if (entry_count > self.uncommitted_entries) {
+            self.uncommitted_entries = 0;
+            valid = false;
+        } else {
+            self.uncommitted_entries -= entry_count;
         }
-        self.uncommitted_size -= size;
-        return true;
+        if (self.max_uncommitted_size != std.math.maxInt(u64)) {
+            if (size > self.uncommitted_size) {
+                self.uncommitted_size = 0;
+                valid = false;
+            } else {
+                self.uncommitted_size -= size;
+            }
+        }
+        return valid;
     }
 };
 
@@ -236,7 +258,10 @@ pub const Raft = struct {
             .pending_conf_index = 0,
             .pending_request_snapshot = invalid_index,
             .priority = 0,
-            .uncommitted_state = .{ .max_uncommitted_size = config.max_uncommitted_size },
+            .uncommitted_state = .{
+                .max_uncommitted_size = config.max_uncommitted_size,
+                .max_uncommitted_entries = config.max_uncommitted_entries,
+            },
             .max_committed_size_per_ready = config.max_committed_size_per_ready,
 
             .prng = std.Random.DefaultPrng.init(seed),
@@ -359,6 +384,7 @@ pub const Raft = struct {
 
         const last_index = self.raft_log.lastIndex();
         self.uncommitted_state.uncommitted_size = 0;
+        self.uncommitted_state.uncommitted_entries = 0;
         self.uncommitted_state.last_log_tail_index = last_index;
 
         // Self-progress starts in Replicate, matched to last_index.
@@ -1593,8 +1619,12 @@ pub const Raft = struct {
         const last_new_index = std.math.add(u64, last_index, entry_count) catch return error.Fatal;
         if (last_new_index == std.math.maxInt(u64)) return error.Fatal;
         const previous_uncommitted_size = self.uncommitted_state.uncommitted_size;
+        const previous_uncommitted_entries = self.uncommitted_state.uncommitted_entries;
         if (!self.uncommitted_state.maybeIncreaseUncommittedSize(entries)) return false;
-        errdefer self.uncommitted_state.uncommitted_size = previous_uncommitted_size;
+        errdefer {
+            self.uncommitted_state.uncommitted_size = previous_uncommitted_size;
+            self.uncommitted_state.uncommitted_entries = previous_uncommitted_entries;
+        }
 
         const owned = try storage_mod.shareEntries(self.allocator, entries);
         for (owned, 0..) |*entry, i| {
@@ -1612,7 +1642,7 @@ pub const Raft = struct {
     pub fn reduceUncommittedSize(self: *Raft, ents: []const Entry) void {
         if (self.state != .leader) return;
         if (!self.uncommitted_state.maybeReduceUncommittedSize(ents)) {
-            log.warn("try to reduce uncommitted size less than 0", .{});
+            log.warn("try to reduce uncommitted state below zero", .{});
         }
     }
 
@@ -1887,6 +1917,36 @@ fn enterJoint(cc: ConfChangeV2) ?bool {
 
 const MemoryStorage = @import("memory_storage.zig").MemoryStorage;
 
+test "uncommitted state enforces entry count and ignores old log entries on reduction" {
+    var state = UncommittedState{
+        .max_uncommitted_size = std.math.maxInt(u64),
+        .max_uncommitted_entries = 2,
+        .last_log_tail_index = 5,
+    };
+    const entries = [_]Entry{
+        .{ .index = 5 },
+        .{ .index = 6 },
+    };
+
+    try std.testing.expect(state.maybeIncreaseUncommittedSize(&entries));
+    try std.testing.expectEqual(@as(u64, 2), state.uncommitted_entries);
+    try std.testing.expect(!state.maybeIncreaseUncommittedSize(&.{.{ .index = 7 }}));
+    try std.testing.expectEqual(@as(u64, 2), state.uncommitted_entries);
+    try std.testing.expect(state.maybeReduceUncommittedSize(&entries));
+    try std.testing.expectEqual(@as(u64, 1), state.uncommitted_entries);
+    try std.testing.expect(state.maybeIncreaseUncommittedSize(&.{.{ .index = 7 }}));
+    try std.testing.expectEqual(@as(u64, 2), state.uncommitted_entries);
+
+    var byte_limited = UncommittedState{
+        .max_uncommitted_size = 1,
+        .max_uncommitted_entries = 2,
+    };
+    try std.testing.expect(byte_limited.maybeIncreaseUncommittedSize(&.{.{ .data = "a" }}));
+    try std.testing.expect(!byte_limited.maybeIncreaseUncommittedSize(&.{.{ .data = "b" }}));
+    try std.testing.expectEqual(@as(u64, 1), byte_limited.uncommitted_size);
+    try std.testing.expectEqual(@as(u64, 1), byte_limited.uncommitted_entries);
+}
+
 fn newThreePeerSetup(allocator: std.mem.Allocator, id: u64) !struct { storage: MemoryStorage, raft: Raft } {
     var storage = MemoryStorage.init();
     var cs = ConfState{ .voters = try allocator.dupe(u64, &.{ 1, 2, 3 }) };
@@ -1901,6 +1961,21 @@ fn newThreePeerSetup(allocator: std.mem.Allocator, id: u64) !struct { storage: M
 
     const raft = try Raft.init(allocator, config, storage.asStorage());
     return .{ .storage = storage, .raft = raft };
+}
+
+test "append entry allocation failure restores uncommitted state" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var setup = try newThreePeerSetup(allocator, 1);
+    defer setup.storage.deinit(allocator);
+    defer setup.raft.deinit();
+    setup.raft.uncommitted_state.max_uncommitted_size = 1024;
+    setup.raft.uncommitted_state.max_uncommitted_entries = 1;
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, setup.raft.appendEntry(&.{.{ .data = "payload" }}));
+    try std.testing.expectEqual(@as(u64, 0), setup.raft.uncommitted_state.uncommitted_size);
+    try std.testing.expectEqual(@as(u64, 0), setup.raft.uncommitted_state.uncommitted_entries);
 }
 
 test "raft constructs and starts as follower" {

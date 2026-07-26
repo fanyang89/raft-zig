@@ -103,6 +103,32 @@ test "raw_node: propose flows through Ready.entries" {
     light.deinit(allocator);
 }
 
+test "raw_node: uncommitted entry limit rejects until Ready advances" {
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedStorage(&storage, &.{1});
+
+    var config = makeConfig(1);
+    config.max_uncommitted_entries = 1;
+    var node = try RawNode.init(allocator, config, storage.asStorage());
+    defer node.deinit();
+    try campaignLeader(&node, &storage);
+    try std.testing.expectEqual(@as(u64, 0), node.raftConst().uncommitted_state.uncommitted_entries);
+
+    try node.propose("", "first");
+    try std.testing.expectEqual(@as(u64, 1), node.raftConst().uncommitted_state.uncommitted_entries);
+    try std.testing.expectError(error.ProposalDropped, node.propose("", "second"));
+    try std.testing.expectEqual(@as(u64, 1), node.raftConst().uncommitted_state.uncommitted_entries);
+
+    var ready = try node.getReady();
+    defer ready.deinit(allocator);
+    try storage.append(allocator, ready.entries);
+    var light = try node.advance(ready);
+    defer light.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), node.raftConst().uncommitted_state.uncommitted_entries);
+    try node.propose("", "second");
+}
+
 test "raw_node: restart preserves prior HardState" {
     // First node: campaign, propose, persist.
     var storage1 = MemoryStorage.init();

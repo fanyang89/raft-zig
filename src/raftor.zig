@@ -160,6 +160,7 @@ pub const NodeStatus = struct {
     pending_proposals: usize = 0,
     queued_proposals: usize = 0,
     queued_proposal_bytes: usize = 0,
+    uncommitted_entries: u64 = 0,
     incarnation: u64 = 0,
 };
 
@@ -949,6 +950,7 @@ pub const Raftor = struct {
             .pending_proposals = self.proposal_tracker.pendingCount(),
             .queued_proposals = self.proposal_queue.count(),
             .queued_proposal_bytes = self.proposal_queue.byteCount(),
+            .uncommitted_entries = if (r.state == .leader) r.uncommitted_state.uncommitted_entries else 0,
             .incarnation = self.request_context_generator.incarnation,
         };
     }

@@ -69,9 +69,6 @@ pub const RaftorConfig = struct {
     snapshot_interval_ticks: u64 = 0,
     /// Minimum ticks between snapshot retry attempts (rate limiting).
     snapshot_retry_min_ticks: u64 = 10,
-    /// Maximum number of uncommitted entries allowed before proposals are
-    /// rejected.
-    max_uncommitted_entries: u64 = std.math.maxInt(u64),
     /// Whether to verify CRC32C entry checksums on apply.
     checksum_enabled: bool = false,
     /// Proposal timeout in ticks. 0 = no timeout.
