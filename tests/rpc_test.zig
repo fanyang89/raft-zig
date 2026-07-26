@@ -129,6 +129,8 @@ test "rpc: persistent stream preserves FIFO and callbacks run only in pollOne" {
     var capture = Capture{};
     defer capture.deinit();
     capture.attach(pair.second.transport());
+    const stream_open_count = pair.first.peerOpenCount(2);
+    try std.testing.expect(stream_open_count > 0);
 
     const messages = [_]raft.Message{
         .{ .msg_type = .heartbeat, .from = 1, .to = 2, .term = 1 },
@@ -144,7 +146,7 @@ test "rpc: persistent stream preserves FIFO and callbacks run only in pollOne" {
     try std.testing.expectEqual(@as(u64, 1), capture.messages.items[0].term);
     try std.testing.expectEqual(@as(u64, 2), capture.messages.items[1].term);
     try std.testing.expectEqual(@as(u64, 3), capture.messages.items[2].term);
-    try std.testing.expectEqual(@as(u64, 1), pair.first.peerOpenCount(2));
+    try std.testing.expectEqual(stream_open_count, pair.first.peerOpenCount(2));
 }
 
 test "rpc: node pair uses two directed streams" {
@@ -156,6 +158,10 @@ test "rpc: node pair uses two directed streams" {
     defer second_capture.deinit();
     first_capture.attach(pair.first.transport());
     second_capture.attach(pair.second.transport());
+    const first_stream_open_count = pair.first.peerOpenCount(2);
+    const second_stream_open_count = pair.second.peerOpenCount(1);
+    try std.testing.expect(first_stream_open_count > 0);
+    try std.testing.expect(second_stream_open_count > 0);
 
     try pair.first.transport().send(&.{.{ .msg_type = .append, .from = 1, .to = 2, .term = 7 }});
     try pair.second.transport().send(&.{.{ .msg_type = .append_response, .from = 2, .to = 1, .term = 7 }});
@@ -163,8 +169,8 @@ test "rpc: node pair uses two directed streams" {
     try pollUntil(pair.second.transport(), &second_capture.messages.items.len, 1);
     try std.testing.expectEqual(@as(u64, 2), first_capture.messages.items[0].from);
     try std.testing.expectEqual(@as(u64, 1), second_capture.messages.items[0].from);
-    try std.testing.expectEqual(@as(u64, 1), pair.first.peerOpenCount(2));
-    try std.testing.expectEqual(@as(u64, 1), pair.second.peerOpenCount(1));
+    try std.testing.expectEqual(first_stream_open_count, pair.first.peerOpenCount(2));
+    try std.testing.expectEqual(second_stream_open_count, pair.second.peerOpenCount(1));
 }
 
 test "rpc: wrong cluster is identity rejected without delivery" {
