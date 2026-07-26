@@ -1,5 +1,6 @@
 const std = @import("std");
 const options = @import("raft_zig_options");
+const grpc_log = @import("grpc_lite").log;
 
 pub const Kind = enum {
     applied_exceeds_committed,
@@ -143,7 +144,8 @@ pub fn checkRaft(raft: anytype) ?Violation {
 pub fn assertRaft(raft: anytype) void {
     if (!options.invariant_checks) return;
     if (checkRaft(raft)) |violation| {
-        std.log.err(
+        grpc_log.err(
+            @src(),
             "raft invariant failed: {s}, peer={}, expected={}, actual={}",
             .{ @tagName(violation.kind), violation.peer_id, violation.expected, violation.actual },
         );

@@ -28,7 +28,7 @@ const cloneSnapshot = storage_mod.cloneSnapshot;
 const limitSize = util.limitSize;
 const entryApproximateSize = util.entryApproximateSize;
 
-const log = std.log.scoped(.raft_zig_log);
+const log = @import("grpc_lite").log;
 
 /// Result of `RaftLog.maybeAppend`: tells the caller whether the prev-entry
 /// matched, where the first conflict was, and the new last index.
@@ -105,7 +105,7 @@ pub const RaftLog = struct {
     pub fn lastIndex(self: *const RaftLog) u64 {
         if (self.unstable.maybeLastIndex()) |i| return i;
         return self.store.lastIndex() catch |e| {
-            log.warn("store.lastIndex failed: {s}", .{@errorName(e)});
+            log.warn(@src(), "store.lastIndex failed: {s}", .{@errorName(e)});
             return 0;
         };
     }
@@ -113,7 +113,7 @@ pub const RaftLog = struct {
     pub fn firstIndex(self: *const RaftLog) u64 {
         if (self.unstable.maybeFirstIndex()) |i| return i;
         return self.store.firstIndex() catch |e| {
-            log.warn("store.firstIndex failed: {s}", .{@errorName(e)});
+            log.warn(@src(), "store.firstIndex failed: {s}", .{@errorName(e)});
             return 0;
         };
     }
@@ -126,6 +126,7 @@ pub const RaftLog = struct {
                 if (e.index <= self.lastIndex()) {
                     const existing = self.term(e.index) catch 0;
                     log.info(
+                        @src(),
                         "found conflict at index({}), existing_term={}, conflicting_term={}",
                         .{ e.index, existing, e.term },
                     );
@@ -155,7 +156,7 @@ pub const RaftLog = struct {
 
         if (index > self.persisted and index < first_update_index) {
             if ((try self.store.term(index)) == term_) {
-                log.debug("persisted index {}", .{index});
+                log.debug(@src(), "persisted index {}", .{index});
                 self.persisted = index;
                 return true;
             }
@@ -167,7 +168,7 @@ pub const RaftLog = struct {
         if (index <= self.persisted) return false;
         std.debug.assert(index <= self.committed);
         std.debug.assert(index < self.unstable.offset);
-        log.debug("snapshot persisted index {}", .{index});
+        log.debug(@src(), "snapshot persisted index {}", .{index});
         self.persisted = index;
         return true;
     }
@@ -192,6 +193,7 @@ pub const RaftLog = struct {
     ) Error!MaybeAppendResult {
         if (!try self.matchTerm(idx, term_)) {
             log.debug(
+                @src(),
                 "MaybeAppend failed: idx={}, term={}, last_index={}",
                 .{ idx, term_, self.lastIndex() },
             );
@@ -205,7 +207,7 @@ pub const RaftLog = struct {
             const expected = std.math.add(u64, idx, std.math.cast(u64, offset) orelse return error.Fatal) catch
                 return error.Fatal;
             if (entry.index != expected) {
-                log.warn("refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
+                log.warn(@src(), "refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
                 return error.Fatal;
             }
         }
@@ -262,14 +264,14 @@ pub const RaftLog = struct {
         const first = ents[0];
         if (ents[ents.len - 1].index == std.math.maxInt(u64)) return error.Fatal;
         if (first.index <= self.committed) {
-            log.warn("refused to overwrite committed index {}", .{first.index});
+            log.warn(@src(), "refused to overwrite committed index {}", .{first.index});
             return error.Fatal;
         }
 
         const last_index = self.lastIndex();
         const next_index = std.math.add(u64, last_index, 1) catch return error.Fatal;
         if (first.index > next_index) {
-            log.warn("refused append with a hole at index {}, expected at most {}", .{ first.index, next_index });
+            log.warn(@src(), "refused append with a hole at index {}, expected at most {}", .{ first.index, next_index });
             return error.Fatal;
         }
 
@@ -280,7 +282,7 @@ pub const RaftLog = struct {
             };
             if (previous_term) |term_| {
                 if (term_ > first.term) {
-                    log.warn("refused term regression from {} to {}", .{ term_, first.term });
+                    log.warn(@src(), "refused term regression from {} to {}", .{ term_, first.term });
                     return error.Fatal;
                 }
             }
@@ -288,11 +290,11 @@ pub const RaftLog = struct {
         for (ents[1..], ents[0 .. ents.len - 1]) |entry, previous| {
             const expected = std.math.add(u64, previous.index, 1) catch return error.Fatal;
             if (entry.index != expected) {
-                log.warn("refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
+                log.warn(@src(), "refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
                 return error.Fatal;
             }
             if (previous.term > entry.term) {
-                log.warn("refused term regression from {} to {}", .{ previous.term, entry.term });
+                log.warn(@src(), "refused term regression from {} to {}", .{ previous.term, entry.term });
                 return error.Fatal;
             }
         }
@@ -421,6 +423,7 @@ pub const RaftLog = struct {
         var conflict_index = index;
         if (index > self.lastIndex()) {
             log.debug(
+                @src(),
                 "index({}) is out of range [0, last_index({})] in find_conflict_by_term",
                 .{ index, self.lastIndex() },
             );

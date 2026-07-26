@@ -17,7 +17,7 @@ const shareEntry = storage_mod.shareEntry;
 const cloneSnapshot = storage_mod.cloneSnapshot;
 const entryApproximateSize = util.entryApproximateSize;
 
-const log = std.log.scoped(.raft_zig_unstable);
+const log = @import("grpc_lite").log;
 
 pub const Unstable = struct {
     snapshot: ?Snapshot,
@@ -101,6 +101,7 @@ pub const Unstable = struct {
         const tail = &self.entries.items[self.entries.items.len - 1];
         if (tail.index != index or tail.term != term) {
             log.warn(
+                @src(),
                 "unstable.slice tail has different index {} and term {}, expect {} {}",
                 .{ tail.index, tail.term, index, term },
             );
@@ -176,6 +177,7 @@ pub const Unstable = struct {
         if (self.snapshot) |s| {
             if (s.metadata.index != index) {
                 log.warn(
+                    @src(),
                     "unstable.snap has different index {}, expect {}",
                     .{ s.metadata.index, index },
                 );

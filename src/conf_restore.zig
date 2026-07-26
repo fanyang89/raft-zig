@@ -17,7 +17,7 @@ const ConfChangeType = types.ConfChangeType;
 const ConfChanger = conf_changer_mod.ConfChanger;
 const ProgressTracker = progress_tracker_mod.ProgressTracker;
 
-const log = std.log.scoped(.raft_zig_conf_restore);
+const log = @import("grpc_lite").log;
 
 /// Split a ConfState into the two change batches needed to reproduce it:
 ///   * outgoing — AddNode for every voter in `voters_outgoing`.
@@ -100,14 +100,14 @@ pub fn restore(
         for (split.outgoing) |cc| {
             const one = [_]ConfChangeSingle{cc};
             var r = ConfChanger.init(tracker).simple(&one) catch |e| {
-                log.warn("simple failed during restore: {s}", .{@errorName(e)});
+                log.warn(@src(), "simple failed during restore: {s}", .{@errorName(e)});
                 return e;
             };
             defer r.deinit(allocator);
             try tracker.applyConf(r.conf, r.changes, next_idx);
         }
         var r = ConfChanger.init(tracker).enterJoint(cs.auto_leave, split.incoming) catch |e| {
-            log.warn("enterJoint failed during restore: {s}", .{@errorName(e)});
+            log.warn(@src(), "enterJoint failed during restore: {s}", .{@errorName(e)});
             return e;
         };
         defer r.deinit(allocator);

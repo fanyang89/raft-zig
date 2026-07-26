@@ -63,8 +63,14 @@ pub fn build(b: *std.Build) void {
         .@"sanitize-thread" = sanitizers.thread orelse false,
         .@"sanitize-c" = sanitizers.c == .full,
         .gperftools = enable_gperftools,
+        .protobuf = false,
     });
     const grpc_lite = grpc_dep.module("grpc_lite");
+    const nanozlog = b.dependency("nanozlog", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("nanozlog");
+    grpc_lite.addImport("nanozlog", nanozlog);
     raft_zig.addImport("grpc_lite", grpc_lite);
 
     const raft_zig_gperftools = if (enable_gperftools)

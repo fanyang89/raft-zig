@@ -23,7 +23,7 @@ const InboundMailbox = inbound_mailbox.InboundMailbox;
 const PeerEventQueue = peer_event_queue.PeerEventQueue;
 const PeerManager = peer_manager.PeerManager;
 
-const log = std.log.scoped(.raft_zig_grpc_transport);
+const log = grpc.log;
 
 pub const Config = struct {
     identity: TransportIdentity,
@@ -34,6 +34,7 @@ pub const Config = struct {
     reconnect_initial_delay_ns: u64 = 20 * std.time.ns_per_ms,
     reconnect_max_delay_ns: u64 = 2 * std.time.ns_per_s,
     graceful_shutdown_timeout_ns: u64 = 5 * std.time.ns_per_s,
+    runtime: ?*grpc.Runtime = null,
 
     pub fn validate(self: Config) !void {
         if (self.identity.node_id == 0) return error.InvalidNodeId;
@@ -108,6 +109,7 @@ pub const GrpcLiteTransport = struct {
             .stream_limits = config.stream_limits,
             .reconnect_initial_delay_ns = config.reconnect_initial_delay_ns,
             .reconnect_max_delay_ns = config.reconnect_max_delay_ns,
+            .runtime = config.runtime,
             .event_sink = .{ .ctx = self, .function = queuePeerEvent },
         });
         errdefer self.peer_manager.deinit();
@@ -199,7 +201,7 @@ pub const GrpcLiteTransport = struct {
         };
         self.state = .started;
         const address = self.server.localAddress() catch return;
-        log.info("grpc transport listening on {s}:{}", .{ address.host, address.port });
+        log.info(@src(), "grpc transport listening on {s}:{}", .{ address.host, address.port });
     }
 
     fn stopImpl(context: *anyopaque) void {

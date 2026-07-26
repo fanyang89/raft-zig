@@ -5,8 +5,11 @@
     .fingerprint = 0xd98872fa44f543c3,
     .dependencies = .{
         .grpc_lite = .{
-            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/2757a3aecf0e494c9d133e2d0e6d7204376fddb1",
-            .hash = "grpc_lite-0.3.1-BcwY0E_tCQAk3WAx8InBuqlhTJowvDsSGgi-IUGA3ng_",
+            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/bf37b83187f3f01efa90b0874cab96c3e7953fc5",
+            .hash = "grpc_lite-0.3.1-BcwY0K8HDAD2r0IXTmpBEAuhjBH1MyANJiRC2HBY8o9I",
+        },
+        .nanozlog = .{
+            .path = "vendor/nanozlog",
         },
         .crc32c = .{
             .url = "https://codeload.github.com/google/crc32c/tar.gz/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
@@ -25,6 +28,7 @@
         "examples",
         "benchmarks",
         "tests",
+        "vendor",
         "ref",
         "LICENSE",
         "README.md",

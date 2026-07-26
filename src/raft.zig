@@ -64,7 +64,7 @@ const StateRole = @import("core/state_role.zig").StateRole;
 const invariant = @import("invariant.zig");
 const SoftState = @import("core/state_role.zig").SoftState;
 
-const log = std.log.scoped(.raft_zig);
+const log = @import("grpc_lite").log;
 
 // ===========================================================================
 // Campaign type strings.
@@ -291,6 +291,7 @@ pub const Raft = struct {
         r.postConfChange(initial_cs);
 
         log.info(
+            @src(),
             "node {} initialized: term={} commit={} applied={} last_index={} last_term={}",
             .{ r.id, r.term, r.raft_log.committed, r.raft_log.applied, r.raft_log.lastIndex(), r.raft_log.lastTerm() catch 0 },
         );
@@ -358,7 +359,7 @@ pub const Raft = struct {
         self.state = .follower;
         self.pending_request_snapshot = pending_request_snapshot;
         self.raft_log.max_apply_unpersisted_log_limit = 0;
-        log.info("node {} became follower at term {}", .{ self.id, term });
+        log.info(@src(), "node {} became follower at term {}", .{ self.id, term });
     }
 
     pub fn becomePreCandidate(self: *Raft) void {
@@ -367,7 +368,7 @@ pub const Raft = struct {
         self.state = .pre_candidate;
         self.progress_tracker.resetVotes();
         self.leader_id = invalid_id;
-        log.info("node {} became pre-candidate at term {}", .{ self.id, self.term });
+        log.info(@src(), "node {} became pre-candidate at term {}", .{ self.id, self.term });
     }
 
     pub fn becomeCandidate(self: *Raft) void {
@@ -378,7 +379,7 @@ pub const Raft = struct {
         self.vote = self.id;
         self.state = .candidate;
         self.promotable = self.progress_tracker.conf.voters.contains(self.id);
-        log.info("node {} became candidate at term {}", .{ self.id, term });
+        log.info(@src(), "node {} became candidate at term {}", .{ self.id, term });
     }
 
     pub fn becomeLeader(self: *Raft) Error!void {
@@ -408,7 +409,7 @@ pub const Raft = struct {
             @panic("appending an empty entry should never be dropped");
         }
 
-        log.info("node {} became leader at term {}", .{ self.id, self.term });
+        log.info(@src(), "node {} became leader at term {}", .{ self.id, self.term });
     }
 
     // -----------------------------------------------------------------------
@@ -513,7 +514,7 @@ pub const Raft = struct {
                 const in_lease = self.check_quorum and self.leader_id != invalid_id and
                     self.election_elapsed < self.election_timeout;
                 if (!force and in_lease) {
-                    log.debug("node {} ignored vote from {}: lease is not expired", .{ self.id, m.from });
+                    log.debug(@src(), "node {} ignored vote from {}: lease is not expired", .{ self.id, m.from });
                     return;
                 }
             }
@@ -523,7 +524,7 @@ pub const Raft = struct {
             if (is_prevote_request or is_prevote_resp_ok) {
                 // Never change our term in response to a pre-vote.
             } else {
-                log.info("node {} received a message with higher term from {}", .{ self.id, m.from });
+                log.info(@src(), "node {} received a message with higher term from {}", .{ self.id, m.from });
                 if (m.msg_type == .append or m.msg_type == .heartbeat or m.msg_type == .snapshot) {
                     self.becomeFollower(m.term, m.from);
                 } else {
@@ -547,7 +548,7 @@ pub const Raft = struct {
                     .reject = true,
                 });
             } else {
-                log.debug("node {} ignored a message with lower term from {}", .{ self.id, m.from });
+                log.debug(@src(), "node {} ignored a message with lower term from {}", .{ self.id, m.from });
             }
             return;
         }
@@ -558,7 +559,7 @@ pub const Raft = struct {
                 if (self.promotable) {
                     self.hup(false);
                 } else {
-                    log.debug("node {} received MsgHup but is not promotable", .{self.id});
+                    log.debug(@src(), "node {} received MsgHup but is not promotable", .{self.id});
                 }
             },
             .request_vote, .request_pre_vote => try self.handleVoteRequest(m),
@@ -629,8 +630,8 @@ pub const Raft = struct {
                 _ = self.poll(m.from, !m.reject);
                 try self.maybeCommitByVote(m);
             },
-            .timeout_now => log.debug("candidate ignored MsgTimeoutNow from {}", .{m.from}),
-            .read_index => log.debug("node {} has no leader; dropping read index message", .{self.id}),
+            .timeout_now => log.debug(@src(), "candidate ignored MsgTimeoutNow from {}", .{m.from}),
+            .read_index => log.debug(@src(), "node {} has no leader; dropping read index message", .{self.id}),
             else => {},
         }
     }
@@ -664,7 +665,7 @@ pub const Raft = struct {
             },
             .transfer_leader => {
                 if (self.leader_id == invalid_id) {
-                    log.debug("node {} has no leader; dropping transfer message", .{self.id});
+                    log.debug(@src(), "node {} has no leader; dropping transfer message", .{self.id});
                     return;
                 }
                 m.to = self.leader_id;
@@ -677,12 +678,12 @@ pub const Raft = struct {
                 if (self.promotable) {
                     self.hup(true);
                 } else {
-                    log.debug("node {} received MsgTimeoutNow but is not promotable", .{self.id});
+                    log.debug(@src(), "node {} received MsgTimeoutNow but is not promotable", .{self.id});
                 }
             },
             .read_index => {
                 if (self.leader_id == invalid_id) {
-                    log.debug("node {} has no leader; dropping read index message", .{self.id});
+                    log.debug(@src(), "node {} has no leader; dropping read index message", .{self.id});
                     return;
                 }
                 m.to = self.leader_id;
@@ -693,11 +694,11 @@ pub const Raft = struct {
             },
             .read_index_resp => {
                 if (self.leader_id == invalid_id or m.from != self.leader_id) {
-                    log.debug("ignored MsgReadIndexResp from {}", .{m.from});
+                    log.debug(@src(), "ignored MsgReadIndexResp from {}", .{m.from});
                     return;
                 }
                 if (m.entries.len != 1) {
-                    log.warn("invalid MsgReadIndexResp from {} entries={}", .{ m.from, m.entries.len });
+                    log.warn(@src(), "invalid MsgReadIndexResp from {} entries={}", .{ m.from, m.entries.len });
                     return;
                 }
                 const ctx_bytes = m.entries[0].data;
@@ -721,7 +722,7 @@ pub const Raft = struct {
             .check_quorum => {
                 const active = self.progress_tracker.quorumRecentlyActive(self.id) catch true;
                 if (!active) {
-                    log.warn("node {} stepped down because quorum is inactive", .{self.id});
+                    log.warn(@src(), "node {} stepped down because quorum is inactive", .{self.id});
                     self.becomeFollower(self.term, invalid_id);
                 }
                 return;
@@ -737,16 +738,16 @@ pub const Raft = struct {
                 for (m.entries, 0..) |e, i| {
                     if (e.entry_type == .conf_change or e.entry_type == .conf_change_v2) {
                         if (self.hasPendingConf()) {
-                            log.debug("node {} dropped configuration change while another is pending", .{self.id});
+                            log.debug(@src(), "node {} dropped configuration change while another is pending", .{self.id});
                             return error.ProposalDropped;
                         }
                         if (conf_change_position != null) {
-                            log.debug("node {} dropped multiple configuration changes", .{self.id});
+                            log.debug(@src(), "node {} dropped multiple configuration changes", .{self.id});
                             return error.ProposalDropped;
                         }
                         conf_change_position = i;
                         if (e.data.len == 0) {
-                            log.debug("node {} dropped configuration change without data", .{self.id});
+                            log.debug(@src(), "node {} dropped configuration change without data", .{self.id});
                             return error.ProposalDropped;
                         }
                     }
@@ -764,7 +765,7 @@ pub const Raft = struct {
             },
             .read_index => {
                 if (!self.commitToCurrentTerm()) {
-                    log.debug("node {} has not committed in its term; postponing read index", .{self.id});
+                    log.debug(@src(), "node {} has not committed in its term; postponing read index", .{self.id});
                     var cloned = try storage_mod.shareMessage(self.allocator, m.*);
                     errdefer cloned.deinit(self.allocator);
                     try self.pending_read_index_messages.append(self.allocator, cloned);
@@ -784,7 +785,7 @@ pub const Raft = struct {
             .transfer_leader => try self.handleTransferLeader(m),
             else => {
                 if (self.progress_tracker.getPtr(m.from) == null) {
-                    log.debug("no progress available for {}", .{m.from});
+                    log.debug(@src(), "no progress available for {}", .{m.from});
                 }
             },
         }
@@ -798,7 +799,7 @@ pub const Raft = struct {
         self.progress_tracker.recordVote(from, vote) catch {};
         const r = self.progress_tracker.countVotes();
         if (from != self.id) {
-            log.debug("received vote response from {} vote={}", .{ from, vote });
+            log.debug(@src(), "received vote response from {} vote={}", .{ from, vote });
         }
 
         switch (r.result) {
@@ -861,18 +862,18 @@ pub const Raft = struct {
 
     pub fn hup(self: *Raft, transfer_leader: bool) void {
         if (self.state == .leader) {
-            log.debug("ignoring MsgHup; already leader", .{});
+            log.debug(@src(), "ignoring MsgHup; already leader", .{});
             return;
         }
 
         const low: u64 = if (self.raft_log.unstable.maybeFirstIndex()) |i| i else self.raft_log.applied + 1;
         const high = self.raft_log.committed + 1;
         if (self.hasUnappliedConfChanges(low, high)) {
-            log.debug("node {} cannot campaign at term {}; configuration changes are pending", .{ self.id, self.term });
+            log.debug(@src(), "node {} cannot campaign at term {}; configuration changes are pending", .{ self.id, self.term });
             return;
         }
 
-        log.info("node {} starting a new election at term {}", .{ self.id, self.term });
+        log.info(@src(), "node {} starting a new election at term {}", .{ self.id, self.term });
         if (transfer_leader) {
             self.campaign(.transfer) catch {};
         } else if (self.pre_vote) {
@@ -928,6 +929,7 @@ pub const Raft = struct {
         if (!try self.raft_log.maybeCommit(m.commit, m.commit_term)) return;
 
         log.info(
+            @src(),
             "fast-forwarded commit to vote request: index={} term={}",
             .{ m.commit, m.commit_term },
         );
@@ -1002,7 +1004,7 @@ pub const Raft = struct {
         }
 
         const pr = self.progress_tracker.getPtr(m.from) orelse {
-            log.warn("no progress available for {}", .{m.from});
+            log.warn(@src(), "no progress available for {}", .{m.from});
             return;
         };
 
@@ -1043,7 +1045,7 @@ pub const Raft = struct {
             if (lt == m.from) {
                 if (self.progress_tracker.getPtr(m.from)) |p| {
                     if (p.matched == self.raft_log.lastIndex()) {
-                        log.info("sent MsgTimeoutNow to {} after MsgAppResp", .{m.from});
+                        log.info(@src(), "sent MsgTimeoutNow to {} after MsgAppResp", .{m.from});
                         try self.sendTimeoutNow(m.from);
                     }
                 }
@@ -1072,7 +1074,7 @@ pub const Raft = struct {
 
     pub fn handleHeartbeatResponse(self: *Raft, m: *Message) Error!void {
         const pr = self.progress_tracker.getPtr(m.from) orelse {
-            log.info("no progress available for {}", .{m.from});
+            log.info(@src(), "no progress available for {}", .{m.from});
             return;
         };
 
@@ -1143,7 +1145,7 @@ pub const Raft = struct {
     pub fn handleUnreachable(self: *Raft, m: *Message) Error!void {
         const pr = self.progress_tracker.getPtr(m.from) orelse return;
         if (pr.state == .replicate) pr.becomeProbe();
-        log.info("peer {} reported unreachable", .{m.from});
+        log.info(@src(), "peer {} reported unreachable", .{m.from});
     }
 
     pub fn handleTransferLeader(self: *Raft, m: *Message) Error!void {
@@ -1276,7 +1278,7 @@ pub const Raft = struct {
         if (meta.index == self.raft_log.committed and self.pending_request_snapshot == invalid_index) return false;
 
         if (self.state != .follower) {
-            log.warn("non-follower attempted to restore snapshot", .{});
+            log.warn(@src(), "non-follower attempted to restore snapshot", .{});
             self.becomeFollower(self.term + 1, invalid_id);
             return false;
         }
@@ -1292,38 +1294,38 @@ pub const Raft = struct {
         for (member_sets) |set| {
             for (set.members) |id| {
                 if (id == invalid_id) {
-                    log.warn("invalid snapshot ConfState member {}", .{id});
+                    log.warn(@src(), "invalid snapshot ConfState member {}", .{id});
                     return false;
                 }
                 const result = try member_roles.getOrPut(id);
                 const previous = if (result.found_existing) result.value_ptr.* else 0;
                 const combined = previous | set.role;
                 if (previous & set.role != 0) {
-                    log.warn("duplicate snapshot ConfState member {}", .{id});
+                    log.warn(@src(), "duplicate snapshot ConfState member {}", .{id});
                     return false;
                 }
                 switch (combined) {
                     1, 2, 4, 5, 8, 12 => result.value_ptr.* = combined,
                     else => {
-                        log.warn("conflicting snapshot ConfState roles for member {}", .{id});
+                        log.warn(@src(), "conflicting snapshot ConfState roles for member {}", .{id});
                         return false;
                     },
                 }
             }
         }
         if (meta.conf_state.voters_outgoing.len == 0 and meta.conf_state.auto_leave) {
-            log.warn("invalid snapshot ConfState: auto-leave requires a joint configuration", .{});
+            log.warn(@src(), "invalid snapshot ConfState: auto-leave requires a joint configuration", .{});
             return false;
         }
         for (meta.conf_state.learners_next) |id| {
             if (member_roles.get(id).? & 4 == 0) {
-                log.warn("invalid snapshot ConfState: learner-next {} is not staged correctly", .{id});
+                log.warn(@src(), "invalid snapshot ConfState: learner-next {} is not staged correctly", .{id});
                 return false;
             }
         }
 
         const local_roles = member_roles.get(self.id) orelse {
-            log.warn("restored snapshot but node id not in ConfState", .{});
+            log.warn(@src(), "restored snapshot but node id not in ConfState", .{});
             return false;
         };
         if (local_roles & 7 == 0) return false;
@@ -1331,7 +1333,7 @@ pub const Raft = struct {
         if (self.pending_request_snapshot == invalid_index and
             self.raft_log.matchTerm(meta.index, meta.term) catch false)
         {
-            log.info("fast-forwarded commit to snapshot", .{});
+            log.info(@src(), "fast-forwarded commit to snapshot", .{});
             self.raft_log.commitTo(meta.index) catch {};
             return false;
         }
@@ -1342,7 +1344,7 @@ pub const Raft = struct {
         restoreTracker(&restored_tracker, meta.index + 1, meta.conf_state) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
-                log.warn("failed to restore tracker from snapshot: {s}", .{@errorName(err)});
+                log.warn(@src(), "failed to restore tracker from snapshot: {s}", .{@errorName(err)});
                 return false;
             },
         };
@@ -1352,7 +1354,7 @@ pub const Raft = struct {
         self.raft_log.restore(snap_in) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
-                log.warn("failed to restore raft log from snapshot: {s}", .{@errorName(err)});
+                log.warn(@src(), "failed to restore raft log from snapshot: {s}", .{@errorName(err)});
                 return false;
             },
         };
@@ -1368,17 +1370,17 @@ pub const Raft = struct {
 
         self.postConfChange(restored_cs);
         self.pending_request_snapshot = invalid_index;
-        log.info("restored snapshot at index {}", .{meta.index});
+        log.info(@src(), "restored snapshot at index {}", .{meta.index});
         return true;
     }
 
     pub fn requestSnapshot(self: *Raft) Error!void {
         if (self.state == .leader) {
-            log.debug("node {} cannot request a snapshot while leader", .{self.id});
+            log.debug(@src(), "node {} cannot request a snapshot while leader", .{self.id});
         } else if (self.leader_id == invalid_id) {
-            log.debug("node {} has no leader; dropping snapshot request", .{self.id});
+            log.debug(@src(), "node {} has no leader; dropping snapshot request", .{self.id});
         } else if (self.snapshot() != null or self.pending_request_snapshot != invalid_index) {
-            log.debug("node {} already has a pending snapshot", .{self.id});
+            log.debug(@src(), "node {} already has a pending snapshot", .{self.id});
         } else {
             const request_index = self.raft_log.lastIndex();
             const request_index_term = self.raft_log.term(request_index) catch 0;
@@ -1387,7 +1389,7 @@ pub const Raft = struct {
                 try self.sendRequestSnapshot();
                 return;
             }
-            log.debug("node {} dropped snapshot request due to term mismatch", .{self.id});
+            log.debug(@src(), "node {} dropped snapshot request due to term mismatch", .{self.id});
         }
         return error.RequestSnapshotDropped;
     }
@@ -1636,7 +1638,7 @@ pub const Raft = struct {
     pub fn reduceUncommittedSize(self: *Raft, ents: []const Entry) void {
         if (self.state != .leader) return;
         if (!self.uncommitted_state.maybeReduceUncommittedSize(ents)) {
-            log.warn("try to reduce uncommitted state below zero", .{});
+            log.warn(@src(), "try to reduce uncommitted state below zero", .{});
         }
     }
 
@@ -1651,14 +1653,14 @@ pub const Raft = struct {
         defer if (result) |*r| r.deinit(self.allocator);
 
         if (leaveJoint(cc)) {
-            log.info("ApplyConfChange: LeaveJoint", .{});
+            log.info(@src(), "ApplyConfChange: LeaveJoint", .{});
             result = try changer.leaveJoint();
         } else {
             if (enterJoint(cc)) |auto_leave| {
-                log.info("ApplyConfChange: EnterJoint auto_leave={}", .{auto_leave});
+                log.info(@src(), "ApplyConfChange: EnterJoint auto_leave={}", .{auto_leave});
                 result = try changer.enterJoint(auto_leave, cc.changes);
             } else {
-                log.info("ApplyConfChange: Simple num_changes={}", .{cc.changes.len});
+                log.info(@src(), "ApplyConfChange: Simple num_changes={}", .{cc.changes.len});
                 result = try changer.simple(cc.changes);
             }
         }
@@ -1673,7 +1675,7 @@ pub const Raft = struct {
 
     fn postConfChange(self: *Raft, cs: ConfState) void {
         defer invariant.assertRaft(self);
-        log.info("switched to configuration", .{});
+        log.info(@src(), "switched to configuration", .{});
         const is_voter = self.progress_tracker.conf.voters.contains(self.id);
         self.promotable = is_voter;
 
@@ -1725,6 +1727,7 @@ pub const Raft = struct {
         defer invariant.assertRaft(self);
         if (hs.commit < self.raft_log.committed or hs.commit > self.raft_log.lastIndex()) {
             log.warn(
+                @src(),
                 "hs.commit {} out of range [{}, {}]",
                 .{ hs.commit, self.raft_log.committed, self.raft_log.lastIndex() },
             );
@@ -1783,7 +1786,7 @@ pub const Raft = struct {
         const update = try self.raft_log.maybePersist(index, term_);
         if (update and self.state == .leader) {
             if (self.term != term_) {
-                log.warn("leader persisted term {} != current {}", .{ term_, self.term });
+                log.warn(@src(), "leader persisted term {} != current {}", .{ term_, self.term });
             }
             if (self.progress_tracker.getPtr(self.id)) |pr| {
                 if (pr.maybeUpdate(index) and try self.maybeCommit() and self.shouldBroadcastCommit()) {
@@ -1869,7 +1872,7 @@ pub const Raft = struct {
         const t = lo + r;
         const prev = self.randomized_election_timeout;
         self.randomized_election_timeout = t;
-        log.debug("reset election timeout {} -> {}", .{ prev, t });
+        log.debug(@src(), "reset election timeout {} -> {}", .{ prev, t });
     }
 
     fn abortLeaderTransfer(self: *Raft) void {

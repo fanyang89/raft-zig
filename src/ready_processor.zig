@@ -45,7 +45,7 @@ const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 const StateRole = state_role_mod.StateRole;
 const ClusterMembership = cluster_membership_mod.ClusterMembership;
 
-const log = std.log.scoped(.raft_zig_ready_processor);
+const log = @import("grpc_lite").log;
 
 pub const ReadyPhase = enum {
     validate,
@@ -293,7 +293,7 @@ pub const ReadyProcessor = struct {
     fn sendMessages(self: *ReadyProcessor, messages: []const Message) void {
         for (messages) |*message| {
             self.transport.send(message[0..1]) catch |err| {
-                log.warn("failed to send Raft message to {}: {s}", .{ message.to, @errorName(err) });
+                log.warn(@src(), "failed to send Raft message to {}: {s}", .{ message.to, @errorName(err) });
                 self.raw_node.*.reportUnreachable(message.to) catch {};
                 if (message.msg_type == .snapshot) {
                     self.raw_node.*.reportSnapshot(message.to, .failure) catch {};
@@ -339,7 +339,7 @@ pub const ReadyProcessor = struct {
     }
 
     fn restoreSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
-        log.info("applying snapshot at index {} term {}", .{ snap.metadata.index, snap.metadata.term });
+        log.info(@src(), "applying snapshot at index {} term {}", .{ snap.metadata.index, snap.metadata.term });
 
         var reader = state_machine_mod.BufferSnapshotReader.init(snap.data);
         try self.state_machine.restoreSnapshot(snap.metadata, reader.reader());
@@ -435,12 +435,12 @@ pub const ReadyProcessor = struct {
                 try self.storage.sync();
                 for (cc.changes) |change| switch (change.change_type) {
                     .add_node, .add_learner_node => _ = self.transport.addPeer(change.node_id, cc.context) catch |err| {
-                        log.warn("failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
+                        log.warn(@src(), "failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
                         self.fatal_after_ready = err;
                         continue;
                     },
                     .remove_node => self.transport.removePeer(change.node_id) catch |err| {
-                        log.warn("failed to remove transport peer {}: {s}", .{ change.node_id, @errorName(err) });
+                        log.warn(@src(), "failed to remove transport peer {}: {s}", .{ change.node_id, @errorName(err) });
                         self.fatal_after_ready = err;
                     },
                     .update_node => {},
@@ -454,7 +454,7 @@ pub const ReadyProcessor = struct {
         self.cluster_membership = membership;
         self.membership_index = membership_index;
         self.reconcileTransport(previous, membership) catch |err| {
-            log.warn("failed to reconcile transport membership: {s}", .{@errorName(err)});
+            log.warn(@src(), "failed to reconcile transport membership: {s}", .{@errorName(err)});
             self.fatal_after_ready = err;
         };
         if (previous) |value| {

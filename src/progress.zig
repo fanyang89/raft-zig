@@ -20,7 +20,7 @@ const Index = ack_indexer_mod.Index;
 const AckedIndexer = ack_indexer_mod.AckedIndexer;
 const invalid_index = primitives.invalid_index;
 
-const log = std.log.scoped(.raft_zig_progress);
+const log = @import("grpc_lite").log;
 
 pub const ProgressState = enum(u8) { probe, replicate, snapshot };
 
@@ -156,6 +156,7 @@ pub const Progress = struct {
         request_snapshot: u64,
     ) bool {
         log.debug(
+            @src(),
             "MaybeDecTo: rejected={}, match_hint={}, request_snapshot={}, state={s}, matched={}",
             .{ rejected, match_hint, request_snapshot, progressStateName(self.state), self.matched },
         );

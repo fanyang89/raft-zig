@@ -42,6 +42,7 @@ pub const Config = struct {
     stream_limits: grpc.StreamBufferLimits,
     reconnect_initial_delay_ns: u64,
     reconnect_max_delay_ns: u64,
+    runtime: ?*grpc.Runtime,
     event_sink: EventSink,
 };
 
@@ -247,7 +248,7 @@ fn workerMain(peer: *Peer) void {
     var delay = peer.manager.config.reconnect_initial_delay_ns;
     while (!isStopping(peer)) {
         const generation = beginGeneration(peer);
-        var channel = initChannel(peer.manager.allocator, peer.addr) catch {
+        var channel = initChannel(peer.manager.allocator, peer.addr, peer.manager.config.runtime) catch {
             emitTerminalEvents(peer, generation, false, false);
             if (!enterBackoff(peer, delay)) break;
             delay = nextDelay(delay, peer.manager.config.reconnect_max_delay_ns);
@@ -537,10 +538,10 @@ fn mapWorkerError(err: anyerror) Error {
     return if (err == error.OutOfMemory) error.OutOfMemory else error.ConnectionClosed;
 }
 
-fn initChannel(allocator: std.mem.Allocator, address: []const u8) !grpc.Channel {
+fn initChannel(allocator: std.mem.Allocator, address: []const u8, runtime: ?*grpc.Runtime) !grpc.Channel {
     lockTsanLifecycle();
     defer unlockTsanLifecycle();
-    return grpc.Channel.init(allocator, address, .{});
+    return grpc.Channel.init(allocator, address, .{ .runtime = runtime });
 }
 
 fn deinitChannel(channel: *grpc.Channel) void {

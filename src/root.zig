@@ -20,6 +20,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const log = @import("grpc_lite").log;
+pub const GrpcRuntime = @import("grpc_lite").Runtime;
+
 const version_info = @import("version.zig");
 const primitives = @import("core/primitives.zig");
 const types = @import("core/types.zig");
@@ -266,6 +269,12 @@ pub const version = version_info.string;
 
 test "version is parseable" {
     _ = try std.SemanticVersion.parse(version);
+}
+
+test "logger accepts sentinel strings" {
+    try log.initGlobal(std.testing.allocator, std.testing.io, false);
+    defer log.deinitGlobal(std.testing.allocator);
+    log.info(@src(), "state={s}", .{@tagName(state_role.StateRole.follower)});
 }
 
 test "re-exported modules compile" {

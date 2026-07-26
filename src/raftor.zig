@@ -57,7 +57,7 @@ const ClusterId = cluster_membership_mod.ClusterId;
 const PeerEndpoint = cluster_membership_mod.PeerEndpoint;
 const Peer = raw_node_mod.Peer;
 
-const log = std.log.scoped(.raft_zig_raftor);
+const log = @import("grpc_lite").log;
 
 fn spinLock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
@@ -420,7 +420,7 @@ pub const Raftor = struct {
         if (snapshot.metadata.index == 0) return fallback_applied_index;
         var reader = state_machine_mod.BufferSnapshotReader.init(snapshot.data);
         try state_machine.restoreSnapshot(snapshot.metadata, reader.reader());
-        log.info("restored local snapshot: node_id={}, index={}, term={}", .{
+        log.info(@src(), "restored local snapshot: node_id={}, index={}, term={}", .{
             self.config.nodeId(),
             snapshot.metadata.index,
             snapshot.metadata.term,
@@ -682,8 +682,8 @@ pub const Raftor = struct {
         }
 
         self.maybeAutoSnapshot() catch |e| switch (e) {
-            error.SnapshotOutOfDate => log.debug("snapshot attempt skipped: {s}", .{@errorName(e)}),
-            else => log.warn("snapshot attempt failed: {s}", .{@errorName(e)}),
+            error.SnapshotOutOfDate => log.debug(@src(), "snapshot attempt skipped: {s}", .{@errorName(e)}),
+            else => log.warn(@src(), "snapshot attempt failed: {s}", .{@errorName(e)}),
         };
 
         return had_work;
@@ -908,7 +908,7 @@ pub const Raftor = struct {
             snap.membership = encoded_membership;
         }
 
-        log.info("node {} taking snapshot at index {} term {}", .{ self.raw_node.raftConst().id, applied_index, applied_term });
+        log.info(@src(), "node {} taking snapshot at index {} term {}", .{ self.raw_node.raftConst().id, applied_index, applied_term });
         try self.storage.applyLocalSnapshot(self.allocator, snap);
 
         self.last_snapshot_tick = self.tick_count;

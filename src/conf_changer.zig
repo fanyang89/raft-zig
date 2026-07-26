@@ -25,7 +25,7 @@ const ProgressTracker = progress_tracker_mod.ProgressTracker;
 const MapChangeEntry = progress_tracker_mod.MapChangeEntry;
 const MapChangeKind = progress_tracker_mod.MapChangeKind;
 
-const log = std.log.scoped(.raft_zig_conf_changer);
+const log = @import("grpc_lite").log;
 
 /// True when the configuration has both incoming and outgoing voter sets
 /// (i.e. a joint consensus is active).
@@ -87,7 +87,7 @@ pub fn checkInvariants(cfg: TrackerConfiguration, prs: IncrChangeMap) Error!void
     defer cfg.allocator.free(voters_ids);
     for (voters_ids) |id| {
         if (!prs.contains(id)) {
-            log.warn("no progress for voter {}", .{id});
+            log.warn(@src(), "no progress for voter {}", .{id});
             return error.ConfChangeError;
         }
     }
@@ -96,15 +96,15 @@ pub fn checkInvariants(cfg: TrackerConfiguration, prs: IncrChangeMap) Error!void
     while (lit.next()) |k| {
         const id = k.*;
         if (!prs.contains(id)) {
-            log.warn("no progress for learner {}", .{id});
+            log.warn(@src(), "no progress for learner {}", .{id});
             return error.ConfChangeError;
         }
         if (cfg.voters.outgoing.contains(id)) {
-            log.warn("{} is in learners and outgoing voters", .{id});
+            log.warn(@src(), "{} is in learners and outgoing voters", .{id});
             return error.ConfChangeError;
         }
         if (cfg.voters.incoming.contains(id)) {
-            log.warn("{} is in learners and incoming voters", .{id});
+            log.warn(@src(), "{} is in learners and incoming voters", .{id});
             return error.ConfChangeError;
         }
     }
@@ -113,11 +113,11 @@ pub fn checkInvariants(cfg: TrackerConfiguration, prs: IncrChangeMap) Error!void
     while (nit.next()) |k| {
         const id = k.*;
         if (!prs.contains(id)) {
-            log.warn("no progress for learner(next) {}", .{id});
+            log.warn(@src(), "no progress for learner(next) {}", .{id});
             return error.ConfChangeError;
         }
         if (!cfg.voters.outgoing.contains(id)) {
-            log.warn("{} is in learners_next but not outgoing voters", .{id});
+            log.warn(@src(), "{} is in learners_next but not outgoing voters", .{id});
             return error.ConfChangeError;
         }
     }
@@ -185,7 +185,7 @@ pub const ConfChanger = struct {
         const prs = &pair.prs;
 
         if (cfg.voters.outgoing.isEmpty()) {
-            log.warn("configuration is not joint", .{});
+            log.warn(@src(), "configuration is not joint", .{});
             return error.ConfChangeError;
         }
 

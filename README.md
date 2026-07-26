@@ -80,6 +80,19 @@ On Linux, `-Dgperftools=true` replaces the process C allocator with tcmalloc and
 
 `Entry.data` is immutable and reference-counted inside raft-zig. Borrowed payloads are copied once when entering the Raft pipeline, then shared across Unstable, Ready, storage, WAL, and internal transports. Owned entries are linear handles and must not be duplicated with plain assignment; `cloneEntry` creates a deep copy and `shareEntry` creates another shared handle.
 
+## Logging
+
+raft-zig uses grpc-lite's process-global asynchronous logger. Initialize it once before creating application threads:
+
+```zig
+try raft.log.initGlobal(init.gpa, init.io, false);
+defer raft.log.deinitGlobal(init.gpa);
+```
+
+Logs are discarded until the logger is initialized. Set the final argument to `true` to enable debug logs and source locations.
+
+Hostname peer addresses require one process-wide `GrpcRuntime`. Pass its address through `GrpcLiteTransportConfig.runtime` and deinitialize it after all transports.
+
 ## Examples
 
 | Example | Description |

@@ -55,7 +55,7 @@ pub const linuxWalFileSystem = realFileSystem;
 
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
-const log = std.log.scoped(.raft_zig_wal);
+const log = @import("grpc_lite").log;
 
 // ===========================================================================
 
@@ -457,7 +457,7 @@ pub const WAL = struct {
         try wal.recover();
         if (wal.metadata_dirty) try wal.sync();
 
-        log.info("WAL opened: dir={s}, segments={}, entries={}, first={}, last={}", .{ wal.dir, wal.segment_manager.count(), wal.entries.items.len, wal.firstIndex(), wal.lastIndex() });
+        log.info(@src(), "WAL opened: dir={s}, segments={}, entries={}, first={}, last={}", .{ wal.dir, wal.segment_manager.count(), wal.entries.items.len, wal.firstIndex(), wal.lastIndex() });
         return wal;
     }
 
@@ -850,10 +850,10 @@ pub const WAL = struct {
         self.metadata_dirty = false;
 
         self.segment_manager.removeSegmentsBefore(reset_segment.segment_id) catch |err| {
-            log.warn("failed to remove WAL segments before incoming snapshot: {s}", .{@errorName(err)});
+            log.warn(@src(), "failed to remove WAL segments before incoming snapshot: {s}", .{@errorName(err)});
         };
         self.segment_manager.syncAll() catch |err| {
-            log.warn("failed to sync WAL directory after incoming snapshot: {s}", .{@errorName(err)});
+            log.warn(@src(), "failed to sync WAL directory after incoming snapshot: {s}", .{@errorName(err)});
         };
         self.removeOldSnapshot(old_snapshot_metadata);
     }
@@ -901,7 +901,7 @@ pub const WAL = struct {
         self.compactMemory(first_index);
         self.metadata_dirty = false;
         self.cleanupCompactedSegments() catch |err| {
-            log.warn("failed to remove WAL segments after local snapshot: {s}", .{@errorName(err)});
+            log.warn(@src(), "failed to remove WAL segments after local snapshot: {s}", .{@errorName(err)});
         };
         self.removeOldSnapshot(old_snapshot_metadata);
     }
@@ -1067,7 +1067,7 @@ pub const WAL = struct {
     fn removeOldSnapshot(self: *WAL, metadata: SnapshotMetadata) void {
         if (metadata.index == 0 or metadata.index == self.snapshot_metadata.index) return;
         self.snapshot_store.remove(metadata.index, metadata.term) catch |err| {
-            log.warn("failed to remove superseded WAL snapshot: {s}", .{@errorName(err)});
+            log.warn(@src(), "failed to remove superseded WAL snapshot: {s}", .{@errorName(err)});
         };
     }
 

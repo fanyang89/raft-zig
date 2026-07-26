@@ -53,6 +53,8 @@ const CounterStateMachine = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    try raft.log.initGlobal(allocator, init.io, false);
+    defer raft.log.deinitGlobal(allocator);
 
     var sm = CounterStateMachine.init(allocator);
     defer sm.deinit();
@@ -70,14 +72,14 @@ pub fn main(init: std.process.Init) !void {
     const r = try raft.Raftor.create(allocator, config, sm.stateMachine());
     defer r.destroy();
 
-    std.log.info("raft-zig {s}: starting node {}", .{ raft.version, config.raft.id });
+    raft.log.info(@src(), "raft-zig {s}: starting node {}", .{ raft.version, config.raft.id });
 
     // Campaign to become leader.
     try r.campaign();
     if (r.isLeader()) {
-        std.log.info("became leader at term {}", .{r.getStatus().term});
+        raft.log.info(@src(), "became leader at term {}", .{r.getStatus().term});
     } else {
-        std.log.warn("failed to become leader", .{});
+        raft.log.warn(@src(), "failed to become leader", .{});
         return;
     }
 
@@ -88,11 +90,11 @@ pub fn main(init: std.process.Init) !void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.done = switch (result) {
                 .ok => |resp| blk: {
-                    std.log.info("proposal applied: response={s}", .{resp});
+                    raft.log.info(@src(), "proposal applied: response={s}", .{resp});
                     break :blk true;
                 },
                 .err => |e| blk: {
-                    std.log.warn("proposal failed: {s}", .{@errorName(e)});
+                    raft.log.warn(@src(), "proposal failed: {s}", .{@errorName(e)});
                     break :blk false;
                 },
             };
@@ -109,14 +111,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const status = r.getStatus();
-    std.log.info(
+    raft.log.info(
+        @src(),
         "final state: role={s} term={} commit={} applied={} pending={} snapshot_count={}",
         .{ raft.roleName(status.role), status.term, status.commit_index, status.applied_index, status.pending_proposals, sm.count },
     );
 
     if (tester.done) {
-        std.log.info("demo completed successfully", .{});
+        raft.log.info(@src(), "demo completed successfully", .{});
     } else {
-        std.log.warn("proposal did not complete in time", .{});
+        raft.log.warn(@src(), "proposal did not complete in time", .{});
     }
 }
