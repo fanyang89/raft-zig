@@ -1,6 +1,4 @@
 [tools]
 zig = "0.16.0"
-cmake = "4.3.4"
-ninja = "1.13.2"
 actionlint = "1.7.12"
 "github:jiacai2050/zigcli" = "0.6.2"

@@ -42,7 +42,6 @@ pub fn build(b: *std.Build) void {
     raft_zig.addOptions("raft_zig_options", raft_zig_options);
 
     const crc32c_dep = b.dependency("crc32c", .{});
-    const crc32c_native = addCrc32cBuild(b, crc32c_dep.path(""), target, optimize, sanitizers);
     const crc32c = b.createModule(.{
         .root_source_file = b.path("src/crc32c.zig"),
         .target = target,
@@ -50,8 +49,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     applySanitizers(crc32c, sanitizers);
-    crc32c.addIncludePath(crc32c_dep.path("include"));
-    crc32c.addObjectFile(crc32c_native);
+    addCrc32c(crc32c, crc32c_dep, target);
     crc32c.link_libcpp = true;
     raft_zig.addImport("crc32c", crc32c);
 
@@ -349,37 +347,62 @@ fn applySanitizers(module: *std.Build.Module, sanitizers: Sanitizers) void {
     if (sanitizers.enabled()) module.omit_frame_pointer = false;
 }
 
-fn addCrc32cBuild(
-    b: *std.Build,
-    source_dir: std.Build.LazyPath,
+fn addCrc32c(
+    module: *std.Build.Module,
+    dependency: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    sanitizers: Sanitizers,
-) std.Build.LazyPath {
-    const target_triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
-    const cc = b.fmt("{s} cc -target {s}", .{ b.graph.zig_exe, target_triple });
-    const cmake_build_type = switch (optimize) {
-        .Debug => "Debug",
-        .ReleaseSafe => "RelWithDebInfo",
-        .ReleaseFast, .ReleaseSmall => "Release",
-    };
-
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("tools/build_crc32c.sh"));
-    run.addDirectoryArg(source_dir);
-    const output = run.addOutputDirectoryArg("crc32c");
-    run.addArgs(&.{
-        cmake_build_type,
-        cc,
-        b.graph.zig_exe,
-        target_triple,
+) void {
+    const b = module.owner;
+    const arch = target.result.cpu.arch;
+    const is_x86 = arch == .x86 or arch == .x86_64;
+    const is_aarch64 = arch == .aarch64 or arch == .aarch64_be;
+    const config_header = b.addConfigHeader(.{
+        .style = .{ .cmake = dependency.path("src/crc32c_config.h.in") },
+        .include_path = "crc32c/crc32c_config.h",
+    }, .{
+        .BYTE_ORDER_BIG_ENDIAN = arch.endian() == .big,
+        .HAVE_BUILTIN_PREFETCH = true,
+        .HAVE_MM_PREFETCH = is_x86,
+        .HAVE_SSE42 = is_x86,
+        .HAVE_ARM64_CRC32C = is_aarch64,
+        .HAVE_STRONG_GETAUXVAL = is_aarch64 and target.result.os.tag == .linux,
+        .HAVE_WEAK_GETAUXVAL = false,
+        .CRC32C_TESTS_BUILT_WITH_GLOG = false,
     });
-    run.addFileArg(b.path("tools/crc32c_cxx.sh"));
-    run.addArgs(&.{
-        if (sanitizers.thread == true) "true" else "false",
-        if (sanitizers.c == .full) "true" else "false",
+    module.addConfigHeader(config_header);
+    module.addIncludePath(dependency.path("include"));
+    module.addIncludePath(dependency.path("src"));
+    module.addCSourceFiles(.{
+        .root = dependency.path(""),
+        .files = &.{
+            "src/crc32c.cc",
+            "src/crc32c_portable.cc",
+        },
+        .flags = &.{ "-fno-exceptions", "-fno-rtti" },
     });
-    return output.path(b, "libcrc32c.a");
+    if (is_x86) {
+        module.addCSourceFile(.{
+            .file = dependency.path("src/crc32c_sse42.cc"),
+            .flags = &.{ "-fno-exceptions", "-fno-rtti", "-msse4.2" },
+        });
+    }
+    if (is_aarch64) {
+        module.addCSourceFile(.{
+            .file = dependency.path("src/crc32c_arm64.cc"),
+            .flags = &.{
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+crc",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+aes",
+            },
+        });
+    }
 }
 
 fn addExample(
