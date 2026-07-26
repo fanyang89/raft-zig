@@ -62,6 +62,10 @@ run = "zig build test-upstream-openraft --summary all"
 description = "Run clean-room HashiCorp Raft tests"
 run = "zig build test-upstream-hashicorp-raft --summary all"
 
+[tasks.test-upstream-dragonboat]
+description = "Run adapted Dragonboat tests"
+run = "zig build test-upstream-dragonboat --summary all"
+
 [tasks.test-release-safe]
 description = "Run all tests with ReleaseSafe optimization"
 run = "zig build test -Doptimize=ReleaseSafe --summary all"

@@ -7,5 +7,6 @@ test "upstream source manifests are valid" {
         @import("raft_rs/source.zig").upstream,
         @import("openraft/source.zig").upstream,
         @import("hashicorp_raft/source.zig").upstream,
+        @import("dragonboat/source.zig").upstream,
     });
 }

@@ -93,6 +93,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "upstream-raft-rs", .source = "tests/upstream/raft_rs/suite_test.zig" },
         .{ .name = "upstream-openraft", .source = "tests/upstream/openraft/suite_test.zig" },
         .{ .name = "upstream-hashicorp-raft", .source = "tests/upstream/hashicorp_raft/suite_test.zig" },
+        .{ .name = "upstream-dragonboat", .source = "tests/upstream/dragonboat/suite_test.zig" },
     };
     const upstream_manifest = b.createModule(.{
         .root_source_file = b.path("tests/upstream/source_manifest.zig"),
@@ -113,6 +114,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-upstream-raft-rs", "Run adapted raft-rs tests"),
         b.step("test-upstream-openraft", "Run adapted OpenRaft tests"),
         b.step("test-upstream-hashicorp-raft", "Run clean-room HashiCorp Raft tests"),
+        b.step("test-upstream-dragonboat", "Run adapted Dragonboat tests"),
     };
 
     for (upstream_specs, upstream_source_steps) |spec, source_step| {

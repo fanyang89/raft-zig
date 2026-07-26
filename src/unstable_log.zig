@@ -73,7 +73,7 @@ pub const Unstable = struct {
             if (self.snapshot) |s| return s.metadata.index;
             return null;
         }
-        return self.offset + @as(u64, @intCast(self.entries.items.len)) - 1;
+        return self.offset + @as(u64, @intCast(self.entries.items.len - 1));
     }
 
     /// Term lookup across the snapshot/entries boundary.

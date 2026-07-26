@@ -1235,7 +1235,10 @@ pub const Raft = struct {
 
     pub fn restoreSnapshot(self: *Raft, snap_in: Snapshot) bool {
         const meta = snap_in.metadata;
+        if (meta.index == std.math.maxInt(u64)) return false;
+        if (self.pending_request_snapshot != invalid_index and meta.index < self.pending_request_snapshot) return false;
         if (meta.index < self.raft_log.committed) return false;
+        if (meta.index == self.raft_log.committed and self.pending_request_snapshot == invalid_index) return false;
 
         if (self.state != .follower) {
             log.warn("non-follower attempted to restore snapshot", .{});
@@ -1243,24 +1246,52 @@ pub const Raft = struct {
             return false;
         }
 
-        // Reject if our id is not present in any voter/learner set.
-        var seen = false;
-        for (meta.conf_state.voters) |v| if (v == self.id) {
-            seen = true;
-            break;
+        const member_sets = [_]struct { members: []const u64, role: u8 }{
+            .{ .members = meta.conf_state.voters, .role = 1 },
+            .{ .members = meta.conf_state.learners, .role = 2 },
+            .{ .members = meta.conf_state.voters_outgoing, .role = 4 },
+            .{ .members = meta.conf_state.learners_next, .role = 8 },
         };
-        if (!seen) for (meta.conf_state.learners) |v| if (v == self.id) {
-            seen = true;
-            break;
-        };
-        if (!seen) for (meta.conf_state.voters_outgoing) |v| if (v == self.id) {
-            seen = true;
-            break;
-        };
-        if (!seen) {
-            log.warn("restored snapshot but node id not in ConfState", .{});
+        var member_roles = std.AutoHashMap(u64, u8).init(self.allocator);
+        defer member_roles.deinit();
+        for (member_sets) |set| {
+            for (set.members) |id| {
+                if (id == invalid_id) {
+                    log.warn("invalid snapshot ConfState member {}", .{id});
+                    return false;
+                }
+                const result = member_roles.getOrPut(id) catch return false;
+                const previous = if (result.found_existing) result.value_ptr.* else 0;
+                const combined = previous | set.role;
+                if (previous & set.role != 0) {
+                    log.warn("duplicate snapshot ConfState member {}", .{id});
+                    return false;
+                }
+                switch (combined) {
+                    1, 2, 4, 5, 8, 12 => result.value_ptr.* = combined,
+                    else => {
+                        log.warn("conflicting snapshot ConfState roles for member {}", .{id});
+                        return false;
+                    },
+                }
+            }
+        }
+        if (meta.conf_state.voters_outgoing.len == 0 and meta.conf_state.auto_leave) {
+            log.warn("invalid snapshot ConfState: auto-leave requires a joint configuration", .{});
             return false;
         }
+        for (meta.conf_state.learners_next) |id| {
+            if (member_roles.get(id).? & 4 == 0) {
+                log.warn("invalid snapshot ConfState: learner-next {} is not staged correctly", .{id});
+                return false;
+            }
+        }
+
+        const local_roles = member_roles.get(self.id) orelse {
+            log.warn("restored snapshot but node id not in ConfState", .{});
+            return false;
+        };
+        if (local_roles & 7 == 0) return false;
 
         if (self.pending_request_snapshot == invalid_index and
             self.raft_log.matchTerm(meta.index, meta.term) catch false)
@@ -1534,8 +1565,6 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn appendEntry(self: *Raft, entries: []const Entry) Error!bool {
-        if (!self.uncommitted_state.maybeIncreaseUncommittedSize(entries)) return false;
-
         if (entries.len == 0) {
             _ = try self.raft_log.append(&.{});
             return true;
@@ -1543,6 +1572,11 @@ pub const Raft = struct {
 
         // Re-tag each entry with our current term and the next available index.
         const last_index = self.raft_log.lastIndex();
+        const entry_count = std.math.cast(u64, entries.len) orelse return error.Fatal;
+        const last_new_index = std.math.add(u64, last_index, entry_count) catch return error.Fatal;
+        if (last_new_index == std.math.maxInt(u64)) return error.Fatal;
+        if (!self.uncommitted_state.maybeIncreaseUncommittedSize(entries)) return false;
+
         var owned = try self.allocator.alloc(Entry, entries.len);
         for (entries, 0..) |src, i| {
             owned[i] = try cloneEntry(self.allocator, src);

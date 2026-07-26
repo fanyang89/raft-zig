@@ -137,6 +137,8 @@ pub const RaftLog = struct {
     }
 
     pub fn matchTerm(self: *const RaftLog, idx: u64, term_: u64) Error!bool {
+        const dummy_idx = self.firstIndex() -% 1;
+        if (idx < dummy_idx or idx > self.lastIndex()) return false;
         const t = self.term(idx) catch |e| switch (e) {
             error.Compacted, error.Unavailable => return false,
             else => return e,
@@ -196,6 +198,18 @@ pub const RaftLog = struct {
             return MaybeAppendResult{ .term_matched = false, .conflict_index = 0, .last_index = 0 };
         }
 
+        const entry_count = std.math.cast(u64, ents.len) orelse return error.Fatal;
+        const last_new_idx = std.math.add(u64, idx, entry_count) catch return error.Fatal;
+        if (entry_count > 0 and last_new_idx == std.math.maxInt(u64)) return error.Fatal;
+        for (ents, 1..) |entry, offset| {
+            const expected = std.math.add(u64, idx, std.math.cast(u64, offset) orelse return error.Fatal) catch
+                return error.Fatal;
+            if (entry.index != expected) {
+                log.warn("refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
+                return error.Fatal;
+            }
+        }
+
         const conflict_idx = try self.findConflict(ents);
 
         if (conflict_idx == 0) {
@@ -215,12 +229,8 @@ pub const RaftLog = struct {
                 try cloned.append(self.allocator, try cloneEntry(self.allocator, e));
             }
             _ = try self.append(cloned.items);
-
-            // Overwriting entries rewinds the persistence cursor.
-            self.persisted = @min(self.persisted, conflict_idx - 1);
         }
 
-        const last_new_idx = idx + @as(u64, @intCast(ents.len));
         try self.commitTo(@min(committed, last_new_idx));
         return MaybeAppendResult{
             .term_matched = true,
@@ -233,19 +243,51 @@ pub const RaftLog = struct {
     pub fn append(self: *RaftLog, ents: []const Entry) Error!u64 {
         if (ents.len == 0) return self.lastIndex();
 
-        const after = ents[0].index -% 1;
-        if (after < self.committed) {
-            log.warn(
-                "after {} is out of range [committed {}], resetting committed",
-                .{ after, self.committed },
-            );
-            self.committed = after;
+        const first = ents[0];
+        if (ents[ents.len - 1].index == std.math.maxInt(u64)) return error.Fatal;
+        if (first.index <= self.committed) {
+            log.warn("refused to overwrite committed index {}", .{first.index});
+            return error.Fatal;
         }
+
+        const last_index = self.lastIndex();
+        const next_index = std.math.add(u64, last_index, 1) catch return error.Fatal;
+        if (first.index > next_index) {
+            log.warn("refused append with a hole at index {}, expected at most {}", .{ first.index, next_index });
+            return error.Fatal;
+        }
+
+        if (first.index >= self.firstIndex()) {
+            const previous_term = self.term(first.index - 1) catch |err| switch (err) {
+                error.Compacted => null,
+                else => return err,
+            };
+            if (previous_term) |term_| {
+                if (term_ > first.term) {
+                    log.warn("refused term regression from {} to {}", .{ term_, first.term });
+                    return error.Fatal;
+                }
+            }
+        }
+        for (ents[1..], ents[0 .. ents.len - 1]) |entry, previous| {
+            const expected = std.math.add(u64, previous.index, 1) catch return error.Fatal;
+            if (entry.index != expected) {
+                log.warn("refused non-contiguous append at index {}, expected {}", .{ entry.index, expected });
+                return error.Fatal;
+            }
+            if (previous.term > entry.term) {
+                log.warn("refused term regression from {} to {}", .{ previous.term, entry.term });
+                return error.Fatal;
+            }
+        }
+
+        self.persisted = @min(self.persisted, first.index - 1);
         self.unstable.truncateAndAppend(ents);
         return self.lastIndex();
     }
 
     pub fn commitTo(self: *RaftLog, to_commit: u64) Error!void {
+        if (to_commit == std.math.maxInt(u64)) return error.Fatal;
         if (self.committed >= to_commit) return;
         if (self.lastIndex() < to_commit) {
             return error.Fatal;
@@ -407,6 +449,7 @@ pub const RaftLog = struct {
 
     pub fn restore(self: *RaftLog, snapshot: Snapshot) Error!void {
         const index = snapshot.metadata.index;
+        if (index == std.math.maxInt(u64)) return error.Fatal;
         if (index < self.committed) {
             return error.Fatal;
         }

@@ -16,7 +16,11 @@ Each inventory entry has one status:
 etcd/raft is the primary behavioral baseline. raft-rs contributes only
 meaningful deltas and historical regressions. OpenRaft contributes stateful
 invariants. HashiCorp Raft behavior is reimplemented clean-room because its
-source is MPL-2.0; no HashiCorp test code is copied.
+source is MPL-2.0; no HashiCorp test code is copied. Dragonboat contributes
+only core deltas and historical regressions; its etcd-derived tests remain
+delegated to the primary baseline. NodeHost and multi-group behavior,
+witnesses, quiesce, rate limiting, delayed snapshot acknowledgements, log
+queries, and implementation-specific Update or LogDB contracts are excluded.
 
 ## Inventory Format
 
@@ -44,4 +48,5 @@ behavior; executing related code or testing a broader component is not enough.
 | raft-rs | 263 | 44 | 0 | 111 | 0 | 99 | 9 |
 | OpenRaft | 286 | 21 | 8 | 28 | 56 | 162 | 11 |
 | HashiCorp Raft | 184 | 0 | 9 | 25 | 27 | 104 | 19 |
-| Total | 1032 | 101 | 17 | 235 | 222 | 415 | 42 |
+| Dragonboat | 407 | 13 | 0 | 83 | 63 | 246 | 2 |
+| Total | 1439 | 114 | 17 | 318 | 285 | 661 | 44 |

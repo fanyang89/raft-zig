@@ -239,6 +239,7 @@ test "raft-rs: test_raft_snap::test_request_snapshot" {
     } };
     defer snapshot.deinit(allocator);
     try std.testing.expect(node.raft.restoreSnapshot(snapshot));
+    node.raft.becomeFollower(snapshot.metadata.term, raft.invalid_id);
     const pending = node.raft.raft_log.unstable.snapshot.?;
     try node.storage.applySnapshot(allocator, pending);
     node.raft.raft_log.stableSnapshot(pending.metadata.index);
