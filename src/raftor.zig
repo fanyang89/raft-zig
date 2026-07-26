@@ -156,6 +156,8 @@ pub const NodeStatus = struct {
     pending_proposals: usize = 0,
     queued_proposals: usize = 0,
     queued_proposal_bytes: usize = 0,
+    queued_read_indexes: usize = 0,
+    queued_read_index_bytes: usize = 0,
     incarnation: u64 = 0,
 };
 
@@ -308,6 +310,7 @@ pub const Raftor = struct {
         if (config.max_queued_proposals == 0 or config.max_queued_proposal_bytes == 0) return error.InvalidConfig;
         if (config.proposal_drain_budget == 0) return error.InvalidConfig;
         if (config.read_index_drain_budget == 0) return error.InvalidConfig;
+        if (config.max_queued_read_indexes == 0 or config.max_queued_read_index_bytes == 0) return error.InvalidConfig;
         try self.prepareStorage(startup_mode);
         var initial_state = try self.storage.initialState(allocator);
         defer initial_state.deinit(allocator);
@@ -336,7 +339,10 @@ pub const Raftor = struct {
             .max_items = config.max_queued_proposals,
             .max_bytes = config.max_queued_proposal_bytes,
         });
-        self.read_index_queue = ReadIndexQueue.init(allocator);
+        self.read_index_queue = ReadIndexQueue.init(allocator, .{
+            .max_items = config.max_queued_read_indexes,
+            .max_bytes = config.max_queued_read_index_bytes,
+        });
         errdefer {
             self.proposal_queue.deinit();
             self.read_index_queue.deinit();
@@ -738,6 +744,8 @@ pub const Raftor = struct {
     }
 
     pub fn readIndex(self: *Raftor, ctx: []const u8, callback: proposal_tracker_mod.ReadIndexCallback) !void {
+        const queued_bytes = std.math.add(usize, ctx.len, request_context_mod.header_size) catch return error.ReadIndexBackpressure;
+        if (queued_bytes > self.config.max_queued_read_index_bytes) return error.ReadIndexBackpressure;
         const ctx_copy = try self.request_context_generator.next(self.allocator, .read_index, ctx);
         errdefer self.allocator.free(ctx_copy);
         spinLock(&self.lifecycle_mutex);
@@ -937,6 +945,7 @@ pub const Raftor = struct {
     pub fn getStatus(self: *const Raftor) NodeStatus {
         const r = self.raw_node.raftConst();
         const queue_stats = self.proposal_queue.stats();
+        const read_queue_stats = self.read_index_queue.stats();
         return .{
             .id = r.id,
             .role = r.state,
@@ -947,6 +956,8 @@ pub const Raftor = struct {
             .pending_proposals = self.proposal_tracker.pendingCount(),
             .queued_proposals = queue_stats.count,
             .queued_proposal_bytes = queue_stats.bytes,
+            .queued_read_indexes = read_queue_stats.count,
+            .queued_read_index_bytes = read_queue_stats.bytes,
             .incarnation = self.request_context_generator.incarnation,
         };
     }

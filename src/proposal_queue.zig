@@ -23,12 +23,17 @@ pub const ReadIndexItem = struct {
     callback: ReadIndexCallback,
 };
 
+pub const ReadIndexQueueLimits = struct {
+    max_items: usize = std.math.maxInt(usize),
+    max_bytes: usize = std.math.maxInt(usize),
+};
+
 pub const ProposalQueueLimits = struct {
     max_items: usize = std.math.maxInt(usize),
     max_bytes: usize = std.math.maxInt(usize),
 };
 
-pub const ProposalQueueStats = struct {
+pub const QueueStats = struct {
     count: usize,
     bytes: usize,
 };
@@ -96,7 +101,7 @@ pub const ProposalQueue = struct {
         return self.items.len == 0;
     }
 
-    pub fn stats(self: *const ProposalQueue) ProposalQueueStats {
+    pub fn stats(self: *const ProposalQueue) QueueStats {
         const mutex = @constCast(&self.mutex);
         spinLock(mutex);
         defer mutex.unlock();
@@ -108,9 +113,11 @@ pub const ReadIndexQueue = struct {
     mutex: std.atomic.Mutex = .unlocked,
     items: std.Deque(ReadIndexItem),
     allocator: std.mem.Allocator,
+    limits: ReadIndexQueueLimits,
+    queued_bytes: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator) ReadIndexQueue {
-        return .{ .items = .empty, .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, limits: ReadIndexQueueLimits) ReadIndexQueue {
+        return .{ .items = .empty, .allocator = allocator, .limits = limits };
     }
 
     pub fn deinit(self: *ReadIndexQueue) void {
@@ -124,13 +131,18 @@ pub const ReadIndexQueue = struct {
     pub fn push(self: *ReadIndexQueue, ctx: []u8, callback: ReadIndexCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
+        if (self.items.len >= self.limits.max_items) return error.ReadIndexBackpressure;
+        if (ctx.len > self.limits.max_bytes -| self.queued_bytes) return error.ReadIndexBackpressure;
         try self.items.pushBack(self.allocator, .{ .ctx = ctx, .callback = callback });
+        self.queued_bytes += ctx.len;
     }
 
     pub fn tryPop(self: *ReadIndexQueue) ?ReadIndexItem {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.items.popFront();
+        const item = self.items.popFront() orelse return null;
+        self.queued_bytes -= item.ctx.len;
+        return item;
     }
 
     pub fn takeAll(self: *ReadIndexQueue) std.Deque(ReadIndexItem) {
@@ -138,6 +150,7 @@ pub const ReadIndexQueue = struct {
         defer self.mutex.unlock();
         const items = self.items;
         self.items = .empty;
+        self.queued_bytes = 0;
         return items;
     }
 
@@ -145,6 +158,13 @@ pub const ReadIndexQueue = struct {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
         return self.items.len == 0;
+    }
+
+    pub fn stats(self: *const ReadIndexQueue) QueueStats {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
+        return .{ .count = self.items.len, .bytes = self.queued_bytes };
     }
 };
 
@@ -223,19 +243,19 @@ test "proposal queue enforces item and byte limits" {
     const data = try std.testing.allocator.dupe(u8, "data");
     const ctx = try std.testing.allocator.dupe(u8, "ctx");
     try queue.push(data, ctx, callback);
-    try std.testing.expectEqual(ProposalQueueStats{ .count = 1, .bytes = 7 }, queue.stats());
+    try std.testing.expectEqual(QueueStats{ .count = 1, .bytes = 7 }, queue.stats());
 
     const rejected_data = try std.testing.allocator.dupe(u8, "x");
     defer std.testing.allocator.free(rejected_data);
     const rejected_ctx = try std.testing.allocator.dupe(u8, "y");
     defer std.testing.allocator.free(rejected_ctx);
     try std.testing.expectError(error.ProposalBackpressure, queue.push(rejected_data, rejected_ctx, callback));
-    try std.testing.expectEqual(ProposalQueueStats{ .count = 1, .bytes = 7 }, queue.stats());
+    try std.testing.expectEqual(QueueStats{ .count = 1, .bytes = 7 }, queue.stats());
 
     const item = queue.tryPop().?;
     std.testing.allocator.free(item.data);
     std.testing.allocator.free(item.ctx);
-    try std.testing.expectEqual(ProposalQueueStats{ .count = 0, .bytes = 0 }, queue.stats());
+    try std.testing.expectEqual(QueueStats{ .count = 0, .bytes = 0 }, queue.stats());
 
     const oversized_data = try std.testing.allocator.dupe(u8, "oversized");
     defer std.testing.allocator.free(oversized_data);
@@ -351,14 +371,40 @@ test "proposal queue limits concurrent producers" {
     for (&threads) |*thread| thread.join();
     started = 0;
 
-    try std.testing.expectEqual(ProposalQueueStats{ .count = max_items, .bytes = max_items * item_bytes }, queue.stats());
+    try std.testing.expectEqual(QueueStats{ .count = max_items, .bytes = max_items * item_bytes }, queue.stats());
     try std.testing.expectEqual(max_items, accepted.load(.monotonic));
     try std.testing.expectEqual(producer_count * items_per_producer - max_items, rejected.load(.monotonic));
     while (queue.tryPop()) |item| {
         allocator.free(item.data);
         allocator.free(item.ctx);
     }
-    try std.testing.expectEqual(ProposalQueueStats{ .count = 0, .bytes = 0 }, queue.stats());
+    try std.testing.expectEqual(QueueStats{ .count = 0, .bytes = 0 }, queue.stats());
+}
+
+test "read index queue enforces item and byte limits" {
+    var queue = ReadIndexQueue.init(std.testing.allocator, .{ .max_items = 1, .max_bytes = 3 });
+    defer queue.deinit();
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ReadIndexResult) void {}
+    };
+    const callback = ReadIndexCallback{ .ctx = undefined, .function = Cb.callback };
+    const ctx = try std.testing.allocator.dupe(u8, "ctx");
+    try queue.push(ctx, callback);
+    try std.testing.expectEqual(QueueStats{ .count = 1, .bytes = 3 }, queue.stats());
+
+    const rejected = try std.testing.allocator.dupe(u8, "x");
+    defer std.testing.allocator.free(rejected);
+    try std.testing.expectError(error.ReadIndexBackpressure, queue.push(rejected, callback));
+    try std.testing.expectEqual(QueueStats{ .count = 1, .bytes = 3 }, queue.stats());
+
+    const item = queue.tryPop().?;
+    std.testing.allocator.free(item.ctx);
+    try std.testing.expectEqual(QueueStats{ .count = 0, .bytes = 0 }, queue.stats());
+
+    const oversized = try std.testing.allocator.dupe(u8, "four");
+    defer std.testing.allocator.free(oversized);
+    try std.testing.expectError(error.ReadIndexBackpressure, queue.push(oversized, callback));
 }
 
 test "read index queue supports concurrent producers and consumption" {
@@ -366,7 +412,7 @@ test "read index queue supports concurrent producers and consumption" {
     const producer_count = 4;
     const items_per_producer = 128;
 
-    var queue = ReadIndexQueue.init(allocator);
+    var queue = ReadIndexQueue.init(allocator, .{});
     defer queue.deinit();
     var producers_done = std.atomic.Value(usize).init(0);
 
