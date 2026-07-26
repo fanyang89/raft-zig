@@ -268,7 +268,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(spec.source),
             .target = target,
             .optimize = optimize,
-            .imports = if (std.mem.eql(u8, spec.name, "wal") or std.mem.eql(u8, spec.name, "confchange"))
+            .imports = if (std.mem.eql(u8, spec.name, "wal"))
+                &.{
+                    .{ .name = "crc32c", .module = crc32c },
+                    .{ .name = "grpc_lite", .module = grpc_lite },
+                }
+            else if (std.mem.eql(u8, spec.name, "confchange"))
                 &.{.{ .name = "crc32c", .module = crc32c }}
             else
                 &.{},
