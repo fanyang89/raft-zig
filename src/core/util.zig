@@ -123,17 +123,16 @@ test "isContinuousEntries detects gap" {
 // Entry checksum (CRC32C)
 // ===========================================================================
 
-const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
+const crc32c = @import("crc32c");
 
 /// Compute the CRC32C checksum of an entry's wire-identifying fields:
 /// entry_type, context, then data.
 pub fn computeEntryChecksum(entry: Entry) u32 {
-    var crc = Crc32Iscsi.init();
     const entry_type_word: u32 = @intFromEnum(entry.entry_type);
-    crc.update(std.mem.asBytes(&entry_type_word));
-    crc.update(entry.context);
-    crc.update(entry.data);
-    return crc.final();
+    var checksum = crc32c.value(std.mem.asBytes(&entry_type_word));
+    if (entry.context.len != 0) checksum = crc32c.extend(checksum, entry.context);
+    if (entry.data.len != 0) checksum = crc32c.extend(checksum, entry.data);
+    return checksum;
 }
 
 /// Empty normal entries (no data, no context) are exempt from checksumming

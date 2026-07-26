@@ -71,6 +71,8 @@ zig fmt build.zig src examples tests benchmarks
 
 Fast Raft invariant checks are enabled by default in Debug and ReleaseSafe builds. Override them with `-Dinvariant-checks=false` or `-Dinvariant-checks=true`.
 
+Entry checksums use [google/crc32c](https://github.com/google/crc32c), with runtime dispatch to x86 SSE4.2 or ARM64 CRC instructions and a portable fallback.
+
 On Linux, `-Dgperftools=true` replaces the process C allocator with tcmalloc and exposes CPU and heap profiling through the `raft_zig_gperftools` module. This option is incompatible with ThreadSanitizer.
 
 ## Examples

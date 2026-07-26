@@ -8,6 +8,10 @@
             .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/2757a3aecf0e494c9d133e2d0e6d7204376fddb1",
             .hash = "grpc_lite-0.3.1-BcwY0E_tCQAk3WAx8InBuqlhTJowvDsSGgi-IUGA3ng_",
         },
+        .crc32c = .{
+            .url = "https://codeload.github.com/google/crc32c/tar.gz/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
+            .hash = "N-V-__8AAPSAAQAtvOlJae6eMS2dtyeTGalfGt9JsXB9mYZj",
+        },
         .marionette = .{
             .url = "https://codeload.github.com/sb2bg/marionette/tar.gz/refs/tags/v0.6.0",
             .hash = "marionette-0.6.0-jTrEFDEmGwAsls0lMrAb9uRDOWApe_5DSJkDfE6pTQwb",
@@ -21,6 +25,7 @@
         "examples",
         "benchmarks",
         "tests",
+        "tools",
         "ref",
         "LICENSE",
         "README.md",

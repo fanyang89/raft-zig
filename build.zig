@@ -41,6 +41,20 @@ pub fn build(b: *std.Build) void {
     applySanitizers(raft_zig, sanitizers);
     raft_zig.addOptions("raft_zig_options", raft_zig_options);
 
+    const crc32c_dep = b.dependency("crc32c", .{});
+    const crc32c_native = addCrc32cBuild(b, crc32c_dep.path(""), target, optimize, sanitizers);
+    const crc32c = b.createModule(.{
+        .root_source_file = b.path("src/crc32c.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    applySanitizers(crc32c, sanitizers);
+    crc32c.addIncludePath(crc32c_dep.path("include"));
+    crc32c.addObjectFile(crc32c_native);
+    crc32c.link_libcpp = true;
+    raft_zig.addImport("crc32c", crc32c);
+
     // grpc-lite RPC backend (optional dependency).
     const grpc_dep = b.dependency("grpc_lite", .{
         .target = target,
@@ -83,6 +97,11 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    const crc32c_tests = b.addTest(.{
+        .name = "crc32c",
+        .root_module = crc32c,
+    });
+    test_step.dependOn(&b.addRunArtifact(crc32c_tests).step);
     if (raft_zig_gperftools) |gperftools| {
         const gperftools_test_module = b.createModule(.{
             .root_source_file = b.path("tests/gperftools_test.zig"),
@@ -242,6 +261,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(spec.source),
             .target = target,
             .optimize = optimize,
+            .imports = if (std.mem.eql(u8, spec.name, "wal") or std.mem.eql(u8, spec.name, "confchange"))
+                &.{.{ .name = "crc32c", .module = crc32c }}
+            else
+                &.{},
         });
         const tests = b.addTest(.{
             .name = b.fmt("fuzz-{s}", .{spec.name}),
@@ -324,6 +347,39 @@ fn applySanitizers(module: *std.Build.Module, sanitizers: Sanitizers) void {
     module.sanitize_thread = sanitizers.thread;
     module.sanitize_c = sanitizers.c;
     if (sanitizers.enabled()) module.omit_frame_pointer = false;
+}
+
+fn addCrc32cBuild(
+    b: *std.Build,
+    source_dir: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitizers: Sanitizers,
+) std.Build.LazyPath {
+    const target_triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
+    const cc = b.fmt("{s} cc -target {s}", .{ b.graph.zig_exe, target_triple });
+    const cmake_build_type = switch (optimize) {
+        .Debug => "Debug",
+        .ReleaseSafe => "RelWithDebInfo",
+        .ReleaseFast, .ReleaseSmall => "Release",
+    };
+
+    const run = b.addSystemCommand(&.{"bash"});
+    run.addFileArg(b.path("tools/build_crc32c.sh"));
+    run.addDirectoryArg(source_dir);
+    const output = run.addOutputDirectoryArg("crc32c");
+    run.addArgs(&.{
+        cmake_build_type,
+        cc,
+        b.graph.zig_exe,
+        target_triple,
+    });
+    run.addFileArg(b.path("tools/crc32c_cxx.sh"));
+    run.addArgs(&.{
+        if (sanitizers.thread == true) "true" else "false",
+        if (sanitizers.c == .full) "true" else "false",
+    });
+    return output.path(b, "libcrc32c.a");
 }
 
 fn addExample(
