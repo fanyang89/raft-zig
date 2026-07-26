@@ -368,6 +368,7 @@ pub const ReadyProcessor = struct {
                         log.warn("failed to remove transport peer {}: {s}", .{ change.node_id, @errorName(err) });
                         self.fatal_after_ready = err;
                     },
+                    .update_node => {},
                 };
             },
         }

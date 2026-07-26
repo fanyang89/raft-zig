@@ -274,6 +274,7 @@ pub const ConfChanger = struct {
                 .add_node => try makeVoter(cfg, prs, cc.node_id),
                 .remove_node => try remove(cfg, prs, cc.node_id),
                 .add_learner_node => try makeLearner(cfg, prs, cc.node_id),
+                .update_node => {},
             }
         }
         if (cfg.voters.incoming.isEmpty()) return error.RemovedAllVoters;
@@ -489,4 +490,52 @@ test "incr change map contains reflects latest edit" {
 
     try im.appendChange(1, .remove);
     try std.testing.expect(!im.contains(1)); // removed overrides base
+}
+
+test "conf changer: update node preserves joint configuration and progress" {
+    const allocator = std.testing.allocator;
+    var tr = ProgressTracker.init(allocator, 8);
+    defer tr.deinit();
+
+    _ = try applySimple(&tr, &.{newConfChange(.add_node, 1)});
+    tr.progress.getPtr(1).?.matched = 5;
+    var simple_before = try tr.conf.toConfState(allocator);
+    defer simple_before.deinit(allocator);
+    {
+        var result = try ConfChanger.init(&tr).simple(&.{
+            newConfChange(.update_node, 1),
+            newConfChange(.update_node, 0),
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), result.changes.len);
+        try tr.applyConf(result.conf, result.changes, 7);
+    }
+    var simple_after = try tr.conf.toConfState(allocator);
+    defer simple_after.deinit(allocator);
+    try std.testing.expect(simple_before.eql(simple_after));
+    try std.testing.expectEqual(@as(u64, 5), tr.progress.getPtr(1).?.matched);
+
+    {
+        var result = try ConfChanger.init(&tr).enterJoint(false, &.{newConfChange(.add_node, 2)});
+        defer result.deinit(allocator);
+        try tr.applyConf(result.conf, result.changes, 7);
+    }
+    tr.progress.getPtr(2).?.matched = 3;
+
+    var before = try tr.conf.toConfState(allocator);
+    defer before.deinit(allocator);
+    var pair = try ConfChanger.init(&tr).checkAndCopy();
+    defer pair.deinit();
+    try ConfChanger.applyChanges(&pair.cfg, &pair.prs, &.{
+        newConfChange(.update_node, 2),
+        newConfChange(.update_node, 0),
+    });
+    try checkInvariants(pair.cfg, pair.prs);
+    try std.testing.expectEqual(@as(usize, 0), pair.prs.toChanges().len);
+
+    var after = try pair.cfg.toConfState(allocator);
+    defer after.deinit(allocator);
+    try std.testing.expect(before.eql(after));
+    try std.testing.expectEqual(@as(u64, 5), tr.progress.getPtr(1).?.matched);
+    try std.testing.expectEqual(@as(u64, 3), tr.progress.getPtr(2).?.matched);
 }

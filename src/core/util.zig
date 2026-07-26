@@ -282,6 +282,7 @@ test "encodeConfChangeV2 round-trips through decodeConfChangeV2" {
     var changes = [_]ConfChangeSingle{
         .{ .change_type = .add_node, .node_id = 1 },
         .{ .change_type = .add_learner_node, .node_id = 2 },
+        .{ .change_type = .update_node, .node_id = 3 },
     };
     const ctx = try allocator.dupe(u8, "hi");
     defer allocator.free(ctx);

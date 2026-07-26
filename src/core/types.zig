@@ -47,6 +47,7 @@ pub const ConfChangeType = enum(u8) {
     add_node = 0,
     remove_node = 1,
     add_learner_node = 2,
+    update_node = 3,
 };
 
 /// Strategy for entering joint consensus. Mirrors `ConfChangeTransition`.

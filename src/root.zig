@@ -96,6 +96,9 @@ pub const ClusterId = cluster_membership_mod.ClusterId;
 pub const PeerEndpoint = cluster_membership_mod.PeerEndpoint;
 pub const ClusterMembership = cluster_membership_mod.ClusterMembership;
 pub const decodeClusterMembership = cluster_membership_mod.decode;
+pub const MembershipContext = cluster_membership_mod.MembershipContext;
+pub const decodeMembershipContext = cluster_membership_mod.decodeMembershipContext;
+pub const deriveClusterMembership = cluster_membership_mod.deriveClusterMembership;
 pub const collectEffectiveMemberIds = cluster_membership_mod.collectEffectiveMemberIds;
 
 pub const StateRole = state_role.StateRole;

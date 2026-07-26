@@ -115,6 +115,11 @@ pub const Error = error{
     RemovedAllVoters,
     CannotApplySimpleInJointConfig,
     MultipleVotersChangedWithoutJoint,
+    MissingPeerAddress,
+    ConflictingPeerAddress,
+    UnexpectedPeerAddress,
+    RetiredNodeId,
+    MalformedMembershipContext,
 
     // Validation failures that carry a caller-provided message.
     InvalidConfig,
@@ -211,6 +216,11 @@ pub fn name(e: Error) []const u8 {
         error.RemovedAllVoters => "RemovedAllVoters",
         error.CannotApplySimpleInJointConfig => "CannotApplySimpleInJointConfig",
         error.MultipleVotersChangedWithoutJoint => "MultipleVotersChangedWithoutJoint",
+        error.MissingPeerAddress => "MissingPeerAddress",
+        error.ConflictingPeerAddress => "ConflictingPeerAddress",
+        error.UnexpectedPeerAddress => "UnexpectedPeerAddress",
+        error.RetiredNodeId => "RetiredNodeId",
+        error.MalformedMembershipContext => "MalformedMembershipContext",
         error.InvalidConfig => "InvalidConfig",
         error.ConfChangeError => "ConfChangeError",
         error.Fatal => "Fatal",
