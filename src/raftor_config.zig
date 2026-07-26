@@ -77,9 +77,11 @@ pub const RaftorConfig = struct {
     snapshot_retry_min_ticks: u64 = 10,
     /// Whether to verify CRC32C entry checksums on apply.
     checksum_enabled: bool = false,
-    /// Proposal timeout in ticks. 0 = no timeout.
+    /// Proposal timeout after leaving the ingress queue, in ticks.
+    /// Time spent queued is excluded. 0 = no timeout.
     proposal_timeout_ticks: u64 = 0,
-    /// Read-index timeout in ticks. 0 = no timeout.
+    /// Read-index timeout after leaving the ingress queue, in ticks.
+    /// Time spent queued is excluded. 0 = no timeout.
     read_index_timeout_ticks: u64 = 0,
 
     pub fn nodeId(self: RaftorConfig) u64 {
