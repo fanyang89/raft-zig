@@ -27,7 +27,7 @@ fetch_package() {
     cp -a "$cache_root/p/$package" "$package_root/$package"
 }
 
-fetch_package grpc_lite-0.2.2-BcwY0OUFBQCU9XfyC7Y1xl4Pk86hlEH8-GFXAu-riWFJ https://codeload.github.com/fanyang89/grpc-lite/tar.gz/6c0209863dd57ee7cf139b976ae3d81298cda2a5
+fetch_package grpc_lite-0.3.0-BcwY0PlkCAAyQ7IciHddXsXi-s72Zx-kjx--tpYY8KSH https://codeload.github.com/fanyang89/grpc-lite/tar.gz/2681d161609434075538560b685d8b9ff8c4363e
 fetch_package libxev-0.0.0-86vtcxkOFACqPXUTAPuq5i0xpDYWU5G5RfrYQXxlUT26 https://codeload.github.com/mitchellh/libxev/tar.gz/b0650f082458226860ed7ab0fc7c9c73823c8950
 fetch_package N-V-__8AAPOqVwAHvwAVJJjhhX72DyDtjWw--9WUZf3-uKRX https://codeload.github.com/nghttp2/nghttp2/tar.gz/68cb6900fde14c77f0cd7add0e094a862960eb99
 fetch_package protobuf-5.0.0-0e82avKUKAAVwTWJzTIEZ14Fu0zC11_lElR8tE6H__y1 https://github.com/Arwalk/zig-protobuf/archive/1f6cb06156b3ff4f52f98bc14f829c0b8393a6fc.tar.gz

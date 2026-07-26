@@ -5,8 +5,8 @@
     .fingerprint = 0xd98872fa44f543c3,
     .dependencies = .{
         .grpc_lite = .{
-            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/6c0209863dd57ee7cf139b976ae3d81298cda2a5",
-            .hash = "grpc_lite-0.2.2-BcwY0OUFBQCU9XfyC7Y1xl4Pk86hlEH8-GFXAu-riWFJ",
+            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/2681d161609434075538560b685d8b9ff8c4363e",
+            .hash = "grpc_lite-0.3.0-BcwY0PlkCAAyQ7IciHddXsXi-s72Zx-kjx--tpYY8KSH",
         },
         .marionette = .{
             .url = "https://codeload.github.com/sb2bg/marionette/tar.gz/refs/tags/v0.6.0",
