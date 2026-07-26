@@ -129,6 +129,23 @@ pub const Unstable = struct {
     ///   * full overwrite — drop existing entries, reset offset.
     ///   * truncate-and-append — drop entries past the new head, then append.
     pub fn truncateAndAppend(self: *Unstable, ents: []const Entry) void {
+        self.prepareAppend(ents);
+        for (ents) |ent| {
+            self.entries.appendAssumeCapacity(shareEntry(self.allocator, ent) catch @panic("OOM in shareEntry"));
+            self.entries_size += entryApproximateSize(ent);
+        }
+    }
+
+    pub fn truncateAndAppendOwned(self: *Unstable, ents: []Entry) void {
+        self.prepareAppend(ents);
+        for (ents) |*ent| {
+            self.entries.appendAssumeCapacity(ent.*);
+            self.entries_size += entryApproximateSize(ent.*);
+            ent.reset();
+        }
+    }
+
+    fn prepareAppend(self: *Unstable, ents: []const Entry) void {
         std.debug.assert(ents.len > 0);
         const after = ents[0].index;
         if (after == self.offset + @as(u64, @intCast(self.entries.items.len))) {
@@ -151,10 +168,6 @@ pub const Unstable = struct {
         }
 
         self.entries.ensureUnusedCapacity(self.allocator, ents.len) catch @panic("OOM in truncateAndAppend");
-        for (ents) |ent| {
-            self.entries.appendAssumeCapacity(shareEntry(self.allocator, ent) catch @panic("OOM in shareEntry"));
-            self.entries_size += entryApproximateSize(ent);
-        }
     }
 
     /// Mark the in-memory snapshot as persisted. Panics on missing snapshot or

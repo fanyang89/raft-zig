@@ -1629,7 +1629,7 @@ pub const Raft = struct {
             for (owned) |*e| e.deinit(self.allocator);
             self.allocator.free(owned);
         }
-        _ = try self.raft_log.append(owned);
+        _ = try self.raft_log.appendOwned(owned);
         return true;
     }
 

@@ -243,6 +243,22 @@ pub const RaftLog = struct {
     pub fn append(self: *RaftLog, ents: []const Entry) Error!u64 {
         if (ents.len == 0) return self.lastIndex();
 
+        try self.validateAppend(ents);
+        self.persisted = @min(self.persisted, ents[0].index - 1);
+        self.unstable.truncateAndAppend(ents);
+        return self.lastIndex();
+    }
+
+    pub fn appendOwned(self: *RaftLog, ents: []Entry) Error!u64 {
+        if (ents.len == 0) return self.lastIndex();
+
+        try self.validateAppend(ents);
+        self.persisted = @min(self.persisted, ents[0].index - 1);
+        self.unstable.truncateAndAppendOwned(ents);
+        return self.lastIndex();
+    }
+
+    fn validateAppend(self: *RaftLog, ents: []const Entry) Error!void {
         const first = ents[0];
         if (ents[ents.len - 1].index == std.math.maxInt(u64)) return error.Fatal;
         if (first.index <= self.committed) {
@@ -280,10 +296,6 @@ pub const RaftLog = struct {
                 return error.Fatal;
             }
         }
-
-        self.persisted = @min(self.persisted, first.index - 1);
-        self.unstable.truncateAndAppend(ents);
-        return self.lastIndex();
     }
 
     pub fn commitTo(self: *RaftLog, to_commit: u64) Error!void {
@@ -555,6 +567,24 @@ test "raft log append and lastIndex" {
     const last = try raft_log.append(&ents);
     try std.testing.expectEqual(@as(u64, 2), last);
     try std.testing.expectEqual(@as(u64, 2), raft_log.lastIndex());
+}
+
+test "raft log appendOwned moves entry handles" {
+    const allocator = std.testing.allocator;
+    var storage = @import("memory_storage.zig").MemoryStorage.init();
+    defer storage.deinit(allocator);
+
+    var raft_log = try RaftLog.init(allocator, storage.asStorage(), 0);
+    defer raft_log.deinit();
+
+    var entries = [_]Entry{.{ .index = 1, .term = 1 }};
+    defer entries[0].deinit(allocator);
+    try entries[0].setDataCopy(allocator, "payload");
+    const data_ptr = entries[0].data.ptr;
+
+    try std.testing.expectEqual(@as(u64, 1), try raft_log.appendOwned(&entries));
+    try std.testing.expectEqual(@as(usize, 0), entries[0].data.len);
+    try std.testing.expectEqual(data_ptr, raft_log.unstable.entries.items[0].data.ptr);
 }
 
 test "raft log commitTo and maybeCommit" {
