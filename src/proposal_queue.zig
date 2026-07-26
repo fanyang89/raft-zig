@@ -3,8 +3,7 @@
 //! Users can call `push()` from any thread; the event loop thread drains via
 //! `tryPop()`.
 //!
-//! Uses `std.atomic.Mutex` (spinlock) since Zig 0.16 removed
-//! `std.Thread.Mutex`. Contention is brief (O(1) push/pop).
+//! Uses `std.atomic.Mutex` (spinlock) around O(1) deque push/pop operations.
 
 const std = @import("std");
 
@@ -30,7 +29,7 @@ fn spinLock(m: *std.atomic.Mutex) void {
 
 pub const ProposalQueue = struct {
     mutex: std.atomic.Mutex = .unlocked,
-    items: std.ArrayList(ProposalItem),
+    items: std.Deque(ProposalItem),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) ProposalQueue {
@@ -40,7 +39,8 @@ pub const ProposalQueue = struct {
     pub fn deinit(self: *ProposalQueue) void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        for (self.items.items) |*item| {
+        var iterator = self.items.iterator();
+        while (iterator.next()) |item| {
             self.allocator.free(item.data);
             self.allocator.free(item.ctx);
         }
@@ -50,7 +50,7 @@ pub const ProposalQueue = struct {
     pub fn push(self: *ProposalQueue, data: []u8, ctx: []u8, callback: ProposalCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        try self.items.append(self.allocator, .{
+        try self.items.pushBack(self.allocator, .{
             .data = data,
             .ctx = ctx,
             .callback = callback,
@@ -60,11 +60,10 @@ pub const ProposalQueue = struct {
     pub fn tryPop(self: *ProposalQueue) ?ProposalItem {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        if (self.items.items.len == 0) return null;
-        return self.items.orderedRemove(0);
+        return self.items.popFront();
     }
 
-    pub fn takeAll(self: *ProposalQueue) std.ArrayList(ProposalItem) {
+    pub fn takeAll(self: *ProposalQueue) std.Deque(ProposalItem) {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
         const items = self.items;
@@ -75,13 +74,13 @@ pub const ProposalQueue = struct {
     pub fn empty(self: *ProposalQueue) bool {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.items.items.len == 0;
+        return self.items.len == 0;
     }
 };
 
 pub const ReadIndexQueue = struct {
     mutex: std.atomic.Mutex = .unlocked,
-    items: std.ArrayList(ReadIndexItem),
+    items: std.Deque(ReadIndexItem),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) ReadIndexQueue {
@@ -91,24 +90,24 @@ pub const ReadIndexQueue = struct {
     pub fn deinit(self: *ReadIndexQueue) void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        for (self.items.items) |*item| self.allocator.free(item.ctx);
+        var iterator = self.items.iterator();
+        while (iterator.next()) |item| self.allocator.free(item.ctx);
         self.items.deinit(self.allocator);
     }
 
     pub fn push(self: *ReadIndexQueue, ctx: []u8, callback: ReadIndexCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        try self.items.append(self.allocator, .{ .ctx = ctx, .callback = callback });
+        try self.items.pushBack(self.allocator, .{ .ctx = ctx, .callback = callback });
     }
 
     pub fn tryPop(self: *ReadIndexQueue) ?ReadIndexItem {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        if (self.items.items.len == 0) return null;
-        return self.items.orderedRemove(0);
+        return self.items.popFront();
     }
 
-    pub fn takeAll(self: *ReadIndexQueue) std.ArrayList(ReadIndexItem) {
+    pub fn takeAll(self: *ReadIndexQueue) std.Deque(ReadIndexItem) {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
         const items = self.items;
@@ -119,7 +118,7 @@ pub const ReadIndexQueue = struct {
     pub fn empty(self: *ReadIndexQueue) bool {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.items.items.len == 0;
+        return self.items.len == 0;
     }
 };
 
@@ -143,6 +142,48 @@ test "proposal queue push and tryPop" {
     std.testing.allocator.free(item.ctx);
 
     try std.testing.expect(q.tryPop() == null);
+}
+
+test "proposal queue preserves FIFO order across deque wrap-around" {
+    var queue = ProposalQueue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+    };
+    const callback = ProposalCallback{ .ctx = undefined, .function = Cb.callback };
+
+    for (0..16) |i| {
+        const value = try std.fmt.allocPrint(std.testing.allocator, "{}", .{i});
+        errdefer std.testing.allocator.free(value);
+        const ctx = try std.testing.allocator.dupe(u8, value);
+        errdefer std.testing.allocator.free(ctx);
+        try queue.push(value, ctx, callback);
+    }
+    for (0..8) |i| {
+        const item = queue.tryPop().?;
+        defer std.testing.allocator.free(item.data);
+        defer std.testing.allocator.free(item.ctx);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "{}", .{i});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, item.data);
+    }
+    for (16..32) |i| {
+        const value = try std.fmt.allocPrint(std.testing.allocator, "{}", .{i});
+        errdefer std.testing.allocator.free(value);
+        const ctx = try std.testing.allocator.dupe(u8, value);
+        errdefer std.testing.allocator.free(ctx);
+        try queue.push(value, ctx, callback);
+    }
+    for (8..32) |i| {
+        const item = queue.tryPop().?;
+        defer std.testing.allocator.free(item.data);
+        defer std.testing.allocator.free(item.ctx);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "{}", .{i});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, item.data);
+    }
+    try std.testing.expect(queue.empty());
 }
 
 test "proposal queue supports concurrent producers and consumption" {

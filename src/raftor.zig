@@ -93,19 +93,21 @@ const Lifecycle = enum {
 };
 
 const ShutdownBatch = struct {
-    proposals: std.ArrayList(ProposalItem),
-    reads: std.ArrayList(ReadIndexItem),
+    proposals: std.Deque(ProposalItem),
+    reads: std.Deque(ReadIndexItem),
     tracked: DetachedCallbacks,
     allocator: std.mem.Allocator,
 
     fn invoke(self: *ShutdownBatch, proposal_error: Error, read_error: Error) void {
-        for (self.proposals.items) |proposal| {
+        var proposal_iterator = self.proposals.iterator();
+        while (proposal_iterator.next()) |proposal| {
             self.allocator.free(proposal.data);
             self.allocator.free(proposal.ctx);
             proposal.callback.invoke(.{ .err = proposal_error });
         }
         self.proposals.deinit(self.allocator);
-        for (self.reads.items) |read| {
+        var read_iterator = self.reads.iterator();
+        while (read_iterator.next()) |read| {
             self.allocator.free(read.ctx);
             read.callback.invoke(.{ .err = read_error });
         }
