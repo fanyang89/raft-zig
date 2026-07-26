@@ -348,6 +348,56 @@ pub const MemoryStorage = struct {
         self.core.raft_state.membership_index = membership_index;
     }
 
+    pub fn migrateLegacyMembership(
+        self: *MemoryStorage,
+        allocator: std.mem.Allocator,
+        current_membership: ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?ClusterMembership,
+    ) Error!void {
+        if (self.core.raft_state.cluster_membership != null) return error.InvalidConfig;
+        const local_snapshot: ?Snapshot = if (self.core.snapshot_data.metadata.index == 0)
+            null
+        else
+            self.core.snapshot_data;
+        try storage_mod.validateLegacyMembershipMigration(
+            current_membership,
+            membership_index,
+            self.core.raft_state.hard_state,
+            self.core.raft_state.conf_state,
+            local_snapshot,
+            snapshot_membership,
+        );
+
+        var cloned_current = try current_membership.clone(allocator);
+        errdefer cloned_current.deinit(allocator);
+        var cloned_historical: ?ClusterMembership = null;
+        if (snapshot_membership) |historical| cloned_historical = try historical.clone(allocator);
+        defer if (cloned_historical) |*historical| historical.deinit(allocator);
+
+        var cloned_snapshot: ?Snapshot = null;
+        if (local_snapshot) |snapshot| {
+            var candidate = try storage_mod.cloneSnapshot(allocator, snapshot);
+            errdefer candidate.deinit(allocator);
+            const encoded = cloned_historical.?.encode(allocator) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.MembershipTooLarge => error.MessageTooLarge,
+                else => error.InvalidClusterMembership,
+            };
+            if (candidate.membership.len != 0) allocator.free(candidate.membership);
+            candidate.membership = encoded;
+            cloned_snapshot = candidate;
+        }
+        errdefer if (cloned_snapshot) |*snapshot| snapshot.deinit(allocator);
+
+        self.core.raft_state.cluster_membership = cloned_current;
+        self.core.raft_state.membership_index = membership_index;
+        if (cloned_snapshot) |snapshot| {
+            self.core.snapshot_data.deinit(allocator);
+            self.core.snapshot_data = snapshot;
+        }
+    }
+
     pub fn setHardState(self: *MemoryStorage, hs: HardState) Error!void {
         self.core.setHardState(hs);
     }
@@ -527,6 +577,17 @@ pub const MemoryStorage = struct {
         return self.applySnapshot(allocator, snapshot);
     }
 
+    fn migrate_legacy_membership_impl(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        current_membership: ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?ClusterMembership,
+    ) Error!void {
+        const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
+        return self.migrateLegacyMembership(allocator, current_membership, membership_index, snapshot_membership);
+    }
+
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
         return self.applyLocalSnapshot(allocator, snap);
@@ -558,6 +619,7 @@ pub const MemoryStorage = struct {
         .set_hard_state = set_hard_state_impl,
         .set_conf_state = set_conf_state_impl,
         .set_membership_state = set_membership_state_impl,
+        .migrate_legacy_membership = migrate_legacy_membership_impl,
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
         .local_snapshot = local_snapshot_impl,
@@ -992,4 +1054,107 @@ test "memory storage snapshot membership allocation failures clean up" {
     }).encode(std.testing.allocator);
     defer std.testing.allocator.free(membership);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{membership});
+}
+
+test "memory storage migrates legacy membership atomically" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 1 },
+        .{ .index = 3, .term = 2 },
+    });
+    try storage.setHardState(.{ .term = 2, .vote = 1, .commit = 3 });
+    try storage.applyLocalSnapshot(allocator, .{
+        .data = @constCast("legacy-state"),
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        },
+    });
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+
+    var current_peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    var historical_peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("old-node-1") },
+    };
+    const current = ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &current_peers,
+        .retired_node_ids = @constCast(&[_]u64{3}),
+    };
+    const historical = ClusterMembership{
+        .cluster_id = current.cluster_id,
+        .peers = &historical_peers,
+        .retired_node_ids = @constCast(&[_]u64{3}),
+    };
+    try storage.asWritableStorage().migrateLegacyMembership(allocator, current, 2, historical);
+
+    try std.testing.expectEqual(HardState{ .term = 2, .vote = 1, .commit = 3 }, storage.core.raft_state.hard_state);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, storage.core.raft_state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 2), storage.core.raft_state.membership_index);
+    try std.testing.expectEqual(@as(u64, 2), storage.core.firstIndex());
+    try std.testing.expectEqual(@as(u64, 3), storage.core.lastIndex());
+    var decoded = try cluster_membership_mod.decode(allocator, storage.core.snapshot_data.membership);
+    defer decoded.deinit(allocator);
+    try std.testing.expect(decoded.eql(historical));
+}
+
+test "memory storage rejects invalid legacy migration without mutation" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+    try storage.setHardState(.{ .term = 1, .commit = 4 });
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const current = ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers };
+    try std.testing.expectError(
+        error.InvalidMembershipIndex,
+        storage.migrateLegacyMembership(allocator, current, 5, null),
+    );
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expect(state.cluster_membership == null);
+    try std.testing.expectEqual(@as(u64, 0), state.membership_index);
+    try std.testing.expectEqualSlices(u64, &.{1}, state.conf_state.voters);
+
+    try storage.append(allocator, &.{.{ .index = 1, .term = 1 }});
+    try storage.applyLocalSnapshot(allocator, .{
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        },
+    });
+    try std.testing.expectError(
+        error.LegacySnapshotMigrationRequired,
+        storage.migrateLegacyMembership(allocator, current, 1, null),
+    );
+    const wrong_cluster = ClusterMembership{ .cluster_id = .{2} ++ .{0} ** 15, .peers = &peers };
+    try std.testing.expectError(
+        error.InvalidClusterMembership,
+        storage.migrateLegacyMembership(allocator, current, 1, wrong_cluster),
+    );
+    const missing_retired = ClusterMembership{
+        .cluster_id = current.cluster_id,
+        .peers = &peers,
+        .retired_node_ids = @constCast(&[_]u64{2}),
+    };
+    try std.testing.expectError(
+        error.InvalidClusterMembership,
+        storage.migrateLegacyMembership(allocator, current, 1, missing_retired),
+    );
+    try std.testing.expectError(
+        error.InvalidMembershipIndex,
+        storage.migrateLegacyMembership(allocator, current, 0, current),
+    );
+    try std.testing.expectEqual(@as(usize, 0), storage.core.snapshot_data.membership.len);
+    try std.testing.expect(storage.core.raft_state.cluster_membership == null);
 }

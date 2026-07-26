@@ -54,6 +54,7 @@ const DetachedCallbacks = proposal_tracker_mod.DetachedCallbacks;
 const ReadyProcessor = ready_processor_mod.ReadyProcessor;
 const ReadyPhase = ready_processor_mod.ReadyPhase;
 const RaftorConfig = raftor_config_mod.RaftorConfig;
+const LegacySnapshotMembership = raftor_config_mod.LegacySnapshotMembership;
 const StateRole = state_role_mod.StateRole;
 const ClusterMembership = cluster_membership_mod.ClusterMembership;
 const ClusterId = cluster_membership_mod.ClusterId;
@@ -404,6 +405,7 @@ pub const Raftor = struct {
 
         switch (startup_mode) {
             .bootstrap => {
+                if (self.config.legacy_membership_migration != null) return error.InvalidConfig;
                 if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try self.storage.lastIndex() != 0) {
                     return error.IncompatibleStorage;
                 }
@@ -428,16 +430,53 @@ pub const Raftor = struct {
             },
             .restart => {
                 if (confStateIsEmpty(state.conf_state)) return error.IncompatibleStorage;
+                if (state.cluster_membership != null and self.config.legacy_membership_migration != null) {
+                    return error.InvalidConfig;
+                }
+                if (state.cluster_membership == null and self.config.cluster_id != null) {
+                    const migration = self.config.legacy_membership_migration orelse
+                        return error.LegacyMembershipMigrationRequired;
+                    var current_membership = try buildLegacyMembership(self.allocator, self.config.cluster_id.?, .{
+                        .peers = migration.peers,
+                        .retired_node_ids = migration.retired_node_ids,
+                    });
+                    defer current_membership.deinit(self.allocator);
+                    current_membership.validate(state.conf_state) catch return error.InvalidClusterMembership;
+
+                    var local_snapshot = try self.storage.localSnapshot(self.allocator);
+                    defer if (local_snapshot) |*snapshot| snapshot.deinit(self.allocator);
+                    var snapshot_membership: ?ClusterMembership = null;
+                    defer if (snapshot_membership) |*membership| membership.deinit(self.allocator);
+                    if (local_snapshot) |snapshot| {
+                        const historical = migration.snapshot orelse return error.LegacySnapshotMigrationRequired;
+                        snapshot_membership = try buildLegacyMembership(self.allocator, self.config.cluster_id.?, historical);
+                        snapshot_membership.?.validate(snapshot.metadata.conf_state) catch return error.InvalidClusterMembership;
+                    } else if (migration.snapshot) |historical| {
+                        snapshot_membership = try buildLegacyMembership(self.allocator, self.config.cluster_id.?, historical);
+                    }
+
+                    try self.storage.migrateLegacyMembership(
+                        self.allocator,
+                        current_membership,
+                        migration.membership_index,
+                        snapshot_membership,
+                    );
+                    state.deinit(self.allocator);
+                    state = try self.storage.initialState(self.allocator);
+                } else if (state.cluster_membership == null and self.config.legacy_membership_migration != null) {
+                    return error.ClusterIdRequired;
+                }
                 if (state.cluster_membership) |membership| {
                     if (self.config.cluster_id) |cluster_id| {
                         if (!std.mem.eql(u8, &cluster_id, &membership.cluster_id)) return error.ClusterIdMismatch;
                     }
                     if (containsSorted(membership.retired_node_ids, self.config.nodeId())) return error.NodeRetired;
                 } else if (self.config.cluster_id != null) {
-                    return error.LegacyMembershipMigrationRequired;
+                    return error.MissingClusterMembership;
                 }
             },
             .join => {
+                if (self.config.legacy_membership_migration != null) return error.InvalidConfig;
                 if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try self.storage.lastIndex() != 0) {
                     return error.IncompatibleStorage;
                 }
@@ -1096,6 +1135,51 @@ fn buildInitialMembership(
     return .{
         .voters = voters,
         .membership = .{ .cluster_id = cluster_id, .peers = peers },
+    };
+}
+
+fn buildLegacyMembership(
+    allocator: std.mem.Allocator,
+    cluster_id: ClusterId,
+    source: LegacySnapshotMembership,
+) Error!ClusterMembership {
+    if (std.mem.eql(u8, &cluster_id, &(@as(ClusterId, .{0} ** 16)))) return error.ClusterIdRequired;
+    var peers = try allocator.alloc(PeerEndpoint, source.peers.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (peers[0..initialized]) |*peer| peer.deinit(allocator);
+        if (peers.len != 0) allocator.free(peers);
+    }
+    for (source.peers) |peer| {
+        if (peer.id == 0) return error.InvalidNodeId;
+        const address = peer.context orelse return error.PeerAddressMissing;
+        if (address.len == 0) return error.PeerAddressMissing;
+        peers[initialized] = try PeerEndpoint.init(allocator, peer.id, address);
+        initialized += 1;
+    }
+    std.mem.sort(PeerEndpoint, peers, {}, struct {
+        fn lessThan(_: void, lhs: PeerEndpoint, rhs: PeerEndpoint) bool {
+            return lhs.node_id < rhs.node_id;
+        }
+    }.lessThan);
+    for (peers, 0..) |peer, index| {
+        if (index != 0 and peer.node_id == peers[index - 1].node_id) return error.DuplicatePeerId;
+    }
+
+    const retired = if (source.retired_node_ids.len == 0)
+        @as([]u64, &.{})
+    else
+        try allocator.dupe(u64, source.retired_node_ids);
+    errdefer if (retired.len != 0) allocator.free(retired);
+    std.mem.sort(u64, retired, {}, std.sort.asc(u64));
+    for (retired, 0..) |id, index| {
+        if (id == 0 or (index != 0 and retired[index - 1] == id)) return error.InvalidClusterMembership;
+    }
+
+    return .{
+        .cluster_id = cluster_id,
+        .peers = peers,
+        .retired_node_ids = retired,
     };
 }
 

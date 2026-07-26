@@ -213,6 +213,8 @@ pub const ReadIndexCallback = proposal_tracker_mod.ReadIndexCallback;
 pub const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 
 pub const RaftorConfig = raftor_config_mod.RaftorConfig;
+pub const LegacySnapshotMembership = raftor_config_mod.LegacySnapshotMembership;
+pub const LegacyMembershipMigration = raftor_config_mod.LegacyMembershipMigration;
 
 pub const StartupMode = raftor_mod.StartupMode;
 pub const RaftorDependencies = raftor_mod.RaftorDependencies;

@@ -105,3 +105,84 @@ test "FaultFs metadata faults recover an atomic incarnation" {
         try std.testing.expectEqual(case.expected_incarnation, recovered.incarnation);
     }
 }
+
+test "FaultFs legacy migration recovers retryable or complete state" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        operation: fault.Operation,
+        occurrence: u32,
+        effect: fault.Effect,
+    };
+    const cases = [_]Case{
+        .{ .operation = .pwrite, .occurrence = 1, .effect = .fail_before },
+        .{ .operation = .sync_file, .occurrence = 1, .effect = .fail_before },
+        .{ .operation = .rename, .occurrence = 1, .effect = .fail_before },
+        .{ .operation = .sync_dir, .occurrence = 1, .effect = .fail_before },
+        .{ .operation = .pwrite, .occurrence = 2, .effect = .fail_before },
+        .{ .operation = .sync_file, .occurrence = 2, .effect = .fail_before },
+        .{ .operation = .rename, .occurrence = 2, .effect = .fail_before },
+        .{ .operation = .rename, .occurrence = 2, .effect = .fail_after },
+        .{ .operation = .sync_dir, .occurrence = 2, .effect = .fail_before },
+    };
+
+    for (cases) |case| {
+        var fixture = try raft.FsTestFixture.init(allocator, .real);
+        defer fixture.deinit();
+        const path = fixture.walDir();
+        const base = fixture.fs();
+        {
+            var ws = try raft.WALStorage.openWithFs(allocator, path, base);
+            defer ws.deinit();
+            const storage = ws.asWritableStorage();
+            try storage.append(allocator, &.{
+                .{ .index = 1, .term = 1 },
+                .{ .index = 2, .term = 1 },
+            });
+            try storage.setHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+            try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+            try storage.applyLocalSnapshot(allocator, .{
+                .data = @constCast("legacy-state"),
+                .metadata = .{
+                    .index = 1,
+                    .term = 1,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+                },
+            });
+        }
+
+        var backend = fault.FaultFs.init(base);
+        var ws = try raft.WALStorage.openWithFs(allocator, path, backend.fs());
+        var peers = [_]raft.PeerEndpoint{
+            .{ .node_id = 1, .address = @constCast("node-1") },
+        };
+        const membership = raft.ClusterMembership{
+            .cluster_id = .{1} ++ .{0} ** 15,
+            .peers = &peers,
+        };
+        backend.inject(.{
+            .operation = case.operation,
+            .occurrence = case.occurrence,
+            .effect = case.effect,
+        });
+        if (ws.asWritableStorage().migrateLegacyMembership(allocator, membership, 2, membership)) |_| {
+            return error.ExpectedInjectedFailure;
+        } else |_| {}
+        try backend.assertConsumed();
+        ws.deinit();
+
+        var recovered = try raft.WALStorage.openWithFs(allocator, path, base);
+        var state = try recovered.asWritableStorage().initialState(allocator);
+        if (state.cluster_membership == null) {
+            try recovered.asWritableStorage().migrateLegacyMembership(allocator, membership, 2, membership);
+            state.deinit(allocator);
+            state = try recovered.asWritableStorage().initialState(allocator);
+        }
+        try std.testing.expectEqual(@as(u64, 2), state.membership_index);
+        try std.testing.expectEqualStrings("node-1", state.cluster_membership.?.addressOf(1).?);
+        var snapshot = (try recovered.asWritableStorage().localSnapshot(allocator)).?;
+        try std.testing.expect(snapshot.membership.len != 0);
+        snapshot.deinit(allocator);
+        state.deinit(allocator);
+        recovered.deinit();
+    }
+}

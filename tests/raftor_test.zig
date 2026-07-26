@@ -79,6 +79,16 @@ const SyncFailingStorage = struct {
         return cast(ctx).inner.applySnapshot(alloc, snapshot);
     }
 
+    fn migrateLegacyMembership(
+        ctx: *anyopaque,
+        alloc: std.mem.Allocator,
+        current_membership: raft.ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?raft.ClusterMembership,
+    ) raft.Error!void {
+        return cast(ctx).inner.migrateLegacyMembership(alloc, current_membership, membership_index, snapshot_membership);
+    }
+
     fn applyLocalSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, snapshot: raft.Snapshot) raft.Error!void {
         return cast(ctx).inner.applyLocalSnapshot(alloc, snapshot);
     }
@@ -115,6 +125,7 @@ const SyncFailingStorage = struct {
         .set_hard_state = setHardState,
         .set_conf_state = setConfState,
         .set_membership_state = setMembershipState,
+        .migrate_legacy_membership = migrateLegacyMembership,
         .apply_snapshot = applySnapshot,
         .apply_local_snapshot = applyLocalSnapshot,
         .local_snapshot = localSnapshot,
@@ -2382,6 +2393,91 @@ test "raftor: durable restart rejects retired local node and legacy membership" 
             .state_machine = machine.stateMachine(),
         },
     ));
+}
+
+test "raftor: explicit legacy membership migration hydrates and rejects stale config" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const peers = [_]raft.Peer{
+        .{ .id = 2, .context = "node-2" },
+        .{ .id = 1, .context = "node-1" },
+    };
+    var config = makeDurableConfig(1, "unused");
+    config.legacy_membership_migration = .{
+        .peers = &peers,
+        .retired_node_ids = &.{ 4, 3 },
+        .membership_index = 0,
+    };
+    const dependencies = raft.RaftorDependencies{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    };
+
+    {
+        const migrated = try Raftor.createWithDependencies(allocator, config, .restart, dependencies);
+        defer migrated.destroy();
+        try std.testing.expectEqualStrings("node-2", migrated.getClusterMembership().?.addressOf(2).?);
+        try std.testing.expectEqualSlices(u64, &.{ 3, 4 }, migrated.getClusterMembership().?.retired_node_ids);
+        try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
+        try std.testing.expectEqual(@as(u64, 2), transport.events.items[0].node_id);
+    }
+
+    try std.testing.expectError(
+        error.InvalidConfig,
+        Raftor.createWithDependencies(allocator, config, .restart, dependencies),
+    );
+}
+
+test "raftor: legacy snapshot migration requires explicit historical membership" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.append(allocator, &.{.{ .index = 1, .term = 1 }});
+    try storage.applyLocalSnapshot(allocator, .{
+        .data = @constCast("legacy-state"),
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        },
+    });
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const peers = [_]raft.Peer{.{ .id = 1, .context = "node-1" }};
+    var config = makeDurableConfig(1, "node-1");
+    config.legacy_membership_migration = .{ .peers = &peers, .membership_index = 1 };
+
+    try std.testing.expectError(
+        error.LegacySnapshotMigrationRequired,
+        Raftor.createWithDependencies(allocator, config, .restart, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        }),
+    );
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expect(state.cluster_membership == null);
+    var snapshot = (try storage.localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.membership.len);
+
+    config.legacy_membership_migration.?.snapshot = .{ .peers = &peers };
+    const migrated = try Raftor.createWithDependencies(allocator, config, .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer migrated.destroy();
+    try std.testing.expectEqual(@as(u64, 1), migrated.getMembershipIndex());
+    try std.testing.expectEqualStrings("node-1", migrated.getClusterMembership().?.addressOf(1).?);
 }
 
 test "raftor: fresh join persists seed membership and restarts non-promotable" {

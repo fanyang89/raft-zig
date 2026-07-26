@@ -272,6 +272,13 @@ pub const WritableStorage = struct {
             cluster_membership: ClusterMembership,
             membership_index: u64,
         ) Error!void,
+        migrate_legacy_membership: *const fn (
+            ctx: *anyopaque,
+            allocator: std.mem.Allocator,
+            current_membership: ClusterMembership,
+            membership_index: u64,
+            snapshot_membership: ?ClusterMembership,
+        ) Error!void,
         apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         apply_local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) Error!?Snapshot,
@@ -359,6 +366,22 @@ pub const WritableStorage = struct {
         return self.vtable.apply_snapshot(self.ctx, allocator, snapshot);
     }
 
+    pub fn migrateLegacyMembership(
+        self: WritableStorage,
+        allocator: std.mem.Allocator,
+        current_membership: ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?ClusterMembership,
+    ) Error!void {
+        return self.vtable.migrate_legacy_membership(
+            self.ctx,
+            allocator,
+            current_membership,
+            membership_index,
+            snapshot_membership,
+        );
+    }
+
     pub fn applyLocalSnapshot(
         self: WritableStorage,
         allocator: std.mem.Allocator,
@@ -384,6 +407,51 @@ pub const WritableStorage = struct {
         return .{ .ctx = self, .vtable = &storage_adapter_vtable };
     }
 };
+
+pub fn validateLegacyMembershipMigration(
+    current_membership: ClusterMembership,
+    membership_index: u64,
+    hard_state: HardState,
+    conf_state: ConfState,
+    snapshot: ?Snapshot,
+    snapshot_membership: ?ClusterMembership,
+) Error!void {
+    current_membership.validate(conf_state) catch return error.InvalidClusterMembership;
+    if (membership_index != 0 and hard_state.commit == 0) return error.InvalidMembershipIndex;
+    if (hard_state.commit != 0 and membership_index > hard_state.commit) return error.InvalidMembershipIndex;
+
+    if (snapshot) |local_snapshot| {
+        if (membership_index < local_snapshot.metadata.index) return error.InvalidMembershipIndex;
+        const historical = snapshot_membership orelse return error.LegacySnapshotMigrationRequired;
+        historical.validate(local_snapshot.metadata.conf_state) catch return error.InvalidClusterMembership;
+        if (!std.mem.eql(u8, &current_membership.cluster_id, &historical.cluster_id)) {
+            return error.InvalidClusterMembership;
+        }
+        for (historical.retired_node_ids) |retired_id| {
+            if (!containsSorted(current_membership.retired_node_ids, retired_id)) {
+                return error.InvalidClusterMembership;
+            }
+        }
+    } else if (snapshot_membership != null) {
+        return error.InvalidClusterMembership;
+    }
+}
+
+fn containsSorted(ids: []const u64, id: u64) bool {
+    var low: usize = 0;
+    var high = ids.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (ids[mid] < id) {
+            low = mid + 1;
+        } else if (ids[mid] > id) {
+            high = mid;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
 
 fn writableStorage(ctx: *anyopaque) *WritableStorage {
     return @ptrCast(@alignCast(ctx));

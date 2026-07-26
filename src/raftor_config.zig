@@ -14,6 +14,18 @@ const Config = raft_config_mod.Config;
 const Peer = raw_node_mod.Peer;
 const ClusterId = cluster_membership_mod.ClusterId;
 
+pub const LegacySnapshotMembership = struct {
+    peers: []const Peer,
+    retired_node_ids: []const u64 = &.{},
+};
+
+pub const LegacyMembershipMigration = struct {
+    peers: []const Peer,
+    retired_node_ids: []const u64 = &.{},
+    membership_index: u64,
+    snapshot: ?LegacySnapshotMembership = null,
+};
+
 pub const RaftorConfig = struct {
     /// Underlying Raft configuration. `id` must be set.
     raft: Config = .{},
@@ -31,6 +43,9 @@ pub const RaftorConfig = struct {
     /// peer's network address. Bootstrap creates a local one-node membership
     /// when this is empty; join requires nonempty seed peers.
     initial_peers: []const Peer = &.{},
+    /// Explicit operator-supplied data for upgrading storage that predates
+    /// durable cluster membership.
+    legacy_membership_migration: ?LegacyMembershipMigration = null,
     /// Data directory for future WAL storage. MemoryStorage ignores it.
     data_dir: []const u8 = "",
     /// Borrowed filesystem used when `data_dir` is non-empty. The default uses
@@ -71,5 +86,6 @@ test "raftor config defaults" {
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
     try std.testing.expectEqual(@as(?fs_mod.Fs, null), c.file_system);
     try std.testing.expectEqual(@as(?ClusterId, null), c.cluster_id);
+    try std.testing.expect(c.legacy_membership_migration == null);
     try std.testing.expect(!c.join);
 }

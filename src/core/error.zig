@@ -30,6 +30,7 @@ pub const Error = error{
     ClusterMembershipParseError,
     InvalidClusterMembership,
     MissingClusterMembership,
+    InvalidMembershipIndex,
     PeerAddressBookParseError,
 
     // Segment errors.
@@ -116,6 +117,7 @@ pub const Error = error{
     DuplicatePeerId,
     NodeRetired,
     LegacyMembershipMigrationRequired,
+    LegacySnapshotMigrationRequired,
 
     // ConfChange validation errors.
     LearnersNextMustBeEmpty,
@@ -158,6 +160,7 @@ pub fn name(e: Error) []const u8 {
         error.ClusterMembershipParseError => "ClusterMembershipParseError",
         error.InvalidClusterMembership => "InvalidClusterMembership",
         error.MissingClusterMembership => "MissingClusterMembership",
+        error.InvalidMembershipIndex => "InvalidMembershipIndex",
         error.PeerAddressBookParseError => "PeerAddressBookParseError",
         error.CurrentSegmentNotFound => "CurrentSegmentNotFound",
         error.SegmentNotOpen => "SegmentNotOpen",
@@ -230,6 +233,7 @@ pub fn name(e: Error) []const u8 {
         error.DuplicatePeerId => "DuplicatePeerId",
         error.NodeRetired => "NodeRetired",
         error.LegacyMembershipMigrationRequired => "LegacyMembershipMigrationRequired",
+        error.LegacySnapshotMigrationRequired => "LegacySnapshotMigrationRequired",
         error.LearnersNextMustBeEmpty => "LearnersNextMustBeEmpty",
         error.AutoLeaveMustBeFalse => "AutoLeaveMustBeFalse",
         error.ConfigAlreadyJoint => "ConfigAlreadyJoint",

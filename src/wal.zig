@@ -521,8 +521,6 @@ pub const WAL = struct {
                     } else if (!membershipDescendsFrom(self.cluster_membership.?, snapshot_membership)) {
                         return error.InvalidClusterMembership;
                     }
-                } else if (metadata.version >= 4 and snapshot.membership.len != 0) {
-                    return error.InvalidClusterMembership;
                 }
                 self.snapshot = snapshot;
             }
@@ -746,6 +744,60 @@ pub const WAL = struct {
         self.cluster_membership = cloned_membership;
         self.membership_index = membership_index;
         self.metadata_dirty = true;
+    }
+
+    pub fn migrateLegacyMembership(
+        self: *WAL,
+        current_membership: ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?ClusterMembership,
+    ) !void {
+        if (self.cluster_membership != null) return error.InvalidConfig;
+        try storage_mod.validateLegacyMembershipMigration(
+            current_membership,
+            membership_index,
+            self.hard_state,
+            self.conf_state,
+            self.snapshot,
+            snapshot_membership,
+        );
+
+        var cloned_current = try current_membership.clone(self.allocator);
+        errdefer cloned_current.deinit(self.allocator);
+        var cloned_historical: ?ClusterMembership = null;
+        if (snapshot_membership) |historical| cloned_historical = try historical.clone(self.allocator);
+        defer if (cloned_historical) |*historical| historical.deinit(self.allocator);
+
+        var cloned_snapshot: ?Snapshot = null;
+        if (self.snapshot) |snapshot| {
+            var candidate = try cloneSnapshot(self.allocator, snapshot);
+            errdefer candidate.deinit(self.allocator);
+            const encoded = try cloned_historical.?.encode(self.allocator);
+            if (candidate.membership.len != 0) self.allocator.free(candidate.membership);
+            candidate.membership = encoded;
+            cloned_snapshot = candidate;
+        }
+        errdefer if (cloned_snapshot) |*snapshot| snapshot.deinit(self.allocator);
+
+        if (cloned_snapshot) |snapshot| try self.snapshot_store.save(snapshot);
+        try self.persistMetadataState(
+            self.first_index,
+            try self.firstSegmentIdFor(self.first_index),
+            self.hard_state,
+            self.conf_state,
+            cloned_current,
+            membership_index,
+            self.snapshot_metadata,
+            self.incarnation,
+        );
+
+        self.cluster_membership = cloned_current;
+        self.membership_index = membership_index;
+        if (cloned_snapshot) |snapshot| {
+            if (self.snapshot) |*old| old.deinit(self.allocator);
+            self.snapshot = snapshot;
+        }
+        self.metadata_dirty = false;
     }
 
     pub fn applySnapshot(self: *WAL, snapshot: Snapshot) !void {
@@ -1171,6 +1223,18 @@ pub const WALStorage = struct {
         self.wal.applySnapshot(snap) catch |err| return mapError(err);
     }
 
+    fn migrate_legacy_membership_impl(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        current_membership: ClusterMembership,
+        membership_index: u64,
+        snapshot_membership: ?ClusterMembership,
+    ) Error!void {
+        const self: *WALStorage = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        self.wal.migrateLegacyMembership(current_membership, membership_index, snapshot_membership) catch |err| return mapError(err);
+    }
+
     fn apply_local_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const self: *WALStorage = @ptrCast(@alignCast(ctx));
         _ = allocator;
@@ -1204,6 +1268,7 @@ pub const WALStorage = struct {
         .set_hard_state = set_hard_state_impl,
         .set_conf_state = set_conf_state_impl,
         .set_membership_state = set_membership_state_impl,
+        .migrate_legacy_membership = migrate_legacy_membership_impl,
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
         .local_snapshot = local_snapshot_impl,
@@ -1249,6 +1314,9 @@ fn mapError(err: anyerror) Error {
         error.ClusterMembershipParseError => error.ClusterMembershipParseError,
         error.InvalidClusterMembership => error.InvalidClusterMembership,
         error.MissingClusterMembership => error.MissingClusterMembership,
+        error.InvalidMembershipIndex => error.InvalidMembershipIndex,
+        error.LegacySnapshotMigrationRequired => error.LegacySnapshotMigrationRequired,
+        error.InvalidConfig => error.InvalidConfig,
         error.InvalidClusterId,
         error.InvalidNodeId,
         error.EmptyAddress,
@@ -1387,6 +1455,37 @@ fn testMembershipBytes(allocator: std.mem.Allocator, cluster_marker: u8, address
         .cluster_id = .{cluster_marker} ++ .{0} ** 15,
         .peers = &peers,
     }).encode(allocator);
+}
+
+fn writeLegacyV1Snapshot(
+    allocator: std.mem.Allocator,
+    fs: fs_mod.Fs,
+    dir: [:0]const u8,
+    index: u64,
+    term_value: u64,
+    voter_id: u64,
+    payload: []const u8,
+) !void {
+    const header_size: usize = 64;
+    const bytes = try allocator.alloc(u8, header_size + 8 + payload.len);
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    std.mem.writeInt(u32, bytes[0..4], 0x534E4150, .little);
+    std.mem.writeInt(u32, bytes[4..8], 1, .little);
+    std.mem.writeInt(u64, bytes[16..24], index, .little);
+    std.mem.writeInt(u64, bytes[24..32], term_value, .little);
+    std.mem.writeInt(u32, bytes[32..36], 1, .little);
+    std.mem.writeInt(u64, bytes[56..64], payload.len, .little);
+    std.mem.writeInt(u64, bytes[64..72], voter_id, .little);
+    @memcpy(bytes[72..], payload);
+    std.mem.writeInt(u32, bytes[8..12], std.hash.crc.Crc32Iscsi.hash(bytes[12..]), .little);
+    const path = try std.fmt.allocPrintSentinel(allocator, "{s}/snapshot-{d}-{d}.snap", .{ dir, index, term_value }, 0);
+    defer allocator.free(path);
+    const fd = try fs.open(path, .write_truncate);
+    try fs.pwriteAll(fd, bytes, 0);
+    try fs.syncFile(fd);
+    try fs.close(fd);
+    try fs.syncDir(dir);
 }
 
 test "wal: empty storage exposes the initial term" {
@@ -1830,6 +1929,108 @@ test "wal: incoming snapshot membership survives reopen" {
     var snapshot = (try ws.asWritableStorage().localSnapshot(allocator)).?;
     defer snapshot.deinit(allocator);
     try std.testing.expectEqualSlices(u8, membership, snapshot.membership);
+}
+
+test "wal: legacy membership migration without snapshot survives reopen" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    {
+        var ws = try WALStorage.openWithFs(allocator, path, fixture.fs());
+        defer ws.deinit();
+        const storage = ws.asWritableStorage();
+        try storage.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try storage.setHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+        try storage.sync();
+        var peers = [_]cluster_membership_mod.PeerEndpoint{
+            .{ .node_id = 1, .address = @constCast("node-1") },
+        };
+        try storage.migrateLegacyMembership(allocator, .{
+            .cluster_id = .{1} ++ .{0} ** 15,
+            .peers = &peers,
+        }, 2, null);
+    }
+
+    var reopened = try WALStorage.openWithFs(allocator, path, fixture.fs());
+    defer reopened.deinit();
+    var state = try reopened.asWritableStorage().initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), state.membership_index);
+    try std.testing.expectEqualStrings("node-1", state.cluster_membership.?.addressOf(1).?);
+    try std.testing.expectEqual(HardState{ .term = 1, .vote = 1, .commit = 2 }, state.hard_state);
+    try std.testing.expectEqual(@as(u64, 2), try reopened.asWritableStorage().lastIndex());
+}
+
+test "wal: legacy membership migration rewrites v1 snapshot before metadata" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    const fs = fixture.fs();
+    {
+        var ws = try WALStorage.openWithFs(allocator, path, fs);
+        defer ws.deinit();
+        const storage = ws.asWritableStorage();
+        try storage.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try storage.setHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+        try storage.applyLocalSnapshot(allocator, .{
+            .data = @constCast("legacy-state"),
+            .metadata = .{
+                .index = 1,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+    }
+    try writeLegacyV1Snapshot(allocator, fs, path, 1, 1, 1, "legacy-state");
+
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers };
+    {
+        var ws = try WALStorage.openWithFs(allocator, path, fs);
+        defer ws.deinit();
+        const storage = ws.asWritableStorage();
+        try std.testing.expectError(
+            error.LegacySnapshotMigrationRequired,
+            storage.migrateLegacyMembership(allocator, membership, 2, null),
+        );
+        var before = try storage.initialState(allocator);
+        defer before.deinit(allocator);
+        try std.testing.expect(before.cluster_membership == null);
+        try std.testing.expectEqual(@as(u64, 0), before.membership_index);
+        try storage.migrateLegacyMembership(allocator, membership, 2, membership);
+    }
+
+    const snapshot_path = try std.fmt.allocPrintSentinel(allocator, "{s}/snapshot-1-1.snap", .{path}, 0);
+    defer allocator.free(snapshot_path);
+    const fd = try fs.open(snapshot_path, .read_only);
+    defer fs.close(fd) catch {};
+    var header: [8]u8 = undefined;
+    try std.testing.expectEqual(header.len, try fs.preadAll(fd, &header, 0));
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, header[4..8], .little));
+
+    var reopened = try WALStorage.openWithFs(allocator, path, fs);
+    defer reopened.deinit();
+    var state = try reopened.asWritableStorage().initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), state.membership_index);
+    var snapshot = (try reopened.asWritableStorage().localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    var decoded = try cluster_membership_mod.decode(allocator, snapshot.membership);
+    defer decoded.deinit(allocator);
+    try std.testing.expect(decoded.eql(membership));
+    try std.testing.expectEqualStrings("legacy-state", snapshot.data);
 }
 
 test "wal: local snapshot membership survives reopen" {
