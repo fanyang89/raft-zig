@@ -46,6 +46,10 @@ run = "zig build test --summary all"
 description = "Run grpc transport tests"
 run = "zig build test-rpc --summary all"
 
+[tasks.test-grpc-raftor]
+description = "Run grpc Raftor integration tests"
+run = "zig build test-grpc-raftor --summary all"
+
 [tasks.test-upstream]
 description = "Run all adapted upstream test suites"
 run = "zig build test-upstream --summary all"

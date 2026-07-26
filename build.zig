@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     const rpc_test_step = b.step("test-rpc", "Run grpc transport tests");
+    const grpc_raftor_test_step = b.step("test-grpc-raftor", "Run grpc Raftor integration tests");
     const test_specs = [_]TestSpec{
         .{ .name = "public-api", .source = "tests/public_api_test.zig" },
         .{ .name = "storage", .source = "tests/storage_test.zig" },
@@ -71,6 +72,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "inflights", .source = "tests/inflights_test.zig" },
         .{ .name = "raft_paper", .source = "tests/raft_paper_test.zig" },
         .{ .name = "rpc", .source = "tests/rpc_test.zig" },
+        .{ .name = "grpc-raftor", .source = "tests/grpc_raftor_test.zig" },
         .{ .name = "simulation", .source = "tests/simulation_test.zig" },
         .{ .name = "fs", .source = "tests/fs_test.zig" },
         .{ .name = "wal-fault", .source = "tests/wal_fault_test.zig" },
@@ -87,6 +89,7 @@ pub fn build(b: *std.Build) void {
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
         if (std.mem.eql(u8, spec.name, "rpc")) rpc_test_step.dependOn(&run_tests.step);
+        if (std.mem.eql(u8, spec.name, "grpc-raftor")) grpc_raftor_test_step.dependOn(&run_tests.step);
     }
 
     const upstream_specs = [_]TestSpec{
