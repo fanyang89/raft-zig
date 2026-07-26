@@ -14,6 +14,9 @@ pub fn main(init: std.process.Init) !void {
     const payload = try allocator.alloc(u8, options.payload_size);
     defer allocator.free(payload);
     @memset(payload, 0x5a);
+    const proposal_batch = try allocator.alloc(raft.RawNode.Proposal, options.batch_size);
+    defer allocator.free(proposal_batch);
+    for (proposal_batch) |*proposal| proposal.* = .{ .data = payload };
 
     var storage = raft.MemoryStorage.init();
     defer storage.deinit(allocator);
@@ -39,10 +42,9 @@ pub fn main(init: std.process.Init) !void {
     var proposed: usize = 0;
     var last_compaction: usize = 0;
     while (proposed < options.proposals) {
-        const batch_end = proposed + @min(options.batch_size, options.proposals - proposed);
-        while (proposed < batch_end) : (proposed += 1) {
-            try node.propose("", payload);
-        }
+        const batch_count = @min(options.batch_size, options.proposals - proposed);
+        try node.proposeBatch(proposal_batch[0..batch_count]);
+        proposed += batch_count;
         try drainReady(allocator, &node, &storage, &last_applied);
         if (options.compact_every != 0 and proposed - last_compaction >= options.compact_every) {
             try storage.compact(allocator, last_applied);

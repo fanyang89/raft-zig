@@ -154,6 +154,16 @@ const ReadyRecord = struct {
 // ===========================================================================
 
 pub const RawNode = struct {
+    pub const Proposal = struct {
+        context: []const u8 = "",
+        data: []const u8,
+    };
+
+    pub const OwnedProposal = struct {
+        context: []const u8 = "",
+        data: []u8,
+    };
+
     raft: Raft,
     prev_ss: SoftState,
     prev_hs: HardState,
@@ -284,6 +294,63 @@ pub const RawNode = struct {
             .from = self.raft.id,
             .entries = entries,
         };
+        defer m.deinit(self.allocator);
+        try self.raft.step(&m);
+    }
+
+    pub fn proposeBatch(self: *RawNode, proposals: []const Proposal) Error!void {
+        if (proposals.len == 0) return;
+        var entries = try self.allocator.alloc(Entry, proposals.len);
+        var initialized: usize = 0;
+        var entries_transferred = false;
+        errdefer if (!entries_transferred) {
+            for (entries[0..initialized]) |*entry| entry.deinit(self.allocator);
+            self.allocator.free(entries);
+        };
+        for (proposals) |proposal| {
+            entries[initialized] = try makeEntryCopy(self.allocator, .normal, proposal.data, proposal.context);
+            initialized += 1;
+        }
+
+        var m = Message{
+            .msg_type = .propose,
+            .from = self.raft.id,
+            .entries = entries,
+        };
+        entries_transferred = true;
+        defer m.deinit(self.allocator);
+        try self.raft.step(&m);
+    }
+
+    /// Consume allocator-owned payloads and clear every `data` slice, including
+    /// when the batch fails.
+    pub fn proposeBatchOwned(self: *RawNode, proposals: []OwnedProposal) Error!void {
+        defer for (proposals) |*proposal| {
+            if (proposal.data.len != 0) self.allocator.free(proposal.data);
+            proposal.data = &.{};
+        };
+        if (proposals.len == 0) return;
+
+        var entries = try self.allocator.alloc(Entry, proposals.len);
+        var initialized: usize = 0;
+        var entries_transferred = false;
+        errdefer if (!entries_transferred) {
+            for (entries[0..initialized]) |*entry| entry.deinit(self.allocator);
+            self.allocator.free(entries);
+        };
+        for (proposals) |*proposal| {
+            const data = proposal.data;
+            proposal.data = &.{};
+            entries[initialized] = try makeEntryAdoptingData(self.allocator, .normal, data, proposal.context);
+            initialized += 1;
+        }
+
+        var m = Message{
+            .msg_type = .propose,
+            .from = self.raft.id,
+            .entries = entries,
+        };
+        entries_transferred = true;
         defer m.deinit(self.allocator);
         try self.raft.step(&m);
     }

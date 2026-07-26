@@ -103,6 +103,50 @@ test "raw_node: propose flows through Ready.entries" {
     light.deinit(allocator);
 }
 
+test "raw_node: proposeBatch appends one ordered batch" {
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedStorage(&storage, &.{1});
+
+    var node = try RawNode.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+    try campaignLeader(&node, &storage);
+
+    const proposals = [_]RawNode.Proposal{
+        .{ .context = "first-context", .data = "first" },
+        .{ .context = "second-context", .data = "second" },
+    };
+    try node.proposeBatch(&proposals);
+
+    var ready = try node.getReady();
+    defer ready.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), ready.entries.len);
+    try std.testing.expectEqualStrings("first", ready.entries[0].data);
+    try std.testing.expectEqualStrings("first-context", ready.entries[0].context);
+    try std.testing.expectEqualStrings("second", ready.entries[1].data);
+    try std.testing.expectEqualStrings("second-context", ready.entries[1].context);
+}
+
+test "raw_node: proposeBatchOwned consumes payloads on failure" {
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedStorage(&storage, &.{1});
+
+    var node = try RawNode.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+    var proposals = [_]RawNode.OwnedProposal{
+        .{ .data = try allocator.dupe(u8, "first") },
+        .{ .data = try allocator.dupe(u8, "second") },
+    };
+    defer for (&proposals) |*proposal| {
+        if (proposal.data.len != 0) allocator.free(proposal.data);
+    };
+
+    try std.testing.expectError(error.ProposalDropped, node.proposeBatchOwned(&proposals));
+    try std.testing.expectEqual(@as(usize, 0), proposals[0].data.len);
+    try std.testing.expectEqual(@as(usize, 0), proposals[1].data.len);
+}
+
 test "raw_node: uncommitted entry limit rejects until Ready advances" {
     var storage = MemoryStorage.init();
     defer storage.deinit(allocator);
