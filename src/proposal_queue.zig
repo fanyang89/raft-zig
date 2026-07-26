@@ -23,6 +23,11 @@ pub const ReadIndexItem = struct {
     callback: ReadIndexCallback,
 };
 
+pub const ProposalQueueLimits = struct {
+    max_items: usize = std.math.maxInt(usize),
+    max_bytes: usize = std.math.maxInt(usize),
+};
+
 fn spinLock(m: *std.atomic.Mutex) void {
     while (!m.tryLock()) {}
 }
@@ -31,9 +36,11 @@ pub const ProposalQueue = struct {
     mutex: std.atomic.Mutex = .unlocked,
     items: std.Deque(ProposalItem),
     allocator: std.mem.Allocator,
+    limits: ProposalQueueLimits,
+    queued_bytes: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator) ProposalQueue {
-        return .{ .items = .empty, .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, limits: ProposalQueueLimits) ProposalQueue {
+        return .{ .items = .empty, .allocator = allocator, .limits = limits };
     }
 
     pub fn deinit(self: *ProposalQueue) void {
@@ -50,17 +57,23 @@ pub const ProposalQueue = struct {
     pub fn push(self: *ProposalQueue, data: []u8, ctx: []u8, callback: ProposalCallback) !void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
+        if (self.items.len >= self.limits.max_items) return error.ProposalBackpressure;
+        const item_bytes = std.math.add(usize, data.len, ctx.len) catch return error.ProposalBackpressure;
+        if (item_bytes > self.limits.max_bytes -| self.queued_bytes) return error.ProposalBackpressure;
         try self.items.pushBack(self.allocator, .{
             .data = data,
             .ctx = ctx,
             .callback = callback,
         });
+        self.queued_bytes += item_bytes;
     }
 
     pub fn tryPop(self: *ProposalQueue) ?ProposalItem {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
-        return self.items.popFront();
+        const item = self.items.popFront() orelse return null;
+        self.queued_bytes -= item.data.len + item.ctx.len;
+        return item;
     }
 
     pub fn takeAll(self: *ProposalQueue) std.Deque(ProposalItem) {
@@ -68,6 +81,7 @@ pub const ProposalQueue = struct {
         defer self.mutex.unlock();
         const items = self.items;
         self.items = .empty;
+        self.queued_bytes = 0;
         return items;
     }
 
@@ -75,6 +89,20 @@ pub const ProposalQueue = struct {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
         return self.items.len == 0;
+    }
+
+    pub fn count(self: *const ProposalQueue) usize {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
+        return self.items.len;
+    }
+
+    pub fn byteCount(self: *const ProposalQueue) usize {
+        const mutex = @constCast(&self.mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
+        return self.queued_bytes;
     }
 };
 
@@ -123,7 +151,7 @@ pub const ReadIndexQueue = struct {
 };
 
 test "proposal queue push and tryPop" {
-    var q = ProposalQueue.init(std.testing.allocator);
+    var q = ProposalQueue.init(std.testing.allocator, .{});
     defer q.deinit();
 
     try std.testing.expect(q.tryPop() == null);
@@ -145,7 +173,7 @@ test "proposal queue push and tryPop" {
 }
 
 test "proposal queue preserves FIFO order across deque wrap-around" {
-    var queue = ProposalQueue.init(std.testing.allocator);
+    var queue = ProposalQueue.init(std.testing.allocator, .{});
     defer queue.deinit();
 
     const Cb = struct {
@@ -186,12 +214,48 @@ test "proposal queue preserves FIFO order across deque wrap-around" {
     try std.testing.expect(queue.empty());
 }
 
+test "proposal queue enforces item and byte limits" {
+    var queue = ProposalQueue.init(std.testing.allocator, .{ .max_items = 1, .max_bytes = 7 });
+    defer queue.deinit();
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+    };
+    const callback = ProposalCallback{ .ctx = undefined, .function = Cb.callback };
+    const data = try std.testing.allocator.dupe(u8, "data");
+    const ctx = try std.testing.allocator.dupe(u8, "ctx");
+    try queue.push(data, ctx, callback);
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqual(@as(usize, 7), queue.byteCount());
+
+    const rejected_data = try std.testing.allocator.dupe(u8, "x");
+    defer std.testing.allocator.free(rejected_data);
+    const rejected_ctx = try std.testing.allocator.dupe(u8, "y");
+    defer std.testing.allocator.free(rejected_ctx);
+    try std.testing.expectError(error.ProposalBackpressure, queue.push(rejected_data, rejected_ctx, callback));
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqual(@as(usize, 7), queue.byteCount());
+
+    const item = queue.tryPop().?;
+    std.testing.allocator.free(item.data);
+    std.testing.allocator.free(item.ctx);
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+    try std.testing.expectEqual(@as(usize, 0), queue.byteCount());
+
+    const oversized_data = try std.testing.allocator.dupe(u8, "oversized");
+    defer std.testing.allocator.free(oversized_data);
+    const oversized_ctx = try std.testing.allocator.dupe(u8, "ctx");
+    defer std.testing.allocator.free(oversized_ctx);
+    try std.testing.expectError(error.ProposalBackpressure, queue.push(oversized_data, oversized_ctx, callback));
+    try std.testing.expect(queue.empty());
+}
+
 test "proposal queue supports concurrent producers and consumption" {
     const allocator = std.heap.smp_allocator;
     const producer_count = 4;
     const items_per_producer = 128;
 
-    var queue = ProposalQueue.init(allocator);
+    var queue = ProposalQueue.init(allocator, .{});
     defer queue.deinit();
     var producers_done = std.atomic.Value(usize).init(0);
 

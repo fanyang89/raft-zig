@@ -56,6 +56,10 @@ pub const RaftorConfig = struct {
     tick_interval_ms: u64 = 100,
     /// Maximum number of transport messages and events processed per tick.
     transport_poll_budget: usize = 256,
+    /// Maximum number of proposals retained in the cross-thread queue.
+    max_queued_proposals: usize = 4096,
+    /// Maximum payload and context bytes retained in the proposal queue.
+    max_queued_proposal_bytes: usize = 64 * 1024 * 1024,
     /// Number of applied entries above which a snapshot is triggered.
     /// 0 = disabled.
     snapshot_entries_threshold: u64 = 10_000,
@@ -82,6 +86,8 @@ test "raftor config defaults" {
     const c = RaftorConfig{};
     try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
     try std.testing.expectEqual(@as(usize, 256), c.transport_poll_budget);
+    try std.testing.expectEqual(@as(usize, 4096), c.max_queued_proposals);
+    try std.testing.expectEqual(@as(usize, 64 * 1024 * 1024), c.max_queued_proposal_bytes);
     try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_entries_threshold);
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
     try std.testing.expectEqual(@as(?fs_mod.Fs, null), c.file_system);

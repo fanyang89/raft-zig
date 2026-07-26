@@ -615,6 +615,31 @@ test "raftor: propose data is applied to state machine" {
     try std.testing.expectEqualStrings("hello world", sm.applied.items[1]);
 }
 
+test "raftor: proposal queue applies count and byte backpressure" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.max_queued_proposals = 1;
+    config.max_queued_proposal_bytes = raft.request_context.header_size + 3;
+    const r = try Raftor.create(allocator, config, sm.stateMachine());
+    defer r.destroy();
+
+    var oversized = ErrorTester{};
+    try std.testing.expectError(error.ProposalBackpressure, r.propose("four", oversized.proposalCallback()));
+    try std.testing.expect(!oversized.completed);
+
+    var accepted = ErrorTester{};
+    try r.propose("one", accepted.proposalCallback());
+    const queued = r.getStatus();
+    try std.testing.expectEqual(@as(usize, 1), queued.queued_proposals);
+    try std.testing.expectEqual(raft.request_context.header_size + 3, queued.queued_proposal_bytes);
+
+    var rejected = ErrorTester{};
+    try std.testing.expectError(error.ProposalBackpressure, r.propose("two", rejected.proposalCallback()));
+    try std.testing.expect(!rejected.completed);
+    try std.testing.expectEqual(@as(usize, 1), r.getStatus().queued_proposals);
+}
+
 test "raftor: callback observes applied index and cannot reenter event loop" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();
@@ -944,6 +969,31 @@ test "raftor: zero transport poll budget is invalid" {
     defer sm.deinit();
     var config = makeConfig(1);
     config.transport_poll_budget = 0;
+    try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    }));
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+}
+
+test "raftor: zero proposal queue limits are invalid" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.max_queued_proposals = 0;
+    try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    }));
+
+    config.max_queued_proposals = 1;
+    config.max_queued_proposal_bytes = 0;
     try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
         .storage = storage.asWritableStorage(),
         .transport = transport.transport(),

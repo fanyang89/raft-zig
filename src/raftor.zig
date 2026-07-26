@@ -158,6 +158,8 @@ pub const NodeStatus = struct {
     commit_index: u64 = 0,
     applied_index: u64 = 0,
     pending_proposals: usize = 0,
+    queued_proposals: usize = 0,
+    queued_proposal_bytes: usize = 0,
     incarnation: u64 = 0,
 };
 
@@ -307,6 +309,7 @@ pub const Raftor = struct {
 
         try config.raft.validate();
         if (config.transport_poll_budget == 0) return error.InvalidConfig;
+        if (config.max_queued_proposals == 0 or config.max_queued_proposal_bytes == 0) return error.InvalidConfig;
         try self.prepareStorage(startup_mode);
         var initial_state = try self.storage.initialState(allocator);
         defer initial_state.deinit(allocator);
@@ -331,7 +334,10 @@ pub const Raftor = struct {
             config.raft.applied;
 
         self.proposal_tracker = ProposalTracker.init(allocator);
-        self.proposal_queue = ProposalQueue.init(allocator);
+        self.proposal_queue = ProposalQueue.init(allocator, .{
+            .max_items = config.max_queued_proposals,
+            .max_bytes = config.max_queued_proposal_bytes,
+        });
         self.read_index_queue = ReadIndexQueue.init(allocator);
         errdefer {
             self.proposal_queue.deinit();
@@ -721,6 +727,8 @@ pub const Raftor = struct {
     // -----------------------------------------------------------------------
 
     pub fn propose(self: *Raftor, data: []const u8, callback: proposal_tracker_mod.ProposalCallback) !void {
+        const queued_bytes = std.math.add(usize, data.len, request_context_mod.header_size) catch return error.ProposalBackpressure;
+        if (queued_bytes > self.config.max_queued_proposal_bytes) return error.ProposalBackpressure;
         const data_copy = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(data_copy);
         const ctx_copy = try self.request_context_generator.next(self.allocator, .proposal, "");
@@ -938,6 +946,8 @@ pub const Raftor = struct {
             .commit_index = r.raft_log.committed,
             .applied_index = self.ready_processor.applied_index,
             .pending_proposals = self.proposal_tracker.pendingCount(),
+            .queued_proposals = self.proposal_queue.count(),
+            .queued_proposal_bytes = self.proposal_queue.byteCount(),
             .incarnation = self.request_context_generator.incarnation,
         };
     }
