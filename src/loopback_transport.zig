@@ -17,6 +17,7 @@ const Message = types.Message;
 const MessageType = types.MessageType;
 const Transport = transport_mod.Transport;
 const MessageCallback = transport_mod.MessageCallback;
+const PeerEventCallback = transport_mod.PeerEventCallback;
 const cloneMessage = storage_mod.cloneMessage;
 
 /// Central registry that routes messages between in-process nodes.
@@ -103,6 +104,8 @@ pub const LoopbackTransport = struct {
     node_id: u64,
     inbox: std.ArrayList(Message),
     callback: ?MessageCallback = null,
+    peer_event_callback: ?PeerEventCallback = null,
+    stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, network: *LoopbackNetwork, node_id: u64) LoopbackTransport {
@@ -126,6 +129,7 @@ pub const LoopbackTransport = struct {
     /// the sole owner of its heap-allocated fields. The callback (or its
     /// callee) must call `msg.deinit(allocator)` exactly once.
     pub fn pollOne(self: *LoopbackTransport) Error!bool {
+        if (self.stopped.load(.acquire)) return false;
         if (self.inbox.items.len == 0) return false;
         const cb = self.callback orelse return false;
         const message = self.inbox.orderedRemove(0);
@@ -135,8 +139,14 @@ pub const LoopbackTransport = struct {
 
     // ---- Transport vtable impl ----
 
-    fn startImpl(_: *anyopaque) Error!void {}
-    fn stopImpl(_: *anyopaque) void {}
+    fn startImpl(ctx: *anyopaque) Error!void {
+        const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
+        if (self.stopped.load(.acquire)) return error.AlreadyStarted;
+    }
+    fn stopImpl(ctx: *anyopaque) void {
+        const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
+        self.stopped.store(true, .release);
+    }
 
     fn addPeerImpl(_: *anyopaque, _: u64, _: []const u8) Error!bool {
         return true;
@@ -156,6 +166,11 @@ pub const LoopbackTransport = struct {
         self.callback = cb;
     }
 
+    fn setPeerEventCallbackImpl(ctx: *anyopaque, cb: ?PeerEventCallback) void {
+        const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
+        self.peer_event_callback = cb;
+    }
+
     fn pollOneImpl(ctx: *anyopaque) Error!bool {
         const self: *LoopbackTransport = @ptrCast(@alignCast(ctx));
         return self.pollOne();
@@ -168,6 +183,7 @@ pub const LoopbackTransport = struct {
         .remove_peer = removePeerImpl,
         .send = sendImpl,
         .set_message_callback = setMessageCallbackImpl,
+        .set_peer_event_callback = setPeerEventCallbackImpl,
         .poll_one = pollOneImpl,
     };
 

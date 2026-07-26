@@ -56,6 +56,8 @@ pub const SimTransport = struct {
     endpoint: mar.Endpoint(PacketRef),
     pool: *PacketPool,
     callback: ?raft.MessageCallback = null,
+    peer_event_callback: ?raft.PeerEventCallback = null,
+    stopped: bool = false,
 
     pub fn init(endpoint: mar.Endpoint(PacketRef), pool: *PacketPool) SimTransport {
         return .{ .endpoint = endpoint, .pool = pool };
@@ -65,8 +67,14 @@ pub const SimTransport = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
-    fn start(_: *anyopaque) raft.Error!void {}
-    fn stop(_: *anyopaque) void {}
+    fn start(ctx: *anyopaque) raft.Error!void {
+        const self: *SimTransport = @ptrCast(@alignCast(ctx));
+        self.stopped = false;
+    }
+    fn stop(ctx: *anyopaque) void {
+        const self: *SimTransport = @ptrCast(@alignCast(ctx));
+        self.stopped = true;
+    }
     fn addPeer(_: *anyopaque, _: u64, _: []const u8) raft.Error!bool {
         return true;
     }
@@ -89,8 +97,14 @@ pub const SimTransport = struct {
         self.callback = callback;
     }
 
+    fn setPeerEventCallback(ctx: *anyopaque, callback: ?raft.PeerEventCallback) void {
+        const self: *SimTransport = @ptrCast(@alignCast(ctx));
+        self.peer_event_callback = callback;
+    }
+
     fn pollOne(ctx: *anyopaque) raft.Error!bool {
         const self: *SimTransport = @ptrCast(@alignCast(ctx));
+        if (self.stopped) return false;
         const callback = self.callback orelse return false;
         const envelope = (self.endpoint.receive() catch return error.ConnectionClosed) orelse return false;
         const message = try self.pool.take(envelope.message);
@@ -105,6 +119,7 @@ pub const SimTransport = struct {
         .remove_peer = removePeer,
         .send = send,
         .set_message_callback = setMessageCallback,
+        .set_peer_event_callback = setPeerEventCallback,
         .poll_one = pollOne,
     };
 };

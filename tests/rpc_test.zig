@@ -41,28 +41,33 @@ test "rpc: peer manager add and remove" {
 }
 
 test "rpc: failed transport start releases resources" {
-    const first = raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19101") catch return error.SkipZigTest;
+    const first = try raft.GrpcLiteTransport.create(allocator, "127.0.0.1:0");
     defer first.destroy();
+    first.transport().start() catch return error.SkipZigTest;
+    var address_buffer: [64]u8 = undefined;
+    const address = try std.fmt.bufPrint(&address_buffer, "127.0.0.1:{}", .{try first.port()});
 
-    if (raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19101")) |unexpected| {
-        unexpected.destroy();
-        return error.TestUnexpectedResult;
-    } else |err| {
-        try std.testing.expectEqual(error.BindFailed, err);
-    }
+    const second = try raft.GrpcLiteTransport.create(allocator, address);
+    defer second.destroy();
+    try std.testing.expectError(error.BindFailed, second.transport().start());
 }
 
 test "rpc: grpc transport self-connect round-trip" {
-    // Create a transport listening on localhost.
-    const tp = raft.GrpcLiteTransport.create(allocator, "127.0.0.1:19100") catch |e| {
+    const tp = raft.GrpcLiteTransport.create(allocator, "127.0.0.1:0") catch |e| {
         // If we can't bind (port in use, etc.), skip this test.
         std.log.warn("skipping rpc test: {s}", .{@errorName(e)});
         return error.SkipZigTest;
     };
     defer tp.destroy();
+    tp.transport().start() catch |e| {
+        std.log.warn("skipping rpc test: {s}", .{@errorName(e)});
+        return error.SkipZigTest;
+    };
+    try std.testing.expectError(error.AlreadyStarted, tp.transport().start());
 
-    // Add ourselves as a peer.
-    try std.testing.expect(try tp.transport().addPeer(1, "127.0.0.1:19100"));
+    var address_buffer: [64]u8 = undefined;
+    const address = try std.fmt.bufPrint(&address_buffer, "127.0.0.1:{}", .{try tp.port()});
+    try std.testing.expect(try tp.transport().addPeer(1, address));
 
     // Set callback to record received messages.
     var received: ?raft.Message = null;
@@ -87,6 +92,16 @@ test "rpc: grpc transport self-connect round-trip" {
     try std.testing.expect(received != null);
 
     var message = received.?;
-    defer message.deinit(allocator);
     try std.testing.expectEqual(raft.MessageType.heartbeat, message.msg_type);
+    message.deinit(allocator);
+
+    received = null;
+    try tp.transport().send(&.{.{ .msg_type = .heartbeat, .to = 1, .from = 1, .term = 2 }});
+    tp.transport().stop();
+    try std.testing.expect(!(try tp.transport().pollOne()));
+    try std.testing.expect(received == null);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        tp.transport().send(&.{.{ .msg_type = .heartbeat, .to = 1, .from = 1 }}),
+    );
 }

@@ -125,6 +125,15 @@ const SyncFailingStorage = struct {
 
 const RecordingTransport = struct {
     const EventKind = enum { add, remove };
+    const LifecycleEvent = enum {
+        add_peer,
+        set_message_callback,
+        set_peer_event_callback,
+        start,
+        stop,
+        clear_message_callback,
+        clear_peer_event_callback,
+    };
     const Event = struct {
         kind: EventKind,
         node_id: u64,
@@ -139,17 +148,31 @@ const RecordingTransport = struct {
 
     events: std.ArrayList(Event) = .empty,
     callback: ?raft.MessageCallback = null,
+    peer_event_callback: ?raft.PeerEventCallback = null,
+    inbound_messages: std.ArrayList(raft.Message) = .empty,
+    peer_events: std.ArrayList(raft.PeerEvent) = .empty,
+    lifecycle_events: [64]LifecycleEvent = undefined,
+    lifecycle_events_len: usize = 0,
     allocator: std.mem.Allocator,
     sync_counter: ?*const usize = null,
     fail_add: bool = false,
     fail_remove: bool = false,
+    fail_start: bool = false,
     start_count: usize = 0,
+    stop_count: usize = 0,
+    stop_call_count: usize = 0,
+    delivered_message_count: usize = 0,
+    delivered_peer_event_count: usize = 0,
+    stopped: bool = false,
 
     fn init(alloc: std.mem.Allocator) RecordingTransport {
         return .{ .allocator = alloc };
     }
 
     fn deinit(self: *RecordingTransport) void {
+        for (self.inbound_messages.items) |*message| message.deinit(self.allocator);
+        self.inbound_messages.deinit(self.allocator);
+        self.peer_events.deinit(self.allocator);
         self.events.deinit(self.allocator);
         self.* = undefined;
     }
@@ -160,6 +183,25 @@ const RecordingTransport = struct {
 
     fn cast(ctx: *anyopaque) *RecordingTransport {
         return @ptrCast(@alignCast(ctx));
+    }
+
+    fn recordLifecycle(self: *RecordingTransport, event: LifecycleEvent) void {
+        std.debug.assert(self.lifecycle_events_len < self.lifecycle_events.len);
+        self.lifecycle_events[self.lifecycle_events_len] = event;
+        self.lifecycle_events_len += 1;
+    }
+
+    fn queueMessage(self: *RecordingTransport, message: raft.Message) !void {
+        const cloned = try raft.cloneMessage(self.allocator, message);
+        errdefer {
+            var owned = cloned;
+            owned.deinit(self.allocator);
+        }
+        try self.inbound_messages.append(self.allocator, cloned);
+    }
+
+    fn queuePeerEvent(self: *RecordingTransport, event: raft.PeerEvent) !void {
+        try self.peer_events.append(self.allocator, event);
     }
 
     fn appendEvent(self: *RecordingTransport, kind: EventKind, node_id: u64, address: []const u8) raft.Error!void {
@@ -175,14 +217,26 @@ const RecordingTransport = struct {
     }
 
     fn start(ctx: *anyopaque) raft.Error!void {
-        cast(ctx).start_count += 1;
+        const self = cast(ctx);
+        self.recordLifecycle(.start);
+        self.start_count += 1;
+        if (self.fail_start) return error.ConnectionClosed;
+        self.stopped = false;
     }
 
-    fn stop(_: *anyopaque) void {}
+    fn stop(ctx: *anyopaque) void {
+        const self = cast(ctx);
+        self.stop_call_count += 1;
+        if (self.stopped) return;
+        self.stopped = true;
+        self.stop_count += 1;
+        self.recordLifecycle(.stop);
+    }
 
     fn addPeer(ctx: *anyopaque, node_id: u64, address: []const u8) raft.Error!bool {
         const self = cast(ctx);
         if (self.fail_add) return error.ConnectionClosed;
+        self.recordLifecycle(.add_peer);
         try self.appendEvent(.add, node_id, address);
         return true;
     }
@@ -196,10 +250,32 @@ const RecordingTransport = struct {
     fn send(_: *anyopaque, _: []const raft.Message) raft.Error!void {}
 
     fn setMessageCallback(ctx: *anyopaque, callback: ?raft.MessageCallback) void {
-        cast(ctx).callback = callback;
+        const self = cast(ctx);
+        self.recordLifecycle(if (callback == null) .clear_message_callback else .set_message_callback);
+        self.callback = callback;
     }
 
-    fn pollOne(_: *anyopaque) raft.Error!bool {
+    fn setPeerEventCallback(ctx: *anyopaque, callback: ?raft.PeerEventCallback) void {
+        const self = cast(ctx);
+        self.recordLifecycle(if (callback == null) .clear_peer_event_callback else .set_peer_event_callback);
+        self.peer_event_callback = callback;
+    }
+
+    fn pollOne(ctx: *anyopaque) raft.Error!bool {
+        const self = cast(ctx);
+        if (self.stopped) return false;
+        if (self.inbound_messages.items.len > 0) {
+            const callback = self.callback orelse return false;
+            try callback.invoke(self.inbound_messages.orderedRemove(0));
+            self.delivered_message_count += 1;
+            return true;
+        }
+        if (self.peer_events.items.len > 0) {
+            const callback = self.peer_event_callback orelse return false;
+            try callback.invoke(self.peer_events.orderedRemove(0));
+            self.delivered_peer_event_count += 1;
+            return true;
+        }
         return false;
     }
 
@@ -214,6 +290,7 @@ const RecordingTransport = struct {
         .remove_peer = removePeer,
         .send = send,
         .set_message_callback = setMessageCallback,
+        .set_peer_event_callback = setPeerEventCallback,
         .poll_one = pollOne,
     };
 };
@@ -690,6 +767,194 @@ test "raftor: stop terminates run loop" {
     // the running flag to false.
     r.stop();
     try std.testing.expect(!r.isRunning());
+}
+
+test "raftor: transport lifecycle follows membership hydration" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{ 1, 2 }) }, &peers, &.{}, 1, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    r.stop();
+    r.stop();
+    try std.testing.expectEqual(@as(usize, 1), transport.stop_call_count);
+    try std.testing.expect(transport.callback != null);
+    try std.testing.expect(transport.peer_event_callback != null);
+    r.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1), transport.start_count);
+    try std.testing.expectEqual(@as(usize, 1), transport.stop_count);
+    try std.testing.expect(transport.callback == null);
+    try std.testing.expect(transport.peer_event_callback == null);
+    try std.testing.expectEqualSlices(
+        RecordingTransport.LifecycleEvent,
+        &.{
+            .add_peer,
+            .set_message_callback,
+            .set_peer_event_callback,
+            .start,
+            .stop,
+            .clear_message_callback,
+            .clear_peer_event_callback,
+        },
+        transport.lifecycle_events[0..transport.lifecycle_events_len],
+    );
+}
+
+test "raftor: transport start failure clears callbacks and unwinds" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{ 1, 2 }) }, &peers, &.{}, 1, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    transport.fail_start = true;
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    try std.testing.expectError(error.ConnectionClosed, Raftor.createWithDependencies(
+        allocator,
+        makeConfig(1),
+        .restart,
+        .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = sm.stateMachine(),
+        },
+    ));
+    try std.testing.expect(transport.callback == null);
+    try std.testing.expect(transport.peer_event_callback == null);
+    try std.testing.expectEqual(@as(usize, 1), transport.stop_call_count);
+    try std.testing.expectEqualSlices(
+        RecordingTransport.LifecycleEvent,
+        &.{
+            .add_peer,
+            .set_message_callback,
+            .set_peer_event_callback,
+            .start,
+            .clear_message_callback,
+            .clear_peer_event_callback,
+            .stop,
+        },
+        transport.lifecycle_events[0..transport.lifecycle_events_len],
+    );
+}
+
+test "raftor: stopped transport does not deliver queued callbacks" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+
+    try transport.queueMessage(.{ .msg_type = .heartbeat, .from = 2, .to = 1 });
+    try transport.queuePeerEvent(.{ .peer_id = 2, .kind = .@"unreachable" });
+    r.stop();
+    try std.testing.expect(!(try transport.transport().pollOne()));
+    try std.testing.expectEqual(@as(usize, 0), transport.delivered_message_count);
+    try std.testing.expectEqual(@as(usize, 0), transport.delivered_peer_event_count);
+}
+
+test "raftor: transport poll budget drains bursts" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.transport_poll_budget = 3;
+    const r = try Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    for (0..5) |_| try transport.queueMessage(.{ .msg_type = .hup });
+
+    _ = try r.tick();
+    try std.testing.expectEqual(@as(usize, 3), transport.delivered_message_count);
+    try std.testing.expectEqual(@as(usize, 2), transport.inbound_messages.items.len);
+    _ = try r.tick();
+    try std.testing.expectEqual(@as(usize, 5), transport.delivered_message_count);
+    try std.testing.expectEqual(@as(usize, 0), transport.inbound_messages.items.len);
+}
+
+test "raftor: zero transport poll budget is invalid" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.transport_poll_budget = 0;
+    try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    }));
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+}
+
+test "raftor: peer events map to raft reports" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+
+    const raft_state = r.getRawNode().raftPtr();
+    raft_state.becomeCandidate();
+    try raft_state.becomeLeader();
+    while (try r.processReadyStep()) {}
+    const progress = raft_state.progress_tracker.getPtr(2).?;
+
+    progress.becomeReplicate();
+    try transport.queuePeerEvent(.{ .peer_id = 2, .kind = .@"unreachable" });
+    _ = try r.tick();
+    try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+
+    progress.becomeReplicate();
+    try transport.queuePeerEvent(.{ .peer_id = 2, .kind = .identity_rejected });
+    _ = try r.tick();
+    try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+
+    progress.becomeSnapshot(10);
+    try transport.queuePeerEvent(.{ .peer_id = 2, .kind = .snapshot_failure });
+    _ = try r.tick();
+    try std.testing.expectEqual(raft.ProgressState.probe, progress.state);
+    try std.testing.expect(progress.paused);
 }
 
 test "raftor: stop terminates queued requests exactly once" {
@@ -1424,7 +1689,13 @@ test "raftor: advanced commit survives restart" {
 
     var config = makeConfig(1);
     config.raft.applied = sm.last_applied_index;
-    const restarted = try Raftor.createWithDependencies(allocator, config, .restart, dependencies);
+    var restart_transport = raft.NoopTransport.init(allocator);
+    defer restart_transport.deinit();
+    const restarted = try Raftor.createWithDependencies(allocator, config, .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = restart_transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
     defer restarted.destroy();
     try std.testing.expectEqual(sm.last_applied_index, restarted.getStatus().applied_index);
 }
@@ -1932,7 +2203,7 @@ test "raftor: restart hydrates persisted nonlocal transport peers" {
     try std.testing.expectEqual(RecordingTransport.EventKind.add, transport.events.items[0].kind);
     try std.testing.expectEqual(@as(u64, 2), transport.events.items[0].node_id);
     try std.testing.expectEqualStrings("node-2", transport.events.items[0].addressSlice());
-    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+    try std.testing.expectEqual(@as(usize, 1), transport.start_count);
     try std.testing.expectEqual(@as(u64, 7), r.getMembershipIndex());
 }
 

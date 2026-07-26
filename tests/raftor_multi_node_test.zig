@@ -88,10 +88,9 @@ fn createClusterWithCheckQuorum(check_quorum: bool) !Cluster {
     return .{ .net = net, .raftors = raftors, .sms = sms };
 }
 
-/// Drive one event-loop cycle: tick all raftors, then poll the network.
+/// Drive one event-loop cycle for every Raftor.
 fn tickCluster(c: *Cluster) !void {
     for (c.raftors) |r| _ = try r.tick();
-    _ = try c.net.pollAll();
 }
 
 fn countLeaders(c: *Cluster) usize {
@@ -213,7 +212,7 @@ test "raftor multi-node: leadership loss terminates tracked requests" {
     try std.testing.expectEqual(@as(usize, 0), proposal.calls);
     try std.testing.expectEqual(@as(usize, 0), read.calls);
 
-    for (0..25) |_| _ = try old_leader.tick();
+    for (0..50) |_| _ = try old_leader.tick();
     try std.testing.expect(!old_leader.isLeader());
     try std.testing.expectEqual(@as(usize, 1), proposal.calls);
     try std.testing.expectEqual(error.ProposalDropped, proposal.err.?);

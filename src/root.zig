@@ -200,6 +200,9 @@ pub const StateMachine = state_machine_mod.StateMachine;
 pub const MockStateMachine = state_machine_mod.MockStateMachine;
 
 pub const MessageCallback = transport_mod.MessageCallback;
+pub const PeerEventKind = transport_mod.PeerEventKind;
+pub const PeerEvent = transport_mod.PeerEvent;
+pub const PeerEventCallback = transport_mod.PeerEventCallback;
 pub const Transport = transport_mod.Transport;
 pub const NoopTransport = transport_mod.NoopTransport;
 

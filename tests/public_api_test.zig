@@ -129,6 +129,9 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.StateMachine;
         _ = raft.MockStateMachine;
         _ = raft.MessageCallback;
+        _ = raft.PeerEventKind;
+        _ = raft.PeerEvent;
+        _ = raft.PeerEventCallback;
         _ = raft.Transport;
         _ = raft.NoopTransport;
         _ = raft.ProposalResult;

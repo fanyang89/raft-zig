@@ -57,6 +57,14 @@ pub const InboundMailbox = struct {
         return message;
     }
 
+    pub fn clear(self: *InboundMailbox) void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        for (self.inbox.items[self.head..]) |*message| message.deinit(self.allocator);
+        self.inbox.clearRetainingCapacity();
+        self.head = 0;
+    }
+
     /// Drain all pending messages. Returns an owned slice; caller must call
     /// `deinit` on each message and `allocator.free` the slice.
     pub fn drain(self: *InboundMailbox) ![]Message {

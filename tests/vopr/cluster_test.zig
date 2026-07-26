@@ -263,7 +263,7 @@ fn chaosScenario(case: *Case) !void {
                 if (node.getReadyPhase() != null) {
                     _ = try node.processReadyStep();
                 } else {
-                    _ = try case.app.nodes[node_index].transport.transport().pollOne();
+                    _ = try node.tick();
                 }
             },
             3 => if (case.app.nodes[node_index].raftor) |node| {

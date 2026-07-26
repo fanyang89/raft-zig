@@ -39,6 +39,8 @@ pub const RaftorConfig = struct {
     /// Interval between ticks in milliseconds. The event loop sleeps this
     /// long when idle.
     tick_interval_ms: u64 = 100,
+    /// Maximum number of transport messages and events processed per tick.
+    transport_poll_budget: usize = 256,
     /// Number of applied entries above which a snapshot is triggered.
     /// 0 = disabled.
     snapshot_entries_threshold: u64 = 10_000,
@@ -64,6 +66,7 @@ pub const RaftorConfig = struct {
 test "raftor config defaults" {
     const c = RaftorConfig{};
     try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
+    try std.testing.expectEqual(@as(usize, 256), c.transport_poll_budget);
     try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_entries_threshold);
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
     try std.testing.expectEqual(@as(?fs_mod.Fs, null), c.file_system);

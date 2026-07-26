@@ -26,15 +26,26 @@ pub const PeerManager = struct {
     }
 
     pub fn deinit(self: *PeerManager) void {
+        self.closeAll();
         var it = self.peers.valueIterator();
         while (it.next()) |info| {
-            if (info.channel) |ch| {
-                ch.deinit();
-                self.allocator.destroy(ch);
-            }
             self.allocator.free(info.addr);
         }
         self.peers.deinit();
+    }
+
+    pub fn closeAll(self: *PeerManager) void {
+        var it = self.peers.valueIterator();
+        while (it.next()) |info| {
+            if (info.channel) |channel| {
+                channel.shutdown();
+                channel.wait();
+                channel.deinit();
+                self.allocator.destroy(channel);
+                info.channel = null;
+                info.connected = false;
+            }
+        }
     }
 
     pub fn addPeer(self: *PeerManager, id: u64, addr: []const u8) !bool {

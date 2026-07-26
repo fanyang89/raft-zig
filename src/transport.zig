@@ -1,8 +1,8 @@
 //! Pluggable transport interface for Raft message passing.
 //!
-//! The transport routes outbound messages by their `to` field and invokes a
-//! callback for inbound messages. `NoopTransport` is a process-local implementation that collects
-//! sent messages for test inspection.
+//! The transport routes outbound messages by their `to` field. Implementations
+//! queue inbound messages and peer events from foreign threads; callbacks are
+//! invoked only by `pollOne` on the owning event-loop thread.
 
 const std = @import("std");
 
@@ -13,14 +13,34 @@ const storage_mod = @import("storage.zig");
 const Error = error_model.Error;
 const Message = types.Message;
 
+pub const PeerEventKind = enum {
+    @"unreachable",
+    snapshot_failure,
+    identity_rejected,
+};
+
+pub const PeerEvent = struct {
+    peer_id: u64,
+    kind: PeerEventKind,
+};
+
 /// Callback invoked for each inbound message. Ownership transfers when the
-/// callback is invoked, including when it returns an error.
+/// callback is invoked by `pollOne`, including when it returns an error.
 pub const MessageCallback = struct {
     ctx: *anyopaque,
     function: *const fn (ctx: *anyopaque, msg: Message) Error!void,
 
     pub fn invoke(self: MessageCallback, msg: Message) Error!void {
         return self.function(self.ctx, msg);
+    }
+};
+
+pub const PeerEventCallback = struct {
+    ctx: *anyopaque,
+    function: *const fn (ctx: *anyopaque, event: PeerEvent) Error!void,
+
+    pub fn invoke(self: PeerEventCallback, event: PeerEvent) Error!void {
+        return self.function(self.ctx, event);
     }
 };
 
@@ -36,6 +56,7 @@ pub const Transport = struct {
         remove_peer: *const fn (ctx: *anyopaque, id: u64) Error!void,
         send: *const fn (ctx: *anyopaque, messages: []const Message) Error!void,
         set_message_callback: *const fn (ctx: *anyopaque, cb: ?MessageCallback) void,
+        set_peer_event_callback: *const fn (ctx: *anyopaque, cb: ?PeerEventCallback) void,
         poll_one: *const fn (ctx: *anyopaque) Error!bool,
     };
 
@@ -57,6 +78,9 @@ pub const Transport = struct {
     pub fn setMessageCallback(self: Transport, cb: ?MessageCallback) void {
         self.vtable.set_message_callback(self.ctx, cb);
     }
+    pub fn setPeerEventCallback(self: Transport, cb: ?PeerEventCallback) void {
+        self.vtable.set_peer_event_callback(self.ctx, cb);
+    }
     pub fn pollOne(self: Transport) Error!bool {
         return self.vtable.poll_one(self.ctx);
     }
@@ -67,16 +91,28 @@ pub const Transport = struct {
 /// Inbound messages can be injected via `deliver`.
 pub const NoopTransport = struct {
     sent: std.ArrayList(Message),
+    inbox: std.ArrayList(Message),
+    peer_events: std.ArrayList(PeerEvent),
     callback: ?MessageCallback = null,
+    peer_event_callback: ?PeerEventCallback = null,
+    stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) NoopTransport {
-        return .{ .sent = .empty, .allocator = allocator };
+        return .{
+            .sent = .empty,
+            .inbox = .empty,
+            .peer_events = .empty,
+            .allocator = allocator,
+        };
     }
 
     pub fn deinit(self: *NoopTransport) void {
         for (self.sent.items) |*m| m.deinit(self.allocator);
         self.sent.deinit(self.allocator);
+        for (self.inbox.items) |*m| m.deinit(self.allocator);
+        self.inbox.deinit(self.allocator);
+        self.peer_events.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -88,16 +124,32 @@ pub const NoopTransport = struct {
 
     /// Clone and inject a borrowed message as if it arrived from the network.
     pub fn deliver(self: *NoopTransport, msg: Message) Error!bool {
-        const cb = self.callback orelse return false;
+        if (self.stopped.load(.acquire) or self.callback == null) return false;
         const cloned = try storage_mod.cloneMessage(self.allocator, msg);
-        try cb.invoke(cloned);
+        errdefer {
+            var owned = cloned;
+            owned.deinit(self.allocator);
+        }
+        try self.inbox.append(self.allocator, cloned);
+        return true;
+    }
+
+    pub fn deliverPeerEvent(self: *NoopTransport, event: PeerEvent) Error!bool {
+        if (self.stopped.load(.acquire) or self.peer_event_callback == null) return false;
+        try self.peer_events.append(self.allocator, event);
         return true;
     }
 
     // ---- vtable impl ----
 
-    fn startImpl(_: *anyopaque) Error!void {}
-    fn stopImpl(_: *anyopaque) void {}
+    fn startImpl(ctx: *anyopaque) Error!void {
+        const self: *NoopTransport = @ptrCast(@alignCast(ctx));
+        if (self.stopped.load(.acquire)) return error.AlreadyStarted;
+    }
+    fn stopImpl(ctx: *anyopaque) void {
+        const self: *NoopTransport = @ptrCast(@alignCast(ctx));
+        self.stopped.store(true, .release);
+    }
     fn addPeerImpl(_: *anyopaque, _: u64, _: []const u8) Error!bool {
         return true;
     }
@@ -122,7 +174,24 @@ pub const NoopTransport = struct {
         self.callback = cb;
     }
 
-    fn pollOneImpl(_: *anyopaque) Error!bool {
+    fn setPeerEventCallbackImpl(ctx: *anyopaque, cb: ?PeerEventCallback) void {
+        const self: *NoopTransport = @ptrCast(@alignCast(ctx));
+        self.peer_event_callback = cb;
+    }
+
+    fn pollOneImpl(ctx: *anyopaque) Error!bool {
+        const self: *NoopTransport = @ptrCast(@alignCast(ctx));
+        if (self.stopped.load(.acquire)) return false;
+        if (self.inbox.items.len > 0) {
+            const cb = self.callback orelse return false;
+            try cb.invoke(self.inbox.orderedRemove(0));
+            return true;
+        }
+        if (self.peer_events.items.len > 0) {
+            const cb = self.peer_event_callback orelse return false;
+            try cb.invoke(self.peer_events.orderedRemove(0));
+            return true;
+        }
         return false;
     }
 
@@ -133,6 +202,7 @@ pub const NoopTransport = struct {
         .remove_peer = removePeerImpl,
         .send = sendImpl,
         .set_message_callback = setMessageCallbackImpl,
+        .set_peer_event_callback = setPeerEventCallbackImpl,
         .poll_one = pollOneImpl,
     };
 
@@ -199,6 +269,7 @@ test "noop transport delivers to callback" {
     var msg = Message{ .msg_type = .heartbeat, .to = 1 };
     defer msg.deinit(allocator);
     try std.testing.expect(try t.deliver(msg));
+    try std.testing.expect(try tp.pollOne());
 
     try std.testing.expect(received != null);
     try std.testing.expectEqual(@import("core/types.zig").MessageType.heartbeat, received.?.msg_type);
