@@ -264,7 +264,10 @@ test "proposal queue supports concurrent producers and consumption" {
         fn run(self: *@This()) void {
             for (0..items_per_producer) |_| {
                 const data = allocator.dupe(u8, "data") catch @panic("OOM");
-                const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
+                const ctx = allocator.dupe(u8, "ctx") catch {
+                    allocator.free(data);
+                    @panic("OOM");
+                };
                 self.queue.push(data, ctx, .{ .ctx = self.queue, .function = Cb.callback }) catch unreachable;
             }
             _ = self.done.fetchAdd(1, .release);
@@ -296,6 +299,66 @@ test "proposal queue supports concurrent producers and consumption" {
 
     try std.testing.expectEqual(producer_count * items_per_producer, consumed);
     try std.testing.expect(queue.empty());
+}
+
+test "proposal queue limits concurrent producers" {
+    const allocator = std.heap.smp_allocator;
+    const producer_count = 4;
+    const items_per_producer = 64;
+    const max_items = 64;
+    const item_bytes = 7;
+
+    var queue = ProposalQueue.init(allocator, .{ .max_items = max_items, .max_bytes = max_items * item_bytes });
+    defer queue.deinit();
+    var accepted = std.atomic.Value(usize).init(0);
+    var rejected = std.atomic.Value(usize).init(0);
+
+    const Cb = struct {
+        fn callback(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+    };
+    const Producer = struct {
+        queue: *ProposalQueue,
+        accepted: *std.atomic.Value(usize),
+        rejected: *std.atomic.Value(usize),
+
+        fn run(self: *@This()) void {
+            for (0..items_per_producer) |_| {
+                const data = allocator.dupe(u8, "data") catch @panic("OOM");
+                const ctx = allocator.dupe(u8, "ctx") catch @panic("OOM");
+                if (self.queue.push(data, ctx, .{ .ctx = self.queue, .function = Cb.callback })) |_| {
+                    _ = self.accepted.fetchAdd(1, .monotonic);
+                } else |err| switch (err) {
+                    error.ProposalBackpressure => {
+                        allocator.free(data);
+                        allocator.free(ctx);
+                        _ = self.rejected.fetchAdd(1, .monotonic);
+                    },
+                    error.OutOfMemory => @panic("OOM"),
+                }
+            }
+        }
+    };
+
+    var producers: [producer_count]Producer = undefined;
+    var threads: [producer_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+    for (&producers, &threads) |*producer, *thread| {
+        producer.* = .{ .queue = &queue, .accepted = &accepted, .rejected = &rejected };
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        started += 1;
+    }
+    for (&threads) |*thread| thread.join();
+    started = 0;
+
+    try std.testing.expectEqual(ProposalQueueStats{ .count = max_items, .bytes = max_items * item_bytes }, queue.stats());
+    try std.testing.expectEqual(max_items, accepted.load(.monotonic));
+    try std.testing.expectEqual(producer_count * items_per_producer - max_items, rejected.load(.monotonic));
+    while (queue.tryPop()) |item| {
+        allocator.free(item.data);
+        allocator.free(item.ctx);
+    }
+    try std.testing.expectEqual(ProposalQueueStats{ .count = 0, .bytes = 0 }, queue.stats());
 }
 
 test "read index queue supports concurrent producers and consumption" {
