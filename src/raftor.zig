@@ -677,7 +677,13 @@ pub const Raftor = struct {
         self.lifecycle_mutex.unlock();
         defer self.running.store(false, .release);
         while (self.running.load(.acquire)) {
-            _ = try self.tick();
+            _ = self.tick() catch |err| {
+                spinLock(&self.lifecycle_mutex);
+                const clean_shutdown = err == error.ShuttingDown and self.terminal_error == null and self.lifecycle != .active;
+                self.lifecycle_mutex.unlock();
+                if (clean_shutdown) return;
+                return err;
+            };
             // Sleep for the configured tick interval to avoid busy-looping.
             sleepNanoseconds(self.config.tick_interval_ms *| std.time.ns_per_ms);
         }
