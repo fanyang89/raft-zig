@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Build raft-zig with tcmalloc and gperftools"
+#MISE depends=["prepare-gperftools"]
+set -euo pipefail
+
+exec zig build -Dgperftools=true "$@"

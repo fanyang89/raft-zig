@@ -80,6 +80,22 @@ jobs:
       - name: Run sanitizer tests
         run: mise run ${{ matrix.task }}
 
+  gperftools:
+    name: Gperftools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Run gperftools tests
+        run: mise run test-gperftools
+
   fuzz:
     name: Fuzz (${{ matrix.target }})
     strategy:
@@ -164,6 +180,7 @@ jobs:
       - workflow-lint
       - core-test
       - sanitizer
+      - gperftools
       - fuzz
       - wal-durability
     runs-on: ubuntu-24.04
@@ -174,11 +191,13 @@ jobs:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           CORE_TEST_RESULT: ${{ needs.core-test.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
+          GPERFTOOLS_RESULT: ${{ needs.gperftools.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
           WAL_DURABILITY_RESULT: ${{ needs.wal-durability.result }}
         run: |
           test "$WORKFLOW_LINT_RESULT" = success
           test "$CORE_TEST_RESULT" = success
           test "$SANITIZER_RESULT" = success
+          test "$GPERFTOOLS_RESULT" = success
           test "$FUZZ_RESULT" = success
           test "$WAL_DURABILITY_RESULT" = success

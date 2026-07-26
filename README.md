@@ -43,6 +43,9 @@ Useful tasks:
 mise run test-release-safe
 mise run test-tsan
 mise run test-ubsan
+mise run prepare-gperftools
+mise run build-gperftools
+mise run test-gperftools
 mise run fuzz-smoke
 mise run fuzz-codec
 mise run fuzz-wal
@@ -65,6 +68,8 @@ zig fmt build.zig src examples tests
 ```
 
 Fast Raft invariant checks are enabled by default in Debug and ReleaseSafe builds. Override them with `-Dinvariant-checks=false` or `-Dinvariant-checks=true`.
+
+On Linux, `-Dgperftools=true` replaces the process C allocator with tcmalloc and exposes CPU and heap profiling through the `raft_zig_gperftools` module. This option is incompatible with ThreadSanitizer.
 
 ## Examples
 

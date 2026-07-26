@@ -11,6 +11,17 @@ pub fn build(b: *std.Build) void {
         else
             null,
     };
+    const enable_gperftools = b.option(
+        bool,
+        "gperftools",
+        "Use tcmalloc and expose CPU and heap profiling APIs",
+    ) orelse false;
+    if (enable_gperftools and target.result.os.tag != .linux) {
+        @panic("gperftools support is currently limited to Linux");
+    }
+    if (enable_gperftools and sanitizers.thread == true) {
+        @panic("gperftools/tcmalloc is incompatible with ThreadSanitizer");
+    }
 
     const raft_zig_options = b.addOptions();
     raft_zig_options.addOption([]const u8, "version", manifest.version);
@@ -36,9 +47,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .@"sanitize-thread" = sanitizers.thread orelse false,
         .@"sanitize-c" = sanitizers.c == .full,
+        .gperftools = enable_gperftools,
     });
     const grpc_lite = grpc_dep.module("grpc_lite");
     raft_zig.addImport("grpc_lite", grpc_lite);
+
+    const raft_zig_gperftools = if (enable_gperftools)
+        b.addModule("raft_zig_gperftools", .{
+            .root_source_file = b.path("src/gperftools.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "raft_zig", .module = raft_zig },
+                .{ .name = "grpc_lite_gperftools", .module = grpc_dep.module("grpc_lite_gperftools") },
+            },
+        })
+    else
+        null;
+    if (enable_gperftools) {
+        raft_zig.omit_frame_pointer = false;
+        applySanitizers(raft_zig_gperftools.?, sanitizers);
+        raft_zig_gperftools.?.omit_frame_pointer = false;
+    }
 
     const library = b.addLibrary(.{
         .name = "raft-zig",
@@ -53,6 +83,21 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    if (raft_zig_gperftools) |gperftools| {
+        const gperftools_test_module = b.createModule(.{
+            .root_source_file = b.path("tests/gperftools_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "raft_zig_gperftools", .module = gperftools }},
+        });
+        applySanitizers(gperftools_test_module, sanitizers);
+        gperftools_test_module.omit_frame_pointer = false;
+        const gperftools_tests = b.addTest(.{
+            .name = "gperftools-integration",
+            .root_module = gperftools_test_module,
+        });
+        test_step.dependOn(&b.addRunArtifact(gperftools_tests).step);
+    }
     const rpc_test_step = b.step("test-rpc", "Run grpc transport tests");
     const grpc_raftor_test_step = b.step("test-grpc-raftor", "Run grpc Raftor integration tests");
     const test_specs = [_]TestSpec{
