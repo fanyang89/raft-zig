@@ -4,8 +4,16 @@ set -euo pipefail
 
 url=https://codeload.github.com/fanyang89/gperftools/tar.gz/1a01cd2cf8f7000845d343fa8e0bbac70378858b
 expected_hash=N-V-__8AAGKVkABvsDVHhSU8seHKvtJ8Q23b9Y0OMiFVWt-y
+cache_root=${ZIG_GLOBAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig}
+package_cache="$cache_root/p"
+project_package="$MISE_PROJECT_ROOT/zig-pkg/$expected_hash"
+archive="$package_cache/$expected_hash.tar.gz"
+mkdir -p "$package_cache" "$cache_root/tmp" "$MISE_PROJECT_ROOT/zig-pkg"
 
-fetch_output=$(zigfetch --no-dep "$url" 2>&1)
+if ! fetch_output=$(zigfetch --no-dep "$url" 2>&1); then
+    printf '%s\n' "$fetch_output" >&2
+    exit 1
+fi
 printf '%s\n' "$fetch_output"
 actual_hash=${fetch_output##*$'\n'}
 if [[ "$actual_hash" != "$expected_hash" ]]; then
@@ -13,12 +21,6 @@ if [[ "$actual_hash" != "$expected_hash" ]]; then
         "$expected_hash" "$actual_hash" >&2
     exit 1
 fi
-
-cache_root=${ZIG_GLOBAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig}
-package_cache="$cache_root/p"
-project_package="$MISE_PROJECT_ROOT/zig-pkg/$expected_hash"
-archive="$package_cache/$expected_hash.tar.gz"
-mkdir -p "$package_cache" "$MISE_PROJECT_ROOT/zig-pkg"
 
 if [[ ! -f "$archive" ]]; then
     temporary="$archive.tmp.$$"
