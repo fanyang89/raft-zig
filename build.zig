@@ -408,12 +408,28 @@ fn addCrc32c(
             "src/crc32c.cc",
             "src/crc32c_portable.cc",
         },
-        .flags = &.{ "-fno-exceptions", "-fno-rtti" },
+        .flags = &.{
+            "-fno-exceptions",
+            "-fno-rtti",
+            "-fno-sanitize-coverage=inline-8bit-counters,pc-table,trace-cmp",
+        },
     });
     if (is_x86) {
         module.addCSourceFile(.{
             .file = dependency.path("src/crc32c_sse42.cc"),
-            .flags = &.{ "-fno-exceptions", "-fno-rtti", "-msse4.2" },
+            .flags = &.{
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-fno-sanitize-coverage=inline-8bit-counters,pc-table,trace-cmp",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+sse4.2",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+crc32",
+            },
         });
     }
     if (is_aarch64) {
@@ -422,6 +438,7 @@ fn addCrc32c(
             .flags = &.{
                 "-fno-exceptions",
                 "-fno-rtti",
+                "-fno-sanitize-coverage=inline-8bit-counters,pc-table,trace-cmp",
                 "-Xclang",
                 "-target-feature",
                 "-Xclang",
