@@ -502,10 +502,28 @@ pub const WAL = struct {
             }
             if (metadata.first_segment_id > 0 and self.segment_manager.get(metadata.first_segment_id) == null) return error.MetadataCorrupt;
             if (metadata.snapshot_index > 0) {
-                const snapshot = self.snapshot_store.load(metadata.snapshot_index, metadata.snapshot_term) catch |err| return switch (err) {
+                var snapshot = self.snapshot_store.load(metadata.snapshot_index, metadata.snapshot_term) catch |err| return switch (err) {
                     error.FileNotFound => error.MetadataCorrupt,
                     else => err,
                 };
+                errdefer snapshot.deinit(self.allocator);
+                if (metadata.version >= 4 and self.cluster_membership != null) {
+                    if (snapshot.membership.len == 0) return error.MissingClusterMembership;
+                    const decoded_membership = decodeSnapshotMembership(self.allocator, snapshot) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.InvalidClusterMembership,
+                    };
+                    var snapshot_membership = decoded_membership orelse return error.MissingClusterMembership;
+                    defer snapshot_membership.deinit(self.allocator);
+                    if (metadata.membership_index < snapshot.metadata.index) return error.InvalidClusterMembership;
+                    if (metadata.membership_index == snapshot.metadata.index) {
+                        if (!snapshot_membership.eql(self.cluster_membership.?)) return error.InvalidClusterMembership;
+                    } else if (!membershipDescendsFrom(self.cluster_membership.?, snapshot_membership)) {
+                        return error.InvalidClusterMembership;
+                    }
+                } else if (metadata.version >= 4 and snapshot.membership.len != 0) {
+                    return error.InvalidClusterMembership;
+                }
                 self.snapshot = snapshot;
             }
         }
@@ -734,6 +752,9 @@ pub const WAL = struct {
         const metadata = snapshot.metadata;
         if (metadata.index <= self.snapshot_metadata.index) return error.SnapshotOutOfDate;
         const first_index = std.math.add(u64, metadata.index, 1) catch return error.Fatal;
+        var candidate_membership = try decodeSnapshotMembership(self.allocator, snapshot);
+        errdefer if (candidate_membership) |*membership| membership.deinit(self.allocator);
+        if (candidate_membership == null and self.cluster_membership != null) return error.MissingClusterMembership;
         var cloned_snapshot = try cloneSnapshot(self.allocator, snapshot);
         errdefer cloned_snapshot.deinit(self.allocator);
         var cloned_conf_state = try cloneConfState(self.allocator, metadata.conf_state);
@@ -750,8 +771,8 @@ pub const WAL = struct {
             reset_segment.segment_id,
             hard_state,
             metadata.conf_state,
-            self.cluster_membership,
-            self.membership_index,
+            candidate_membership,
+            if (candidate_membership != null) metadata.index else 0,
             metadata,
             self.incarnation,
         );
@@ -762,6 +783,9 @@ pub const WAL = struct {
         self.snapshot_metadata = .{ .index = metadata.index, .term = metadata.term };
         self.conf_state.deinit(self.allocator);
         self.conf_state = cloned_conf_state;
+        if (self.cluster_membership) |*membership| membership.deinit(self.allocator);
+        self.cluster_membership = candidate_membership;
+        self.membership_index = if (candidate_membership != null) metadata.index else 0;
         self.hard_state = hard_state;
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.clearRetainingCapacity();
@@ -784,6 +808,9 @@ pub const WAL = struct {
         if (metadata.index > self.lastIndex()) return error.Fatal;
         if (try self.term(metadata.index) != metadata.term) return error.Fatal;
         const first_index = std.math.add(u64, metadata.index, 1) catch return error.Fatal;
+        var candidate_membership = try decodeSnapshotMembership(self.allocator, snapshot);
+        errdefer if (candidate_membership) |*membership| membership.deinit(self.allocator);
+        if (candidate_membership == null and self.cluster_membership != null) return error.MissingClusterMembership;
         var cloned_snapshot = try cloneSnapshot(self.allocator, snapshot);
         errdefer cloned_snapshot.deinit(self.allocator);
         var cloned_conf_state = try cloneConfState(self.allocator, metadata.conf_state);
@@ -799,8 +826,8 @@ pub const WAL = struct {
             try self.firstSegmentIdFor(first_index),
             hard_state,
             metadata.conf_state,
-            self.cluster_membership,
-            self.membership_index,
+            candidate_membership,
+            if (candidate_membership != null) metadata.index else 0,
             metadata,
             self.incarnation,
         );
@@ -811,6 +838,9 @@ pub const WAL = struct {
         self.snapshot_metadata = .{ .index = metadata.index, .term = metadata.term };
         self.conf_state.deinit(self.allocator);
         self.conf_state = cloned_conf_state;
+        if (self.cluster_membership) |*membership| membership.deinit(self.allocator);
+        self.cluster_membership = candidate_membership;
+        self.membership_index = if (candidate_membership != null) metadata.index else 0;
         self.hard_state = hard_state;
         self.compactMemory(first_index);
         self.metadata_dirty = false;
@@ -1013,6 +1043,25 @@ pub const WAL = struct {
         try self.segment_manager.syncAll();
     }
 };
+
+fn decodeSnapshotMembership(allocator: std.mem.Allocator, snapshot: Snapshot) !?ClusterMembership {
+    if (snapshot.membership.len == 0) return null;
+    var membership = cluster_membership_mod.decode(allocator, snapshot.membership) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidClusterMembership,
+    };
+    errdefer membership.deinit(allocator);
+    membership.validate(snapshot.metadata.conf_state) catch return error.InvalidClusterMembership;
+    return membership;
+}
+
+fn membershipDescendsFrom(current: ClusterMembership, snapshot: ClusterMembership) bool {
+    if (!std.mem.eql(u8, &current.cluster_id, &snapshot.cluster_id)) return false;
+    for (snapshot.retired_node_ids) |retired_id| {
+        if (!std.mem.containsAtLeastScalar(u64, current.retired_node_ids, 1, retired_id)) return false;
+    }
+    return true;
+}
 
 fn entryEql(a: Entry, b: Entry) bool {
     return a.index == b.index and
@@ -1328,6 +1377,16 @@ fn createEmptyFile(path: [:0]const u8) !void {
     const rc = linux.open(path.ptr, flags, 0o644);
     if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
     _ = linux.close(@intCast(rc));
+}
+
+fn testMembershipBytes(allocator: std.mem.Allocator, cluster_marker: u8, address: []u8) ![]u8 {
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = address },
+    };
+    return (ClusterMembership{
+        .cluster_id = .{cluster_marker} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(allocator);
 }
 
 test "wal: empty storage exposes the initial term" {
@@ -1740,6 +1799,255 @@ test "wal: incoming snapshot replaces the previous log generation" {
     }
 }
 
+test "wal: incoming snapshot membership survives reopen" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    const membership = try testMembershipBytes(allocator, 1, @constCast("node-1"));
+    defer allocator.free(membership);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        try ws.asWritableStorage().applySnapshot(allocator, .{
+            .membership = membership,
+            .data = @constCast("remote-state"),
+            .metadata = .{
+                .index = 3,
+                .term = 2,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+    }
+
+    var ws = try WALStorage.open(allocator, path);
+    defer ws.deinit();
+    var state = try ws.asWritableStorage().initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), state.membership_index);
+    try std.testing.expectEqualStrings("node-1", state.cluster_membership.?.peers[0].address);
+    var snapshot = (try ws.asWritableStorage().localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, membership, snapshot.membership);
+}
+
+test "wal: local snapshot membership survives reopen" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    const membership = try testMembershipBytes(allocator, 2, @constCast("node-1"));
+    defer allocator.free(membership);
+
+    {
+        var ws = try WALStorage.open(allocator, path);
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try iface.append(allocator, &.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        var peers = [_]cluster_membership_mod.PeerEndpoint{
+            .{ .node_id = 1, .address = @constCast("node-1") },
+        };
+        try iface.setMembershipState(
+            allocator,
+            .{ .voters = @constCast(&[_]u64{1}) },
+            .{ .cluster_id = .{2} ++ .{0} ** 15, .peers = &peers },
+            1,
+        );
+        try iface.applyLocalSnapshot(allocator, .{
+            .membership = membership,
+            .data = @constCast("local-state"),
+            .metadata = .{
+                .index = 2,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+    }
+
+    var ws = try WALStorage.open(allocator, path);
+    defer ws.deinit();
+    try std.testing.expectEqual(@as(u64, 2), ws.wal.membership_index);
+    try std.testing.expectEqualStrings("node-1", ws.wal.cluster_membership.?.peers[0].address);
+    try std.testing.expectEqualSlices(u8, membership, ws.wal.snapshot.?.membership);
+}
+
+test "wal: snapshot membership rejection does not mutate state" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    var ws = try WALStorage.open(allocator, fixture.walDir());
+    defer ws.deinit();
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    try ws.asWritableStorage().setMembershipState(
+        allocator,
+        .{ .voters = @constCast(&[_]u64{1}) },
+        .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+        1,
+    );
+    const membership = try testMembershipBytes(allocator, 1, @constCast("node-1"));
+    defer allocator.free(membership);
+    const segment_id = ws.wal.segment_manager.current_segment_id;
+    const write_offset = ws.wal.segment_manager.getCurrent().?.write_offset;
+
+    try std.testing.expectError(error.MissingClusterMembership, ws.asWritableStorage().applySnapshot(allocator, .{
+        .metadata = .{ .index = 3, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectError(error.InvalidClusterMembership, ws.asWritableStorage().applySnapshot(allocator, .{
+        .membership = membership,
+        .metadata = .{ .index = 3, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{2}) } },
+    }));
+    try std.testing.expectEqual(segment_id, ws.wal.segment_manager.current_segment_id);
+    try std.testing.expectEqual(write_offset, ws.wal.segment_manager.getCurrent().?.write_offset);
+    try std.testing.expectEqualSlices(u64, &.{1}, ws.wal.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 1), ws.wal.membership_index);
+    try std.testing.expectEqual(@as(u64, 0), ws.wal.snapshot_metadata.index);
+}
+
+test "wal: local snapshot membership rejection does not mutate state" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    var ws = try WALStorage.open(allocator, fixture.walDir());
+    defer ws.deinit();
+    const iface = ws.asWritableStorage();
+    try iface.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 1 },
+    });
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    try iface.setMembershipState(
+        allocator,
+        .{ .voters = @constCast(&[_]u64{1}) },
+        .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+        1,
+    );
+    const membership = try testMembershipBytes(allocator, 1, @constCast("node-1"));
+    defer allocator.free(membership);
+    const write_offset = ws.wal.segment_manager.getCurrent().?.write_offset;
+
+    try std.testing.expectError(error.MissingClusterMembership, iface.applyLocalSnapshot(allocator, .{
+        .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectError(error.InvalidClusterMembership, iface.applyLocalSnapshot(allocator, .{
+        .membership = membership,
+        .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = @constCast(&[_]u64{2}) } },
+    }));
+    try std.testing.expectEqual(write_offset, ws.wal.segment_manager.getCurrent().?.write_offset);
+    try std.testing.expectEqual(@as(u64, 1), ws.wal.firstIndex());
+    try std.testing.expectEqual(@as(u64, 2), ws.wal.lastIndex());
+    try std.testing.expectEqualSlices(u64, &.{1}, ws.wal.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 1), ws.wal.membership_index);
+    try std.testing.expectEqual(@as(u64, 0), ws.wal.snapshot_metadata.index);
+}
+
+test "wal: recovery rejects metadata snapshot membership disagreement" {
+    const allocator = std.testing.allocator;
+    var mismatch_fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer mismatch_fixture.deinit();
+    const original = try testMembershipBytes(allocator, 1, @constCast("node-1"));
+    defer allocator.free(original);
+    const different = try testMembershipBytes(allocator, 2, @constCast("other-node-1"));
+    defer allocator.free(different);
+    {
+        var ws = try WALStorage.open(allocator, mismatch_fixture.walDir());
+        defer ws.deinit();
+        try ws.asWritableStorage().applySnapshot(allocator, .{
+            .membership = original,
+            .metadata = .{
+                .index = 2,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+        try ws.wal.snapshot_store.save(.{
+            .membership = different,
+            .metadata = .{
+                .index = 2,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+    }
+    try std.testing.expectError(
+        error.InvalidClusterMembership,
+        WALStorage.openWithFs(allocator, mismatch_fixture.walDir(), mismatch_fixture.fs()),
+    );
+
+    var missing_fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer missing_fixture.deinit();
+    {
+        var ws = try WALStorage.open(allocator, missing_fixture.walDir());
+        defer ws.deinit();
+        try ws.asWritableStorage().applySnapshot(allocator, .{
+            .membership = original,
+            .metadata = .{
+                .index = 2,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+        try ws.wal.snapshot_store.save(.{
+            .metadata = .{
+                .index = 2,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+    }
+    try std.testing.expectError(
+        error.MissingClusterMembership,
+        WALStorage.openWithFs(allocator, missing_fixture.walDir(), missing_fixture.fs()),
+    );
+}
+
+test "wal: recovery accepts membership newer than the local snapshot" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const snapshot_membership = try testMembershipBytes(allocator, 1, @constCast("node-1"));
+    defer allocator.free(snapshot_membership);
+
+    {
+        var ws = try WALStorage.open(allocator, fixture.walDir());
+        defer ws.deinit();
+        const iface = ws.asWritableStorage();
+        try iface.applySnapshot(allocator, .{
+            .membership = snapshot_membership,
+            .metadata = .{
+                .index = 1,
+                .term = 1,
+                .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+            },
+        });
+        var peers = [_]cluster_membership_mod.PeerEndpoint{
+            .{ .node_id = 1, .address = @constCast("node-1") },
+            .{ .node_id = 2, .address = @constCast("node-2") },
+        };
+        try iface.setMembershipState(
+            allocator,
+            .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+            .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+            2,
+        );
+        try iface.sync();
+    }
+
+    var reopened = try WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
+    defer reopened.deinit();
+    var state = try reopened.asWritableStorage().initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), state.membership_index);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, state.conf_state.voters);
+}
+
 test "wal: recovery rejects a missing committed snapshot file" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -2123,12 +2431,19 @@ test "wal: recovery cleans up every allocation failure" {
         var peers = [_]cluster_membership_mod.PeerEndpoint{
             .{ .node_id = 1, .address = @constCast("node-1") },
         };
+        const membership = ClusterMembership{
+            .cluster_id = .{1} ++ .{0} ** 15,
+            .peers = &peers,
+        };
         try wal.saveMembershipState(
             .{ .voters = &voters },
-            .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+            membership,
             1,
         );
+        const membership_bytes = try membership.encode(allocator);
+        defer allocator.free(membership_bytes);
         try wal.applyLocalSnapshot(.{
+            .membership = membership_bytes,
             .data = @constCast("snapshot-state"),
             .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = &voters } },
         });

@@ -77,6 +77,9 @@ pub const MemoryStorageCore = struct {
         const meta = snap.metadata;
         if (self.firstIndex() > meta.index) return error.SnapshotOutOfDate;
 
+        var candidate_membership = try decodeSnapshotMembership(allocator, snap, self.raft_state.cluster_membership != null);
+        errdefer if (candidate_membership) |*membership| membership.deinit(allocator);
+
         var cloned_snapshot = try storage_mod.cloneSnapshot(allocator, snap);
         errdefer cloned_snapshot.deinit(allocator);
         var cloned_conf_state = try storage_mod.cloneConfState(allocator, meta.conf_state);
@@ -91,11 +94,17 @@ pub const MemoryStorageCore = struct {
         self.snapshot_data = cloned_snapshot;
         self.raft_state.conf_state.deinit(allocator);
         self.raft_state.conf_state = cloned_conf_state;
+        if (self.raft_state.cluster_membership) |*membership| membership.deinit(allocator);
+        self.raft_state.cluster_membership = candidate_membership;
+        self.raft_state.membership_index = if (candidate_membership != null) meta.index else 0;
     }
 
     pub fn applyLocalSnapshot(self: *MemoryStorageCore, allocator: std.mem.Allocator, snap: Snapshot) Error!void {
         const meta = snap.metadata;
         if (self.firstIndex() > meta.index) return error.SnapshotOutOfDate;
+
+        var candidate_membership = try decodeSnapshotMembership(allocator, snap, self.raft_state.cluster_membership != null);
+        errdefer if (candidate_membership) |*membership| membership.deinit(allocator);
 
         var cloned_snapshot = try storage_mod.cloneSnapshot(allocator, snap);
         errdefer cloned_snapshot.deinit(allocator);
@@ -112,6 +121,9 @@ pub const MemoryStorageCore = struct {
         self.snapshot_data = cloned_snapshot;
         self.raft_state.conf_state.deinit(allocator);
         self.raft_state.conf_state = cloned_conf_state;
+        if (self.raft_state.cluster_membership) |*membership| membership.deinit(allocator);
+        self.raft_state.cluster_membership = candidate_membership;
+        self.raft_state.membership_index = if (candidate_membership != null) meta.index else 0;
     }
 
     pub fn compact(self: *MemoryStorageCore, allocator: std.mem.Allocator, compact_index: u64) Error!void {
@@ -200,11 +212,19 @@ pub const MemoryStorageCore = struct {
             term = self.entries.items[commit - offset].term;
         }
 
+        const membership: []u8 = if (self.snapshot_data.membership.len == 0)
+            &.{}
+        else
+            try allocator.dupe(u8, self.snapshot_data.membership);
+        errdefer if (membership.len != 0) allocator.free(membership);
+        const data: []u8 = if (commit == self.snapshot_data.metadata.index and self.snapshot_data.data.len != 0)
+            try allocator.dupe(u8, self.snapshot_data.data)
+        else
+            &.{};
+        errdefer if (data.len != 0) allocator.free(data);
         return .{
-            .data = if (commit == self.snapshot_data.metadata.index)
-                try allocator.dupe(u8, self.snapshot_data.data)
-            else
-                try allocator.alloc(u8, 0),
+            .membership = membership,
+            .data = data,
             .metadata = .{
                 .index = commit,
                 .term = term,
@@ -404,11 +424,14 @@ pub const MemoryStorage = struct {
             // Rebuild with the requested index, preserving the term.
             const new_data = snap.data;
             snap.data = &.{};
+            const new_membership = snap.membership;
+            snap.membership = &.{};
             const snap_term = snap.metadata.term;
             const new_conf = snap.metadata.conf_state;
             snap.metadata.conf_state = .{};
             snap.deinit(allocator);
             return .{
+                .membership = new_membership,
                 .data = new_data,
                 .metadata = .{
                     .index = request_index,
@@ -561,6 +584,20 @@ pub const MemoryStorage = struct {
         return .{ .ctx = self, .vtable = &read_vtable };
     }
 };
+
+fn decodeSnapshotMembership(allocator: std.mem.Allocator, snapshot: Snapshot, membership_required: bool) Error!?ClusterMembership {
+    if (snapshot.membership.len == 0) {
+        if (membership_required) return error.MissingClusterMembership;
+        return null;
+    }
+    var membership = cluster_membership_mod.decode(allocator, snapshot.membership) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidClusterMembership,
+    };
+    errdefer membership.deinit(allocator);
+    membership.validate(snapshot.metadata.conf_state) catch return error.InvalidClusterMembership;
+    return membership;
+}
 
 test "memory storage term lookup with compaction boundaries" {
     const allocator = std.testing.allocator;
@@ -821,4 +858,138 @@ test "memory storage membership allocation failures clean up" {
         ConfState{ .voters = @constCast(&[_]u64{ 1, 2 }) },
         ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
     });
+}
+
+test "memory storage snapshot membership updates state atomically" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var old_peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("old-node-1") },
+    };
+    try storage.setMembershipState(
+        allocator,
+        .{ .voters = @constCast(&[_]u64{1}) },
+        .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &old_peers },
+        1,
+    );
+
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{2} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(allocator);
+    defer allocator.free(membership);
+    try storage.applySnapshot(allocator, .{
+        .membership = membership,
+        .data = @constCast("state"),
+        .metadata = .{
+            .index = 4,
+            .term = 2,
+            .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+        },
+    });
+
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 4), state.membership_index);
+    try std.testing.expectEqualStrings("node-2", state.cluster_membership.?.peers[1].address);
+    var local = (try storage.localSnapshot(allocator)).?;
+    defer local.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, membership, local.membership);
+}
+
+test "memory storage rejects missing and mismatched snapshot membership without mutation" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers };
+    try storage.setMembershipState(allocator, .{ .voters = @constCast(&[_]u64{1}) }, membership, 2);
+
+    try std.testing.expectError(error.MissingClusterMembership, storage.applySnapshot(allocator, .{
+        .metadata = .{ .index = 4, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    const encoded = try membership.encode(allocator);
+    defer allocator.free(encoded);
+    try std.testing.expectError(error.InvalidClusterMembership, storage.applySnapshot(allocator, .{
+        .membership = encoded,
+        .metadata = .{ .index = 4, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{2}) } },
+    }));
+    try std.testing.expectError(error.MissingClusterMembership, storage.applyLocalSnapshot(allocator, .{
+        .metadata = .{ .index = 4, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectError(error.InvalidClusterMembership, storage.applyLocalSnapshot(allocator, .{
+        .membership = encoded,
+        .metadata = .{ .index = 4, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{2}) } },
+    }));
+    try std.testing.expectEqualSlices(u64, &.{1}, storage.core.raft_state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 2), storage.core.raft_state.membership_index);
+    try std.testing.expectEqual(@as(u64, 0), storage.core.snapshot_data.metadata.index);
+}
+
+test "memory storage local snapshot applies membership and compacts" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 1 },
+    });
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(allocator);
+    defer allocator.free(membership);
+
+    try storage.applyLocalSnapshot(allocator, .{
+        .membership = membership,
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        },
+    });
+    try std.testing.expectEqual(@as(u64, 2), storage.core.firstIndex());
+    try std.testing.expectEqual(@as(u64, 1), storage.core.raft_state.membership_index);
+    try std.testing.expectEqualStrings("node-1", storage.core.raft_state.cluster_membership.?.peers[0].address);
+    try std.testing.expectEqualSlices(u8, membership, storage.core.snapshot_data.membership);
+}
+
+test "memory storage snapshot membership allocation failures clean up" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, membership: []const u8) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.applySnapshot(allocator, .{
+                .membership = @constCast(membership),
+                .data = @constCast("state"),
+                .metadata = .{
+                    .index = 3,
+                    .term = 2,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+                },
+            });
+            try std.testing.expectEqual(@as(u64, 3), storage.core.raft_state.membership_index);
+        }
+    };
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(membership);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{membership});
 }

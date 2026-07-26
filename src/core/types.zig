@@ -142,12 +142,15 @@ pub const SnapshotMetadata = struct {
 
 /// Snapshot bundles an opaque state-machine image with its metadata.
 pub const Snapshot = struct {
+    membership: []u8 = &.{},
     data: []u8 = &.{},
     metadata: SnapshotMetadata = .{},
 
     pub fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
+        if (self.membership.len != 0) allocator.free(self.membership);
         if (self.data.len != 0) allocator.free(self.data);
         self.metadata.deinit(allocator);
+        self.membership = &.{};
         self.data = &.{};
     }
 };

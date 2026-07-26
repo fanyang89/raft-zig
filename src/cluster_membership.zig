@@ -115,6 +115,16 @@ pub const ClusterMembership = struct {
         return null;
     }
 
+    pub fn eql(self: ClusterMembership, other: ClusterMembership) bool {
+        if (!std.mem.eql(u8, &self.cluster_id, &other.cluster_id) or
+            !std.mem.eql(u64, self.retired_node_ids, other.retired_node_ids) or
+            self.peers.len != other.peers.len) return false;
+        for (self.peers, other.peers) |peer, other_peer| {
+            if (peer.node_id != other_peer.node_id or !std.mem.eql(u8, peer.address, other_peer.address)) return false;
+        }
+        return true;
+    }
+
     pub fn validate(self: ClusterMembership, conf_state: ConfState) ValidationError!void {
         try self.validateStructure();
 

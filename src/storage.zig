@@ -68,11 +68,14 @@ pub fn cloneConfState(allocator: std.mem.Allocator, src: ConfState) !ConfState {
     };
 }
 
-/// Copy a Snapshot (data + metadata.conf_state) into fresh allocations.
+/// Copy a Snapshot and all nested buffers into fresh allocations.
 pub fn cloneSnapshot(allocator: std.mem.Allocator, src: Snapshot) !Snapshot {
+    const membership: []u8 = if (src.membership.len == 0) &.{} else try allocator.dupe(u8, src.membership);
+    errdefer if (membership.len != 0) allocator.free(membership);
     const data: []u8 = if (src.data.len == 0) &.{} else try allocator.dupe(u8, src.data);
     errdefer if (data.len != 0) allocator.free(data);
     return .{
+        .membership = membership,
         .data = data,
         .metadata = .{
             .index = src.metadata.index,
@@ -458,6 +461,7 @@ test "clone helpers clean up allocation failures" {
 
         fn cloneSnapshotAll(allocator: std.mem.Allocator) !void {
             var cloned = try cloneSnapshot(allocator, .{
+                .membership = @constCast("membership"),
                 .data = @constCast("snapshot"),
                 .metadata = .{
                     .conf_state = .{
@@ -480,6 +484,7 @@ test "clone helpers clean up allocation failures" {
                 .entries = entries[0..],
                 .context = @constCast("message-context"),
                 .snapshot = .{
+                    .membership = @constCast("membership"),
                     .data = @constCast("snapshot"),
                     .metadata = .{
                         .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
@@ -520,6 +525,7 @@ test "cloneMessage deeply copies nested buffers" {
         .entries = entries[0..],
         .context = @constCast("message-context"),
         .snapshot = .{
+            .membership = @constCast("membership"),
             .data = @constCast("snapshot"),
             .metadata = .{ .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) } },
         },
@@ -532,8 +538,24 @@ test "cloneMessage deeply copies nested buffers" {
     try std.testing.expect(cloned.entries[0].context.ptr != source.entries[0].context.ptr);
     try std.testing.expect(cloned.context.ptr != source.context.ptr);
     try std.testing.expect(cloned.snapshot.?.data.ptr != source.snapshot.?.data.ptr);
+    try std.testing.expect(cloned.snapshot.?.membership.ptr != source.snapshot.?.membership.ptr);
     try std.testing.expect(cloned.snapshot.?.metadata.conf_state.voters.ptr != source.snapshot.?.metadata.conf_state.voters.ptr);
     try std.testing.expectEqualSlices(u8, source.snapshot.?.data, cloned.snapshot.?.data);
+    try std.testing.expectEqualSlices(u8, source.snapshot.?.membership, cloned.snapshot.?.membership);
+}
+
+test "cloneSnapshot deeply copies membership" {
+    const source = Snapshot{
+        .membership = @constCast("membership"),
+        .data = @constCast("state"),
+        .metadata = .{ .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    };
+    var cloned = try cloneSnapshot(std.testing.allocator, source);
+    defer cloned.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, source.membership, cloned.membership);
+    try std.testing.expect(cloned.membership.ptr != source.membership.ptr);
+    cloned.membership[0] = 'M';
+    try std.testing.expectEqual(@as(u8, 'm'), source.membership[0]);
 }
 
 test "get entries context canAsync" {

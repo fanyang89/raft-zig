@@ -14,6 +14,7 @@ const content_size: usize = 48;
 const max_metadata_size: usize = 16 * 1024 * 1024;
 
 pub const Metadata = struct {
+    version: u32 = format_version,
     first_index: u64 = 1,
     snapshot_index: u64 = 0,
     snapshot_term: u64 = 0,
@@ -164,6 +165,7 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
     if (Crc32Iscsi.hash(data[12..]) != expected_crc) return error.MetadataCorrupt;
 
     var result = Metadata{
+        .version = version,
         .first_index = std.mem.readInt(u64, data[16..24], .little),
         .snapshot_index = std.mem.readInt(u64, data[24..32], .little),
         .snapshot_term = std.mem.readInt(u64, data[32..40], .little),

@@ -72,6 +72,7 @@ pub fn encodeMessage(allocator: std.mem.Allocator, msg: Message) ![]u8 {
         try writeU64(allocator, &buf, snap.metadata.index);
         try writeU64(allocator, &buf, snap.metadata.term);
         try writeConfState(allocator, &buf, snap.metadata.conf_state);
+        try writeBytes(allocator, &buf, snap.membership);
         try writeBytes(allocator, &buf, snap.data);
     } else {
         try buf.append(allocator, 0);
@@ -201,9 +202,12 @@ fn decodeMessageAt(allocator: std.mem.Allocator, data: []const u8, pos: *usize) 
         const snap_term = try decoder.readInt(u64);
         var snap_conf = try decoder.readConfState(allocator);
         errdefer snap_conf.deinit(allocator);
+        const snap_membership = try decoder.readBytes(allocator);
+        errdefer if (snap_membership.len > 0) allocator.free(snap_membership);
         const snap_data = try decoder.readBytes(allocator);
         errdefer if (snap_data.len > 0) allocator.free(snap_data);
         snapshot = .{
+            .membership = snap_membership,
             .data = snap_data,
             .metadata = .{
                 .index = snap_index,
@@ -424,6 +428,7 @@ test "codec: message with snapshot round-trips" {
         .from = 1,
         .term = 5,
         .snapshot = .{
+            .membership = try allocator.dupe(u8, "RCLS membership"),
             .data = try allocator.dupe(u8, "snap"),
             .metadata = .{
                 .index = 100,
@@ -445,6 +450,7 @@ test "codec: message with snapshot round-trips" {
     try std.testing.expectEqual(@as(u64, 100), decoded.snapshot.?.metadata.index);
     try std.testing.expectEqual(@as(u64, 4), decoded.snapshot.?.metadata.term);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, decoded.snapshot.?.metadata.conf_state.voters);
+    try std.testing.expectEqualStrings("RCLS membership", decoded.snapshot.?.membership);
     try std.testing.expectEqualStrings("snap", decoded.snapshot.?.data);
 }
 
@@ -593,6 +599,10 @@ fn fuzzCodec(_: void, smith: *std.testing.Smith) !void {
         .term = smith.value(u64),
         .entries = if (smith.value(bool)) entries[0..] else &.{},
         .context = @constCast(input),
+        .snapshot = if (smith.value(bool)) .{
+            .membership = @constCast(input[0..split]),
+            .data = @constCast(input[split..]),
+        } else null,
     };
     const canonical = try encodeMessage(allocator, structured);
     defer allocator.free(canonical);
