@@ -1340,6 +1340,194 @@ test "raftor: concurrent stop completes every accepted request once" {
     }
 }
 
+test "raftor: destroy waits for run to exit" {
+    const thread_allocator = std.heap.smp_allocator;
+    var sm = MockStateMachine.init(thread_allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.tick_interval_ms = 100;
+    const r = try Raftor.create(thread_allocator, config, sm.stateMachine());
+    var destroyed = false;
+    errdefer if (!destroyed) r.destroy();
+
+    const RunState = struct {
+        raftor: *Raftor,
+        err: ?raft.Error = null,
+
+        fn run(self: *@This()) void {
+            self.raftor.run() catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var run_state = RunState{ .raftor = r };
+    const run_thread = try std.Thread.spawn(.{}, RunState.run, .{&run_state});
+    while (!r.isRunning()) std.atomic.spinLoopHint();
+
+    r.destroy();
+    destroyed = true;
+    run_thread.join();
+    try std.testing.expect(run_state.err == null);
+}
+
+test "raftor: destroy waits for concurrent stop callbacks" {
+    const thread_allocator = std.heap.smp_allocator;
+    var sm = MockStateMachine.init(thread_allocator);
+    defer sm.deinit();
+    const r = try Raftor.create(thread_allocator, makeConfig(1), sm.stateMachine());
+    var destroy_owns_raftor = false;
+    errdefer if (!destroy_owns_raftor) r.destroy();
+
+    const Callback = struct {
+        entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn invoke(ctx: *anyopaque, _: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) std.atomic.spinLoopHint();
+            self.exited.store(true, .release);
+        }
+    };
+    var callback = Callback{};
+    try r.propose("queued", .{ .ctx = &callback, .function = Callback.invoke });
+
+    const StopState = struct {
+        raftor: *Raftor,
+        fn run(self: *@This()) void {
+            self.raftor.stop();
+        }
+    };
+    var stop_state = StopState{ .raftor = r };
+    const stop_thread = try std.Thread.spawn(.{}, StopState.run, .{&stop_state});
+    defer {
+        callback.release.store(true, .release);
+        stop_thread.join();
+    }
+    while (!callback.entered.load(.acquire)) std.atomic.spinLoopHint();
+
+    const DestroyState = struct {
+        raftor: *Raftor,
+        callback_exited: *std.atomic.Value(bool),
+        started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        returned_before_callback_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        fn run(self: *@This()) void {
+            self.started.store(true, .release);
+            self.raftor.destroy();
+            if (!self.callback_exited.load(.acquire)) self.returned_before_callback_exit.store(true, .release);
+            self.completed.store(true, .release);
+        }
+    };
+    var destroy_state = DestroyState{ .raftor = r, .callback_exited = &callback.exited };
+    const destroy_thread = try std.Thread.spawn(.{}, DestroyState.run, .{&destroy_state});
+    destroy_owns_raftor = true;
+    defer {
+        callback.release.store(true, .release);
+        destroy_thread.join();
+    }
+    while (!destroy_state.started.load(.acquire)) std.atomic.spinLoopHint();
+    for (0..1000) |_| std.atomic.spinLoopHint();
+    try std.testing.expect(!destroy_state.completed.load(.acquire));
+
+    callback.release.store(true, .release);
+    while (!destroy_state.completed.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expect(destroy_state.completed.load(.acquire));
+    try std.testing.expect(!destroy_state.returned_before_callback_exit.load(.acquire));
+}
+
+test "raftor: getStatus is safe while run and producers are active" {
+    const thread_allocator = std.heap.smp_allocator;
+    const proposal_count = 128;
+    var sm = MockStateMachine.init(thread_allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.tick_interval_ms = 1;
+    const r = try Raftor.create(thread_allocator, config, sm.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    const RunState = struct {
+        raftor: *Raftor,
+        err: ?raft.Error = null,
+        fn run(self: *@This()) void {
+            self.raftor.run() catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var run_state = RunState{ .raftor = r };
+    const run_thread = try std.Thread.spawn(.{}, RunState.run, .{&run_state});
+    var run_joined = false;
+    defer if (!run_joined) {
+        r.stop();
+        run_thread.join();
+    };
+    while (!r.isRunning()) std.atomic.spinLoopHint();
+
+    var completed = std.atomic.Value(usize).init(0);
+    var callback_error = std.atomic.Value(bool).init(false);
+    const Callback = struct {
+        completed: *std.atomic.Value(usize),
+        callback_error: *std.atomic.Value(bool),
+        fn invoke(ctx: *anyopaque, result: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .err) self.callback_error.store(true, .release);
+            _ = self.completed.fetchAdd(1, .release);
+        }
+    };
+    var callback = Callback{ .completed = &completed, .callback_error = &callback_error };
+
+    var reader_done = std.atomic.Value(bool).init(false);
+    const Reader = struct {
+        raftor: *Raftor,
+        done: *std.atomic.Value(bool),
+        invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn run(self: *@This()) void {
+            var previous = self.raftor.getStatus();
+            while (!self.done.load(.acquire)) {
+                const status = self.raftor.getStatus();
+                if (status.id != 1 or
+                    status.term < previous.term or
+                    status.commit_index < previous.commit_index or
+                    status.applied_index < previous.applied_index or
+                    status.applied_index > status.commit_index or
+                    (status.role == .leader and status.leader_id != status.id) or
+                    (status.queued_proposals == 0 and status.queued_proposal_bytes != 0) or
+                    (status.queued_read_indexes == 0 and status.queued_read_index_bytes != 0))
+                {
+                    self.invalid.store(true, .release);
+                }
+                previous = status;
+            }
+        }
+    };
+    var reader = Reader{ .raftor = r, .done = &reader_done };
+    const reader_thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
+    var reader_joined = false;
+    defer if (!reader_joined) {
+        reader_done.store(true, .release);
+        reader_thread.join();
+    };
+
+    for (0..proposal_count) |_| {
+        try r.propose("value", .{ .ctx = &callback, .function = Callback.invoke });
+    }
+    while (completed.load(.acquire) != proposal_count) std.atomic.spinLoopHint();
+    reader_done.store(true, .release);
+    reader_thread.join();
+    reader_joined = true;
+    r.stop();
+    run_thread.join();
+    run_joined = true;
+
+    try std.testing.expect(!reader.invalid.load(.acquire));
+    try std.testing.expect(!callback_error.load(.acquire));
+    try std.testing.expect(run_state.err == null);
+}
+
 test "raftor: manual takeSnapshot compacts storage" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();

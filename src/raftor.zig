@@ -79,6 +79,10 @@ fn sleepNanoseconds(nanoseconds: u64) void {
     }
 }
 
+fn currentThreadId() usize {
+    return @intCast(std.Thread.getCurrentId());
+}
+
 const Lifecycle = enum {
     active,
     stopping,
@@ -185,8 +189,13 @@ pub const Raftor = struct {
     tick_count: u64 = 0,
     lifecycle_mutex: std.atomic.Mutex = .unlocked,
     lifecycle: Lifecycle = .active,
-    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    run_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     event_loop_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    event_loop_thread_id: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    shutdown_callback_thread_id: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    status_mutex: std.atomic.Mutex = .unlocked,
+    status_snapshot: NodeStatus = .{},
     terminal_error: ?Error = null,
     transport_stopped: bool = false,
 
@@ -270,18 +279,20 @@ pub const Raftor = struct {
         return self;
     }
 
+    /// Stop and destroy the Raftor after active run/event-loop calls and
+    /// shutdown callbacks quiesce. The owner must first stop all other API
+    /// callers. Calling this directly or indirectly from a callback is invalid.
     pub fn destroy(self: *Raftor) void {
-        std.debug.assert(!self.running.load(.acquire));
-        std.debug.assert(!self.event_loop_active.load(.acquire));
-        var batch: ?ShutdownBatch = null;
+        self.assertDestroyAllowed();
+        self.stop();
+        self.waitForQuiescence();
+
         spinLock(&self.lifecycle_mutex);
-        std.debug.assert(self.lifecycle != .stopping and self.lifecycle != .terminating and self.lifecycle != .destroying);
-        if (self.lifecycle == .active) batch = self.detachRequestsLocked();
+        if (self.lifecycle == .destroying) @panic("concurrent Raftor.destroy calls");
+        std.debug.assert(self.lifecycle == .stopped or self.lifecycle == .terminal);
         self.lifecycle = .destroying;
-        const stop_transport = self.markTransportStoppedLocked();
         self.lifecycle_mutex.unlock();
-        if (stop_transport) self.transport.stop();
-        if (batch) |*detached| detached.invoke(error.ShuttingDown, error.ShuttingDown);
+
         const allocator = self.allocator;
         self.deinitInternal();
         allocator.destroy(self);
@@ -300,8 +311,13 @@ pub const Raftor = struct {
         self.transport = dependencies.transport;
         self.lifecycle_mutex = .unlocked;
         self.lifecycle = .active;
-        self.running = std.atomic.Value(bool).init(false);
+        self.stop_requested = std.atomic.Value(bool).init(false);
+        self.run_active = std.atomic.Value(bool).init(false);
         self.event_loop_active = std.atomic.Value(bool).init(false);
+        self.event_loop_thread_id = std.atomic.Value(usize).init(0);
+        self.shutdown_callback_thread_id = std.atomic.Value(usize).init(0);
+        self.status_mutex = .unlocked;
+        self.status_snapshot = .{};
         self.terminal_error = null;
         self.transport_stopped = false;
 
@@ -378,6 +394,7 @@ pub const Raftor = struct {
         );
         errdefer self.ready_processor.deinit();
         try self.ready_processor.hydrateTransport();
+        self.status_snapshot = self.currentCoreStatus();
 
         // Register callbacks only after transport peers reflect durable membership.
         self.transport.setMessageCallback(.{
@@ -680,14 +697,14 @@ pub const Raftor = struct {
             self.lifecycle_mutex.unlock();
             return err;
         }
-        if (self.running.load(.monotonic)) {
+        if (self.run_active.load(.monotonic)) {
             self.lifecycle_mutex.unlock();
             return error.AlreadyStarted;
         }
-        self.running.store(true, .release);
+        self.run_active.store(true, .release);
         self.lifecycle_mutex.unlock();
-        defer self.running.store(false, .release);
-        while (self.running.load(.acquire)) {
+        defer self.run_active.store(false, .release);
+        while (!self.stop_requested.load(.acquire)) {
             _ = self.tick() catch |err| {
                 spinLock(&self.lifecycle_mutex);
                 const clean_shutdown = err == error.ShuttingDown and self.terminal_error == null and self.lifecycle != .active;
@@ -695,15 +712,17 @@ pub const Raftor = struct {
                 if (clean_shutdown) return;
                 return err;
             };
-            // Sleep for the configured tick interval to avoid busy-looping.
-            sleepNanoseconds(self.config.tick_interval_ms *| std.time.ns_per_ms);
+            if (self.stop_requested.load(.acquire)) break;
+            self.sleepUntilNextTick();
         }
     }
 
+    /// Request shutdown and complete accepted callbacks exactly once. This is
+    /// callback-safe and does not wait for an active `run` call to return.
     pub fn stop(self: *Raftor) void {
         var batch: ?ShutdownBatch = null;
         spinLock(&self.lifecycle_mutex);
-        self.running.store(false, .release);
+        self.stop_requested.store(true, .release);
         if (self.lifecycle == .active) {
             self.lifecycle = .stopping;
             batch = self.detachRequestsLocked();
@@ -713,7 +732,7 @@ pub const Raftor = struct {
         const owns_shutdown = batch != null;
 
         if (stop_transport) self.transport.stop();
-        if (batch) |*detached| detached.invoke(error.ShuttingDown, error.ShuttingDown);
+        if (batch) |*detached| self.invokeShutdownBatch(detached, error.ShuttingDown, error.ShuttingDown);
 
         if (owns_shutdown) {
             spinLock(&self.lifecycle_mutex);
@@ -722,8 +741,9 @@ pub const Raftor = struct {
         }
     }
 
+    /// Whether a `run` call can still access this Raftor.
     pub fn isRunning(self: *const Raftor) bool {
-        return self.running.load(.acquire);
+        return self.run_active.load(.acquire);
     }
 
     // -----------------------------------------------------------------------
@@ -942,34 +962,32 @@ pub const Raftor = struct {
     // Status
     // -----------------------------------------------------------------------
 
+    /// Return the most recently published core state plus live ingress stats.
+    /// Core state is published at event-loop boundaries and may be one active
+    /// tick behind. This may run concurrently with `run`, but not `destroy`.
     pub fn getStatus(self: *const Raftor) NodeStatus {
-        const r = self.raw_node.raftConst();
+        var result = self.observedCoreStatus();
         const queue_stats = self.proposal_queue.stats();
         const read_queue_stats = self.read_index_queue.stats();
-        return .{
-            .id = r.id,
-            .role = r.state,
-            .term = r.term,
-            .leader_id = r.leader_id,
-            .commit_index = r.raft_log.committed,
-            .applied_index = self.ready_processor.applied_index,
-            .pending_proposals = self.proposal_tracker.pendingCount(),
-            .queued_proposals = queue_stats.count,
-            .queued_proposal_bytes = queue_stats.bytes,
-            .queued_read_indexes = read_queue_stats.count,
-            .queued_read_index_bytes = read_queue_stats.bytes,
-            .incarnation = self.request_context_generator.incarnation,
-        };
+        result.pending_proposals = self.proposal_tracker.pendingCount();
+        result.queued_proposals = queue_stats.count;
+        result.queued_proposal_bytes = queue_stats.bytes;
+        result.queued_read_indexes = read_queue_stats.count;
+        result.queued_read_index_bytes = read_queue_stats.bytes;
+        return result;
     }
 
     pub fn isLeader(self: *const Raftor) bool {
-        return self.raw_node.raftConst().state == .leader;
+        return self.observedCoreStatus().role == .leader;
     }
 
     pub fn getLeaderId(self: *const Raftor) u64 {
-        return self.raw_node.raftConst().leader_id;
+        return self.observedCoreStatus().leader_id;
     }
 
+    /// Return a mutable escape hatch for event-loop-thread-only use.
+    /// Mutations become visible to status readers after the next event-loop
+    /// boundary; concurrent access is unsupported.
     pub fn getRawNode(self: *Raftor) *RawNode {
         return &self.raw_node;
     }
@@ -1021,7 +1039,7 @@ pub const Raftor = struct {
         var batch: ?ShutdownBatch = null;
         spinLock(&self.lifecycle_mutex);
         if (self.terminal_error == null) self.terminal_error = err;
-        self.running.store(false, .release);
+        self.stop_requested.store(true, .release);
         if (self.lifecycle == .active) {
             self.lifecycle = .terminating;
             batch = self.detachRequestsLocked();
@@ -1031,7 +1049,7 @@ pub const Raftor = struct {
         const owns_shutdown = batch != null;
 
         if (stop_transport) self.transport.stop();
-        if (batch) |*detached| detached.invoke(err, err);
+        if (batch) |*detached| self.invokeShutdownBatch(detached, err, err);
 
         if (owns_shutdown) {
             spinLock(&self.lifecycle_mutex);
@@ -1050,13 +1068,94 @@ pub const Raftor = struct {
     }
 
     fn enterEventLoop(self: *Raftor) Error!void {
+        spinLock(&self.lifecycle_mutex);
+        defer self.lifecycle_mutex.unlock();
+        if (self.terminal_error) |err| return err;
+        if (self.lifecycle != .active) return error.ShuttingDown;
         if (self.event_loop_active.cmpxchgStrong(false, true, .acquire, .monotonic) != null) {
             return error.EventLoopBusy;
         }
+        self.event_loop_thread_id.store(currentThreadId(), .release);
     }
 
     fn leaveEventLoop(self: *Raftor) void {
+        self.publishStatus();
+        self.event_loop_thread_id.store(0, .release);
         self.event_loop_active.store(false, .release);
+    }
+
+    fn currentCoreStatus(self: *const Raftor) NodeStatus {
+        const raft = self.raw_node.raftConst();
+        return .{
+            .id = raft.id,
+            .role = raft.state,
+            .term = raft.term,
+            .leader_id = raft.leader_id,
+            .commit_index = raft.raft_log.committed,
+            .applied_index = self.ready_processor.applied_index,
+            .incarnation = self.request_context_generator.incarnation,
+        };
+    }
+
+    fn observedCoreStatus(self: *const Raftor) NodeStatus {
+        if (self.event_loop_thread_id.load(.acquire) == currentThreadId()) {
+            return self.currentCoreStatus();
+        }
+        return self.publishedStatus();
+    }
+
+    fn publishStatus(self: *Raftor) void {
+        const snapshot = self.currentCoreStatus();
+        spinLock(&self.status_mutex);
+        self.status_snapshot = snapshot;
+        self.status_mutex.unlock();
+    }
+
+    fn publishedStatus(self: *const Raftor) NodeStatus {
+        const mutex = @constCast(&self.status_mutex);
+        spinLock(mutex);
+        defer mutex.unlock();
+        return self.status_snapshot;
+    }
+
+    fn invokeShutdownBatch(self: *Raftor, batch: *ShutdownBatch, proposal_error: Error, read_error: Error) void {
+        const thread_id = currentThreadId();
+        if (self.shutdown_callback_thread_id.cmpxchgStrong(0, thread_id, .acq_rel, .acquire) != null) {
+            @panic("concurrent Raftor shutdown callback batches");
+        }
+        defer self.shutdown_callback_thread_id.store(0, .release);
+        batch.invoke(proposal_error, read_error);
+    }
+
+    fn assertDestroyAllowed(self: *const Raftor) void {
+        const thread_id = currentThreadId();
+        if (self.event_loop_thread_id.load(.acquire) == thread_id or
+            self.shutdown_callback_thread_id.load(.acquire) == thread_id)
+        {
+            @panic("Raftor.destroy cannot be called from a Raftor callback");
+        }
+    }
+
+    fn waitForQuiescence(self: *Raftor) void {
+        while (true) {
+            self.assertDestroyAllowed();
+            const active = self.run_active.load(.acquire) or self.event_loop_active.load(.acquire);
+            spinLock(&self.lifecycle_mutex);
+            const transitioning = self.lifecycle == .stopping or self.lifecycle == .terminating;
+            self.lifecycle_mutex.unlock();
+            if (!active and !transitioning) return;
+            sleepNanoseconds(std.time.ns_per_ms);
+        }
+    }
+
+    fn sleepUntilNextTick(self: *const Raftor) void {
+        var remaining = self.config.tick_interval_ms *| std.time.ns_per_ms;
+        const max_sleep = 10 * std.time.ns_per_ms;
+        while (remaining > 0 and !self.stop_requested.load(.acquire)) {
+            const duration = @min(remaining, max_sleep);
+            sleepNanoseconds(duration);
+            remaining -= duration;
+        }
     }
 };
 
