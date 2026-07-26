@@ -310,6 +310,7 @@ pub const Raftor = struct {
         try config.raft.validate();
         if (config.transport_poll_budget == 0) return error.InvalidConfig;
         if (config.max_queued_proposals == 0 or config.max_queued_proposal_bytes == 0) return error.InvalidConfig;
+        if (config.proposal_drain_budget == 0) return error.InvalidConfig;
         try self.prepareStorage(startup_mode);
         var initial_state = try self.storage.initialState(allocator);
         defer initial_state.deinit(allocator);
@@ -580,7 +581,7 @@ pub const Raftor = struct {
         // Drain pending proposals from the thread-safe queue.
         var had_work = false;
         const proposal_timeout = if (self.config.proposal_timeout_ticks > 0) self.config.proposal_timeout_ticks else 0;
-        while (true) {
+        for (0..self.config.proposal_drain_budget) |_| {
             spinLock(&self.lifecycle_mutex);
             if (self.lifecycle != .active) {
                 self.lifecycle_mutex.unlock();

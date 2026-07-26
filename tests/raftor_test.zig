@@ -960,6 +960,43 @@ test "raftor: transport poll budget drains bursts" {
     try std.testing.expectEqual(@as(usize, 0), transport.inbound_messages.items.len);
 }
 
+test "raftor: proposal drain budget preserves transport progress" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.proposal_drain_budget = 2;
+    config.transport_poll_budget = 1;
+    const r = try Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+
+    var proposals = [_]ErrorTester{ .{}, .{}, .{} };
+    for (&proposals, 0..) |*proposal, i| {
+        const data = try std.fmt.allocPrint(allocator, "proposal-{}", .{i});
+        defer allocator.free(data);
+        try r.propose(data, proposal.proposalCallback());
+    }
+    try transport.queueMessage(.{ .msg_type = .hup });
+
+    _ = try r.tick();
+    try std.testing.expect(proposals[0].completed);
+    try std.testing.expect(proposals[1].completed);
+    try std.testing.expect(!proposals[2].completed);
+    try std.testing.expectEqual(@as(usize, 1), r.getStatus().queued_proposals);
+    try std.testing.expectEqual(@as(usize, 1), transport.delivered_message_count);
+
+    _ = try r.tick();
+    try std.testing.expect(proposals[2].completed);
+    try std.testing.expectEqual(@as(usize, 0), r.getStatus().queued_proposals);
+}
+
 test "raftor: zero transport poll budget is invalid" {
     var storage = raft.MemoryStorage.init();
     defer storage.deinit(allocator);
@@ -994,6 +1031,23 @@ test "raftor: zero proposal queue limits are invalid" {
 
     config.max_queued_proposals = 1;
     config.max_queued_proposal_bytes = 0;
+    try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    }));
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+}
+
+test "raftor: zero proposal drain budget is invalid" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.proposal_drain_budget = 0;
     try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
         .storage = storage.asWritableStorage(),
         .transport = transport.transport(),
