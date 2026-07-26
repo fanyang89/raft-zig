@@ -181,7 +181,10 @@ pub const GrpcLiteTransport = struct {
         defer self.lifecycle_mutex.unlock();
         if (self.state != .initialized) return error.AlreadyStarted;
         self.state = .starting;
-        self.server.start() catch |err| {
+        peer_manager.lockTsanLifecycle();
+        const start_result = self.server.start();
+        peer_manager.unlockTsanLifecycle();
+        start_result catch |err| {
             self.state = .stopped;
             return mapStartError(err);
         };
@@ -224,7 +227,9 @@ pub const GrpcLiteTransport = struct {
 
         self.server.shutdownGracefully(self.config.graceful_shutdown_timeout_ns);
         self.peer_manager.stopAll();
+        peer_manager.lockTsanLifecycle();
         self.server.wait();
+        peer_manager.unlockTsanLifecycle();
         self.mailbox.clear();
         self.peer_events.clear();
 

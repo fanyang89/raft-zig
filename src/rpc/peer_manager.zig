@@ -70,7 +70,15 @@ const CallbackContext = struct {
 
 // libxev's io_uring descriptors need an explicit cross-worker happens-before
 // edge so TSan does not report kernel-managed descriptor reuse as a race.
-var tsan_channel_lifecycle_mutex: std.atomic.Mutex = .unlocked;
+var tsan_lifecycle_mutex: std.atomic.Mutex = .unlocked;
+
+pub fn lockTsanLifecycle() void {
+    if (build_options.sanitize_thread) lock(&tsan_lifecycle_mutex);
+}
+
+pub fn unlockTsanLifecycle() void {
+    if (build_options.sanitize_thread) tsan_lifecycle_mutex.unlock();
+}
 
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
@@ -530,14 +538,14 @@ fn mapWorkerError(err: anyerror) Error {
 }
 
 fn initChannel(allocator: std.mem.Allocator, address: []const u8) !grpc.Channel {
-    if (build_options.sanitize_thread) lock(&tsan_channel_lifecycle_mutex);
-    defer if (build_options.sanitize_thread) tsan_channel_lifecycle_mutex.unlock();
+    lockTsanLifecycle();
+    defer unlockTsanLifecycle();
     return grpc.Channel.init(allocator, address, .{});
 }
 
 fn deinitChannel(channel: *grpc.Channel) void {
-    if (build_options.sanitize_thread) lock(&tsan_channel_lifecycle_mutex);
-    defer if (build_options.sanitize_thread) tsan_channel_lifecycle_mutex.unlock();
+    lockTsanLifecycle();
+    defer unlockTsanLifecycle();
     channel.shutdown();
     channel.wait();
     channel.deinit();
