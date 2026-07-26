@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Generate test coverage with kcov"
+set -euo pipefail
+
+rm -rf zig-out/coverage
+exec zig build test -Dcoverage --summary all "$@"

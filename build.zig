@@ -4,6 +4,9 @@ const manifest = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    var coverage: Coverage = .{
+        .enabled = b.option(bool, "coverage", "Generate test coverage with kcov") orelse false,
+    };
     const sanitizers: Sanitizers = .{
         .thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer"),
         .c = if (b.option(bool, "sanitize-c", "Enable full C undefined behavior detection")) |enabled|
@@ -91,7 +94,7 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{
         .root_module = raft_zig,
     });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_unit_tests = addTestRun(b, unit_tests, &coverage);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -99,7 +102,7 @@ pub fn build(b: *std.Build) void {
         .name = "crc32c",
         .root_module = crc32c,
     });
-    test_step.dependOn(&b.addRunArtifact(crc32c_tests).step);
+    test_step.dependOn(&addTestRun(b, crc32c_tests, &coverage).step);
     if (raft_zig_gperftools) |gperftools| {
         const gperftools_test_module = b.createModule(.{
             .root_source_file = b.path("tests/gperftools_test.zig"),
@@ -113,7 +116,7 @@ pub fn build(b: *std.Build) void {
             .name = "gperftools-integration",
             .root_module = gperftools_test_module,
         });
-        test_step.dependOn(&b.addRunArtifact(gperftools_tests).step);
+        test_step.dependOn(&addTestRun(b, gperftools_tests, &coverage).step);
     }
     const rpc_test_step = b.step("test-rpc", "Run grpc transport tests");
     const grpc_raftor_test_step = b.step("test-grpc-raftor", "Run grpc Raftor integration tests");
@@ -148,7 +151,7 @@ pub fn build(b: *std.Build) void {
         });
         applySanitizers(module, sanitizers);
         const tests = b.addTest(.{ .name = spec.name, .root_module = module });
-        const run_tests = b.addRunArtifact(tests);
+        const run_tests = addTestRun(b, tests, &coverage);
         test_step.dependOn(&run_tests.step);
         if (std.mem.eql(u8, spec.name, "rpc")) rpc_test_step.dependOn(&run_tests.step);
         if (std.mem.eql(u8, spec.name, "grpc-raftor")) grpc_raftor_test_step.dependOn(&run_tests.step);
@@ -198,7 +201,7 @@ pub fn build(b: *std.Build) void {
         });
         applySanitizers(module, sanitizers);
         const tests = b.addTest(.{ .name = spec.name, .root_module = module });
-        const run_tests = b.addRunArtifact(tests);
+        const run_tests = addTestRun(b, tests, &coverage);
         source_step.dependOn(&run_tests.step);
         upstream_step.dependOn(&run_tests.step);
         test_step.dependOn(&run_tests.step);
@@ -224,7 +227,7 @@ pub fn build(b: *std.Build) void {
             .name = "vopr-smoke",
             .root_module = vopr_smoke_module,
         });
-        const run_vopr_smoke = b.addRunArtifact(vopr_smoke_tests);
+        const run_vopr_smoke = addTestRun(b, vopr_smoke_tests, &coverage);
         vopr_smoke_step.dependOn(&run_vopr_smoke.step);
         test_step.dependOn(&run_vopr_smoke.step);
 
@@ -340,6 +343,33 @@ const FuzzSpec = struct {
     name: []const u8,
     source: []const u8,
 };
+
+const Coverage = struct {
+    enabled: bool,
+    previous_run: ?*std.Build.Step = null,
+};
+
+fn addTestRun(
+    b: *std.Build,
+    tests: *std.Build.Step.Compile,
+    coverage: *Coverage,
+) *std.Build.Step.Run {
+    if (coverage.enabled) {
+        tests.use_llvm = true;
+        tests.setExecCmd(&.{
+            "kcov",
+            "--include-path=src",
+            "zig-out/coverage",
+            null,
+        });
+    }
+    const run = b.addRunArtifact(tests);
+    if (coverage.enabled) {
+        if (coverage.previous_run) |previous| run.step.dependOn(previous);
+        coverage.previous_run = &run.step;
+    }
+    return run;
+}
 
 fn applySanitizers(module: *std.Build.Module, sanitizers: Sanitizers) void {
     module.sanitize_thread = sanitizers.thread;

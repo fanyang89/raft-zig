@@ -1,5 +1,7 @@
 # raft-zig
 
+[![codecov](https://codecov.io/gh/fanyang89/raft-zig/graph/badge.svg)](https://codecov.io/gh/fanyang89/raft-zig)
+
 A Zig implementation of the [RAFT](https://raft.github.io/) consensus
 algorithm. Ported from the author's C++ project
 [raftpp](https://github.com/fanyang89/raftpp); project layout, build, and
@@ -43,6 +45,7 @@ Useful tasks:
 mise run test-release-safe
 mise run test-tsan
 mise run test-ubsan
+mise run coverage
 mise run prepare-gperftools
 mise run build-gperftools
 mise run test-gperftools
