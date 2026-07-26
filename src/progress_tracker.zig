@@ -34,6 +34,7 @@ pub const CountVoteResult = struct {
 
 pub const ProgressTracker = struct {
     progress: ProgressMap,
+    peer_ids: std.ArrayList(u64),
     conf: TrackerConfiguration,
     votes: std.AutoHashMap(u64, bool),
     max_inflight: usize,
@@ -43,6 +44,7 @@ pub const ProgressTracker = struct {
     pub fn init(allocator: std.mem.Allocator, max_inflight: usize) ProgressTracker {
         return .{
             .progress = ProgressMap.init(allocator),
+            .peer_ids = .empty,
             .conf = TrackerConfiguration.init(allocator),
             .votes = std.AutoHashMap(u64, bool).init(allocator),
             .max_inflight = max_inflight,
@@ -53,6 +55,7 @@ pub const ProgressTracker = struct {
 
     pub fn deinit(self: *ProgressTracker) void {
         self.progress.deinit();
+        self.peer_ids.deinit(self.allocator);
         self.conf.deinit();
         self.votes.deinit();
         self.* = undefined;
@@ -98,6 +101,25 @@ pub const ProgressTracker = struct {
     ) !void {
         var new_conf = try conf.clone();
         errdefer new_conf.deinit();
+        var new_peer_ids: std.ArrayList(u64) = .empty;
+        errdefer new_peer_ids.deinit(self.allocator);
+        var incoming = new_conf.voters.incoming.voters.keyIterator();
+        while (incoming.next()) |id| try new_peer_ids.append(self.allocator, id.*);
+        var outgoing = new_conf.voters.outgoing.voters.keyIterator();
+        while (outgoing.next()) |id| try new_peer_ids.append(self.allocator, id.*);
+        var learners = new_conf.learners.keyIterator();
+        while (learners.next()) |id| try new_peer_ids.append(self.allocator, id.*);
+        var learners_next = new_conf.learners_next.keyIterator();
+        while (learners_next.next()) |id| try new_peer_ids.append(self.allocator, id.*);
+        std.mem.sort(u64, new_peer_ids.items, {}, std.sort.asc(u64));
+        var unique_count: usize = 0;
+        for (new_peer_ids.items) |id| {
+            if (unique_count == 0 or new_peer_ids.items[unique_count - 1] != id) {
+                new_peer_ids.items[unique_count] = id;
+                unique_count += 1;
+            }
+        }
+        new_peer_ids.shrinkRetainingCapacity(unique_count);
 
         var additions: u32 = 0;
         for (changes) |change| {
@@ -108,7 +130,9 @@ pub const ProgressTracker = struct {
         try self.progress.ensureUnusedCapacity(additions);
 
         var old_conf = self.conf;
+        var old_peer_ids = self.peer_ids;
         self.conf = new_conf;
+        self.peer_ids = new_peer_ids;
         for (changes) |change| {
             switch (change.kind) {
                 .add => {
@@ -122,6 +146,7 @@ pub const ProgressTracker = struct {
             }
         }
         old_conf.deinit();
+        old_peer_ids.deinit(self.allocator);
     }
 
     pub fn resetVotes(self: *ProgressTracker) void {
@@ -175,6 +200,10 @@ pub const ProgressTracker = struct {
         return self.conf.voters.isSingleton();
     }
 
+    pub fn orderedPeerIds(self: *const ProgressTracker) []const u64 {
+        return self.peer_ids.items;
+    }
+
     pub fn getPtr(self: *ProgressTracker, id: u64) ?*Progress {
         return self.progress.getPtr(id);
     }
@@ -208,6 +237,7 @@ test "progress tracker applyConf adds and removes progress entries" {
     };
     try tr.applyConf(conf, &changes, 5);
     try std.testing.expectEqual(@as(usize, 2), tr.progress.count());
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, tr.orderedPeerIds());
     try std.testing.expectEqual(@as(u64, 5), tr.at(1).next_idx);
     try std.testing.expect(tr.at(1).recent_active);
 
@@ -218,6 +248,7 @@ test "progress tracker applyConf adds and removes progress entries" {
     const changes2 = [_]MapChangeEntry{.{ .id = 2, .kind = .remove }};
     try tr.applyConf(conf2, &changes2, 5);
     try std.testing.expectEqual(@as(usize, 1), tr.progress.count());
+    try std.testing.expectEqualSlices(u64, &.{1}, tr.orderedPeerIds());
     try std.testing.expect(tr.progress.contains(1));
 }
 

@@ -1560,9 +1560,7 @@ pub const Raft = struct {
     }
 
     pub fn broadcastAppend(self: *Raft) Error!void {
-        const ids = try self.collectPeerIds();
-        defer self.allocator.free(ids);
-        for (ids) |id| {
+        for (self.progress_tracker.orderedPeerIds()) |id| {
             if (id == self.id) continue;
             const pr = self.progress_tracker.getPtr(id) orelse continue;
             try self.sendAppendInternal(id, pr, true);
@@ -1579,9 +1577,7 @@ pub const Raft = struct {
     }
 
     fn broadcastHeartbeatWithCtxOpt(self: *Raft, ctx: ?[]const u8) Error!void {
-        const ids = try self.collectPeerIds();
-        defer self.allocator.free(ids);
-        for (ids) |id| {
+        for (self.progress_tracker.orderedPeerIds()) |id| {
             if (id == self.id) continue;
             const pr = self.progress_tracker.getPtr(id) orelse continue;
             try self.sendHeartbeat(id, pr, ctx);
@@ -1599,15 +1595,6 @@ pub const Raft = struct {
             .commit = @min(pr.matched, self.raft_log.committed),
             .context = context,
         });
-    }
-
-    fn collectPeerIds(self: *Raft) Error![]u64 {
-        var ids: std.ArrayList(u64) = .empty;
-        errdefer ids.deinit(self.allocator);
-        var it = self.progress_tracker.progress.map.keyIterator();
-        while (it.next()) |k| try ids.append(self.allocator, k.*);
-        std.mem.sort(u64, ids.items, {}, std.sort.asc(u64));
-        return ids.toOwnedSlice(self.allocator);
     }
 
     // -----------------------------------------------------------------------
@@ -1697,9 +1684,7 @@ pub const Raft = struct {
         if (committed_now) {
             self.broadcastAppend() catch {};
         } else {
-            const ids = self.collectPeerIds() catch return;
-            defer self.allocator.free(ids);
-            for (ids) |id| {
+            for (self.progress_tracker.orderedPeerIds()) |id| {
                 if (id == self.id) continue;
                 if (self.progress_tracker.getPtr(id)) |pr| {
                     _ = self.maybeSendAppend(id, pr, false) catch {};
