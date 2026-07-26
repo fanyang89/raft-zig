@@ -774,6 +774,45 @@ test "raftor: injected dependencies are borrowed" {
     try transport.transport().send(&.{.{ .msg_type = .heartbeat, .to = 2 }});
 }
 
+test "raftor: implicit joint configuration automatically leaves" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+
+    var changes = [_]raft.ConfChangeSingle{
+        .{ .change_type = .add_learner_node, .node_id = 2 },
+    };
+    try r.getRawNode().proposeConfChange("", .{
+        .transition = .implicit,
+        .changes = &changes,
+    });
+    for (0..16) |_| _ = try r.tick();
+
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqualSlices(u64, &.{1}, state.conf_state.voters);
+    try std.testing.expectEqualSlices(u64, &.{2}, state.conf_state.learners);
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.voters_outgoing.len);
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.learners_next.len);
+    try std.testing.expect(!state.conf_state.auto_leave);
+
+    var proposal = ProposalTester{};
+    try r.propose("after-auto-leave", proposal.callback());
+    for (0..16) |_| _ = try r.tick();
+    try std.testing.expect(proposal.applied);
+}
+
 test "raftor: startup mode validates and reloads storage" {
     var storage = raft.MemoryStorage.init();
     defer storage.deinit(allocator);

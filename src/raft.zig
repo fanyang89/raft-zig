@@ -1714,19 +1714,12 @@ pub const Raft = struct {
             applied >= self.pending_conf_index and
             self.state == .leader)
         {
-            // Append an empty ConfChangeV2 to leave the joint state.
-            var empty_cc = ConfChangeV2{};
-            defer empty_cc.deinit(self.allocator);
-            // No-op: empty_cc has nothing to free, but we follow ownership rule.
-            const ent = Entry{
-                .entry_type = .conf_change_v2,
-                .data = &.{},
+            const data = util.encodeConfChangeV2(self.allocator, .{}) catch {
+                @panic("failed to encode auto-leave ConfChangeV2");
             };
-            _ = ent;
-            // Append a placeholder conf-change entry; full serialization is
-            // not needed since ConfChangeV2 is just a struct here.
             var entry = Entry{
                 .entry_type = .conf_change_v2,
+                .data = data,
             };
             defer entry.deinit(self.allocator);
             _ = self.appendEntry(&.{entry}) catch {
