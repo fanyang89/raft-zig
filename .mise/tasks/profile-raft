@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description="CPU-profile the single-node Raft benchmark"
+#MISE depends=["prepare-gperftools"]
+set -euo pipefail
+
+profile_dir=.zig-cache/profiles
+profile="$profile_dir/raft.prof"
+binary=zig-out/bin/raft-zig-bench-raft
+mkdir -p "$profile_dir"
+rm -f "$profile"
+zig build build-bench-raft -Dgperftools=true -Doptimize=ReleaseFast
+CPUPROFILE="$profile" "$binary" "$@"
+exec pprof -text -nodecount=30 "$binary" "$profile"

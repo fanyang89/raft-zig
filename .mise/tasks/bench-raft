@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Benchmark the single-node Raft pipeline"
+set -euo pipefail
+
+exec zig build bench-raft -Doptimize=ReleaseFast -- "$@"

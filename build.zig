@@ -272,12 +272,32 @@ pub fn build(b: *std.Build) void {
     const minimal_node = addExample(b, "raft-zig-minimal-node", "examples/minimal_node.zig", raft_zig);
     b.installArtifact(minimal_node);
 
+    const raft_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/raft.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+    });
+    applySanitizers(raft_benchmark_module, sanitizers);
+    raft_benchmark_module.omit_frame_pointer = raft_zig.omit_frame_pointer;
+    const raft_benchmark = b.addExecutable(.{
+        .name = "raft-zig-bench-raft",
+        .root_module = raft_benchmark_module,
+    });
+    const run_raft_benchmark = b.addRunArtifact(raft_benchmark);
+    if (b.args) |args| run_raft_benchmark.addArgs(args);
+    const raft_benchmark_step = b.step("bench-raft", "Benchmark the single-node Raft pipeline");
+    raft_benchmark_step.dependOn(&run_raft_benchmark.step);
+    const install_raft_benchmark = b.addInstallArtifact(raft_benchmark, .{});
+    const build_raft_benchmark_step = b.step("build-bench-raft", "Build the Raft benchmark");
+    build_raft_benchmark_step.dependOn(&install_raft_benchmark.step);
+
     const fmt_step = b.step("fmt", "Format Zig sources");
-    const fmt_run = b.addSystemCommand(&.{ "zig", "fmt", "build.zig", "src", "examples", "tests" });
+    const fmt_run = b.addSystemCommand(&.{ "zig", "fmt", "build.zig", "src", "examples", "tests", "benchmarks" });
     fmt_step.dependOn(&fmt_run.step);
 
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting");
-    const fmt_check_run = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "src", "examples", "tests" });
+    const fmt_check_run = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "src", "examples", "tests", "benchmarks" });
     fmt_check_step.dependOn(&fmt_check_run.step);
 }
 

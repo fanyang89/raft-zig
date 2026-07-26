@@ -28,6 +28,8 @@ mise run test-ubsan
 mise run prepare-gperftools
 mise run build-gperftools
 mise run test-gperftools
+mise run bench-raft
+mise run profile-raft
 mise run fuzz-smoke
 mise run fuzz-codec
 mise run fuzz-wal
@@ -46,7 +48,7 @@ Direct Zig invocations work too:
 ```bash
 zig build
 zig build test --summary all
-zig fmt build.zig src examples tests
+zig fmt build.zig src examples tests benchmarks
 ```
 
 ## Reference Layout

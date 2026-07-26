@@ -19,6 +19,7 @@
         "build.zig.zon",
         "src",
         "examples",
+        "benchmarks",
         "tests",
         "ref",
         "LICENSE",
