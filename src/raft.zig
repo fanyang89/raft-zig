@@ -198,6 +198,8 @@ pub const Raft = struct {
         var rs_copy = raft_state;
         defer rs_copy.deinit(allocator);
         try restoreTracker(&progress_tracker, raft_log.lastIndex() + 1, rs_copy.conf_state);
+        var initial_cs = try progress_tracker.conf.toConfState(allocator);
+        defer initial_cs.deinit(allocator);
 
         var r = Raft{
             .id = config.id,
@@ -254,8 +256,7 @@ pub const Raft = struct {
         r.becomeFollower(r.term, invalid_id);
 
         // Post-confchange bookkeeping: figure out whether we're a voter.
-        var post_cs = r.postConfChange();
-        defer post_cs.deinit(allocator);
+        r.postConfChange(initial_cs);
 
         log.info(
             "node {} initialized: term={} commit={} applied={} last_index={} last_term={}",
@@ -1074,16 +1075,13 @@ pub const Raft = struct {
     }
 
     pub fn handleSnapshot(self: *Raft, m: *Message) Error!void {
-        const snap_owned = if (m.snapshot) |s| try cloneSnapshot(self.allocator, s) else return;
-        var restored = false;
-        const last_index = if (self.restoreSnapshot(snap_owned)) blk: {
-            restored = true;
+        var snap_owned = if (m.snapshot) |s| try cloneSnapshot(self.allocator, s) else return;
+        defer snap_owned.deinit(self.allocator);
+        const last_index = if (try self.restoreSnapshot(snap_owned)) blk: {
             break :blk self.raft_log.lastIndex();
         } else blk: {
             break :blk self.raft_log.committed;
         };
-        var snap_var = snap_owned;
-        snap_var.deinit(self.allocator);
 
         try self.send(.{
             .msg_type = .append_response,
@@ -1233,7 +1231,7 @@ pub const Raft = struct {
     // Snapshot
     // -----------------------------------------------------------------------
 
-    pub fn restoreSnapshot(self: *Raft, snap_in: Snapshot) bool {
+    pub fn restoreSnapshot(self: *Raft, snap_in: Snapshot) Error!bool {
         const meta = snap_in.metadata;
         if (meta.index == std.math.maxInt(u64)) return false;
         if (self.pending_request_snapshot != invalid_index and meta.index < self.pending_request_snapshot) return false;
@@ -1260,7 +1258,7 @@ pub const Raft = struct {
                     log.warn("invalid snapshot ConfState member {}", .{id});
                     return false;
                 }
-                const result = member_roles.getOrPut(id) catch return false;
+                const result = try member_roles.getOrPut(id);
                 const previous = if (result.found_existing) result.value_ptr.* else 0;
                 const combined = previous | set.role;
                 if (previous & set.role != 0) {
@@ -1304,16 +1302,22 @@ pub const Raft = struct {
         var restored_tracker = ProgressTracker.init(self.allocator, self.config.max_inflight_messages);
         defer restored_tracker.deinit();
 
-        var cs_clone = cloneConfState(self.allocator, meta.conf_state) catch return false;
-        defer cs_clone.deinit(self.allocator);
-        restoreTracker(&restored_tracker, meta.index + 1, cs_clone) catch {
-            log.warn("failed to restore tracker from snapshot", .{});
-            return false;
+        restoreTracker(&restored_tracker, meta.index + 1, meta.conf_state) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                log.warn("failed to restore tracker from snapshot: {s}", .{@errorName(err)});
+                return false;
+            },
         };
+        var restored_cs = try restored_tracker.conf.toConfState(self.allocator);
+        defer restored_cs.deinit(self.allocator);
 
-        self.raft_log.restore(snap_in) catch {
-            log.warn("failed to restore raft log from snapshot", .{});
-            return false;
+        self.raft_log.restore(snap_in) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                log.warn("failed to restore raft log from snapshot: {s}", .{@errorName(err)});
+                return false;
+            },
         };
 
         // Swap the tracker in.
@@ -1325,8 +1329,7 @@ pub const Raft = struct {
         var old = old_tracker;
         old.deinit();
 
-        var post_cs = self.postConfChange();
-        defer post_cs.deinit(self.allocator);
+        self.postConfChange(restored_cs);
         self.pending_request_snapshot = invalid_index;
         log.info("restored snapshot at index {}", .{meta.index});
         return true;
@@ -1622,25 +1625,27 @@ pub const Raft = struct {
         }
 
         const r = result.?;
+        var cs = try r.conf.toConfState(self.allocator);
+        errdefer cs.deinit(self.allocator);
         try self.progress_tracker.applyConf(r.conf, r.changes, self.raft_log.lastIndex());
-        return self.postConfChange();
+        self.postConfChange(cs);
+        return cs;
     }
 
-    pub fn postConfChange(self: *Raft) ConfState {
+    fn postConfChange(self: *Raft, cs: ConfState) void {
         defer invariant.assertRaft(self);
         log.info("switched to configuration", .{});
-        const cs = self.progress_tracker.conf.toConfState(self.allocator) catch return ConfState{};
         const is_voter = self.progress_tracker.conf.voters.contains(self.id);
         self.promotable = is_voter;
 
-        if (!is_voter and self.state == .leader) return cs;
-        if (self.state != .leader or cs.voters.len == 0) return cs;
+        if (!is_voter and self.state == .leader) return;
+        if (self.state != .leader or cs.voters.len == 0) return;
 
         const committed_now = self.maybeCommit() catch false;
         if (committed_now) {
             self.broadcastAppend() catch {};
         } else {
-            const ids = self.collectPeerIds() catch return cs;
+            const ids = self.collectPeerIds() catch return;
             defer self.allocator.free(ids);
             for (ids) |id| {
                 if (id == self.id) continue;
@@ -1673,8 +1678,6 @@ pub const Raft = struct {
         if (self.lead_transferee) |lt| {
             if (!self.progress_tracker.conf.voters.contains(lt)) self.abortLeaderTransfer();
         }
-
-        return cs;
     }
 
     // -----------------------------------------------------------------------
@@ -1839,10 +1842,6 @@ pub const Raft = struct {
 // ===========================================================================
 // Free helpers
 // ===========================================================================
-
-fn cloneConfState(allocator: std.mem.Allocator, src: ConfState) !ConfState {
-    return storage_mod.cloneConfState(allocator, src);
-}
 
 fn voteRespMsgType(mt: MessageType) MessageType {
     return switch (mt) {

@@ -223,6 +223,16 @@ pub const ProgressMap = struct {
         gop.value_ptr.* = p;
     }
 
+    pub fn ensureUnusedCapacity(self: *ProgressMap, additional_count: u32) !void {
+        try self.map.ensureUnusedCapacity(additional_count);
+    }
+
+    pub fn putAssumeCapacity(self: *ProgressMap, id: u64, p: Progress) void {
+        const gop = self.map.getOrPutAssumeCapacity(id);
+        if (gop.found_existing) gop.value_ptr.deinit();
+        gop.value_ptr.* = p;
+    }
+
     pub fn remove(self: *ProgressMap, id: u64) bool {
         if (self.map.getEntry(id)) |entry| {
             entry.value_ptr.deinit();

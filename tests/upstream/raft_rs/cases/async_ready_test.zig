@@ -115,9 +115,9 @@ fn expectImmediateMessagesNonEmpty(rd: raft.Ready, message_type: raft.MessageTyp
 }
 
 fn persistReady(storage: *raft.MemoryStorage, rd: raft.Ready) !void {
-    if (rd.hs) |hs| try storage.setHardState(hs);
     if (rd.snapshot) |snapshot| try storage.applySnapshot(allocator, snapshot);
     if (rd.entries.len > 0) try storage.append(allocator, rd.entries);
+    if (rd.hs) |hs| try storage.setHardState(hs);
 }
 
 test "raft-rs: test_raw_node_with_async_apply" {
@@ -205,6 +205,14 @@ test "raft-rs: test_raw_node_entries_after_snapshot" {
         try expectNoEntries(rd.light.committed_entries);
         try expectPersistedMessages(rd, .append_response, 2);
         try persistReady(&storage, rd);
+
+        var snapshot = (try storage.localSnapshot(allocator)).?;
+        defer snapshot.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 10), snapshot.metadata.index);
+        try std.testing.expectEqual(@as(u64, 13), try storage.lastIndex());
+        var state = try storage.initialState(allocator);
+        defer state.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, 12), state.hard_state.commit);
 
         var light = try node.advance(rd);
         defer light.deinit(allocator);

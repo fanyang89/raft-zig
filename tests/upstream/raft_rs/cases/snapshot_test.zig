@@ -58,7 +58,7 @@ fn restoreAndPersistSnapshot(peer: *network.Peer) !void {
     } };
     defer snapshot.deinit(allocator);
 
-    try std.testing.expect(peer.raft.restoreSnapshot(snapshot));
+    try std.testing.expect(try peer.raft.restoreSnapshot(snapshot));
     peer.raft.becomeFollower(snapshot.metadata.term, raft.invalid_id);
     const pending = peer.raft.raft_log.unstable.snapshot.?;
     const snapshot_index = pending.metadata.index;

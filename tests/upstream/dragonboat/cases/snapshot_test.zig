@@ -58,14 +58,14 @@ test "Dragonboat: raft_test.go::TestNonVotingCanBePromotedBySnapshot" {
         .learners = &learners,
     });
     defer learner_snap.deinit(allocator);
-    try std.testing.expect(learner.restoreSnapshot(learner_snap));
+    try std.testing.expect(try learner.restoreSnapshot(learner_snap));
     try std.testing.expect(learner.progress_tracker.conf.learners.contains(3));
     try std.testing.expectEqual(@as(u64, 1), learner.term);
 
     var promoted = [_]u64{ 1, 2, 3 };
     var promotion = try snapshot(21, 3, .{ .voters = &promoted });
     defer promotion.deinit(allocator);
-    try std.testing.expect(learner.restoreSnapshot(promotion));
+    try std.testing.expect(try learner.restoreSnapshot(promotion));
     try std.testing.expect(learner.progress_tracker.conf.voters.incoming.contains(3));
     try std.testing.expect(!learner.progress_tracker.conf.learners.contains(3));
     try std.testing.expectEqual(@as(u64, 1), learner.term);
@@ -82,7 +82,7 @@ test "Dragonboat: raft_test.go::TestNonVotingCanBePromotedBySnapshot" {
         .learners = &learners,
     });
     defer demotion.deinit(allocator);
-    try std.testing.expect(voter.restoreSnapshot(demotion));
+    try std.testing.expect(try voter.restoreSnapshot(demotion));
     try std.testing.expect(!voter.progress_tracker.conf.voters.contains(3));
     try std.testing.expect(voter.progress_tracker.conf.learners.contains(3));
     try std.testing.expectEqual(@as(u64, 4), voter.term);
@@ -97,18 +97,18 @@ test "Dragonboat: raft_test.go::TestNonVotingCanBePromotedBySnapshot" {
         .learners = &learners,
     });
     defer overlapping.deinit(allocator);
-    try std.testing.expect(!invalid_node.restoreSnapshot(overlapping));
+    try std.testing.expect(!try invalid_node.restoreSnapshot(overlapping));
 
     var auto_leave = try snapshot(20, 2, .{
         .voters = &voters,
         .auto_leave = true,
     });
     defer auto_leave.deinit(allocator);
-    try std.testing.expect(!invalid_node.restoreSnapshot(auto_leave));
+    try std.testing.expect(!try invalid_node.restoreSnapshot(auto_leave));
 
     var maximum = try snapshot(std.math.maxInt(u64), 2, .{ .voters = &voters });
     defer maximum.deinit(allocator);
-    try std.testing.expect(!invalid_node.restoreSnapshot(maximum));
+    try std.testing.expect(!try invalid_node.restoreSnapshot(maximum));
 
     var leader_storage = raft.MemoryStorage.init();
     defer leader_storage.deinit(allocator);
@@ -117,7 +117,7 @@ test "Dragonboat: raft_test.go::TestNonVotingCanBePromotedBySnapshot" {
     leader.becomeCandidate();
     try leader.becomeLeader();
     const leader_term = leader.term;
-    try std.testing.expect(!leader.restoreSnapshot(demotion));
+    try std.testing.expect(!try leader.restoreSnapshot(demotion));
     try std.testing.expectEqual(raft.StateRole.follower, leader.state);
     try std.testing.expectEqual(leader_term + 1, leader.term);
 }

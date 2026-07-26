@@ -54,7 +54,7 @@ test "snap: restore snapshot updates tracker configuration" {
     };
     defer snap.deinit(allocator);
 
-    _ = node.restoreSnapshot(snap);
+    _ = try node.restoreSnapshot(snap);
 
     // Tracker should now have voters {1, 4, 5}.
     try std.testing.expect(node.progress_tracker.conf.voters.incoming.contains(1));
@@ -84,7 +84,7 @@ test "snap: restore snapshot updates tracker learners" {
     };
     defer snap.deinit(allocator);
 
-    _ = node.restoreSnapshot(snap);
+    _ = try node.restoreSnapshot(snap);
 
     try std.testing.expect(node.progress_tracker.conf.learners.contains(5));
     try std.testing.expect(node.progress_tracker.progress.contains(5));
@@ -104,10 +104,80 @@ test "snap: restore snapshot advances committed index" {
     };
     defer snap.deinit(allocator);
 
-    _ = node.restoreSnapshot(snap);
+    _ = try node.restoreSnapshot(snap);
 
     try std.testing.expectEqual(@as(u64, 100), node.raft_log.committed);
     try std.testing.expectEqual(@as(u64, 101), node.raft_log.unstable.offset);
+}
+
+test "snap: handle snapshot OOM leaks nothing and keeps restore atomic" {
+    var snap = Snapshot{
+        .data = try allocator.dupe(u8, "snapshot"),
+        .metadata = .{
+            .index = 10,
+            .term = 2,
+            .conf_state = .{ .voters = try allocator.dupe(u64, &.{ 1, 4, 5 }) },
+        },
+    };
+    defer snap.deinit(allocator);
+    var saw_oom = false;
+    var saw_restore_oom = false;
+    var reached_success = false;
+
+    var clone_counter = std.testing.FailingAllocator.init(allocator, .{});
+    var cloned = try raft.cloneSnapshot(clone_counter.allocator(), snap);
+    cloned.deinit(clone_counter.allocator());
+    const clone_allocations = clone_counter.alloc_index;
+    try std.testing.expectEqual(clone_counter.allocated_bytes, clone_counter.freed_bytes);
+
+    for (0..256) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const failing_allocator = failing.allocator();
+        var iteration_succeeded = false;
+        {
+            var storage = try newStorage(&.{ 1, 2, 3 });
+            defer storage.deinit(allocator);
+            var node = try raft.Raft.init(failing_allocator, makeConfig(1), storage.asStorage());
+            defer node.deinit();
+
+            var before = try node.progress_tracker.conf.toConfState(allocator);
+            defer before.deinit(allocator);
+            const progress_count = node.progress_tracker.progress.count();
+            const was_promotable = node.promotable;
+            failing.fail_index = failing.alloc_index + failure_offset;
+            var message = Message{ .from = 2, .snapshot = snap };
+
+            if (node.handleSnapshot(&message)) {
+                try std.testing.expect(node.progress_tracker.conf.voters.incoming.contains(4));
+                try std.testing.expectEqual(@as(u64, 10), node.raft_log.committed);
+                iteration_succeeded = true;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                saw_oom = true;
+                if (node.raft_log.committed == 0) {
+                    var after = try node.progress_tracker.conf.toConfState(allocator);
+                    defer after.deinit(allocator);
+                    try std.testing.expect(before.eql(after));
+                    try std.testing.expectEqual(progress_count, node.progress_tracker.progress.count());
+                    try std.testing.expect(node.raft_log.unstable.snapshot == null);
+                    try std.testing.expectEqual(was_promotable, node.promotable);
+                    if (failure_offset >= clone_allocations) saw_restore_oom = true;
+                } else {
+                    try std.testing.expectEqual(@as(u64, 10), node.raft_log.committed);
+                    try std.testing.expect(node.progress_tracker.conf.voters.incoming.contains(4));
+                }
+            }
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (iteration_succeeded) {
+            reached_success = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_restore_oom);
+    try std.testing.expect(reached_success);
 }
 
 test "snap: pending snapshot pauses replication" {

@@ -16,6 +16,15 @@ const Message = raft.Message;
 const MessageType = raft.MessageType;
 const StateRole = raft.StateRole;
 
+fn raftConfig(id: u64) raft.Config {
+    var config = raft.defaultConfig();
+    config.id = id;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.election_timeout_seed = id * 13;
+    return config;
+}
+
 fn hup(from: u64) Message {
     return .{ .msg_type = .hup, .from = from, .to = 0 };
 }
@@ -98,6 +107,58 @@ test "raft: single node self-elects and commits" {
     const p1 = net.getPeer(1).?;
     try std.testing.expectEqual(StateRole.leader, p1.raft.state);
     try std.testing.expectEqual(@as(u64, 1), p1.raft.raft_log.committed);
+}
+
+test "raft: applyConfChange OOM leaves configuration unchanged" {
+    var saw_oom = false;
+    var reached_success = false;
+
+    for (0..128) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const failing_allocator = failing.allocator();
+        var storage = raft.MemoryStorage.init();
+        defer storage.deinit(allocator);
+        try storage.setRaftState(allocator, .{
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        });
+        var node = try raft.Raft.init(failing_allocator, raftConfig(1), storage.asStorage());
+        defer node.deinit();
+        try std.testing.expect(try node.appendEntry(&.{.{}}));
+
+        var before = try node.progress_tracker.conf.toConfState(allocator);
+        defer before.deinit(allocator);
+        const progress_count = node.progress_tracker.progress.count();
+        const self_progress = node.progress_tracker.getPtr(1).?.*;
+        const was_promotable = node.promotable;
+
+        failing.fail_index = failing.alloc_index + failure_offset;
+        const changes = [_]raft.ConfChangeSingle{
+            .{ .change_type = .add_node, .node_id = 2 },
+        };
+        if (node.applyConfChange(.{ .changes = @constCast(&changes) })) |conf_state| {
+            var applied = conf_state;
+            defer applied.deinit(failing_allocator);
+            try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, applied.voters);
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            var after = try node.progress_tracker.conf.toConfState(allocator);
+            defer after.deinit(allocator);
+            try std.testing.expect(before.eql(after));
+            try std.testing.expectEqual(progress_count, node.progress_tracker.progress.count());
+            const current_self_progress = node.progress_tracker.getPtr(1).?.*;
+            try std.testing.expectEqual(self_progress.matched, current_self_progress.matched);
+            try std.testing.expectEqual(self_progress.next_idx, current_self_progress.next_idx);
+            try std.testing.expectEqual(self_progress.state, current_self_progress.state);
+            try std.testing.expectEqual(self_progress.recent_active, current_self_progress.recent_active);
+            try std.testing.expectEqual(was_promotable, node.promotable);
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(reached_success);
 }
 
 test "raft: log replication to followers" {

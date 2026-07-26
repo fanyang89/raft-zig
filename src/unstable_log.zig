@@ -112,13 +112,16 @@ pub const Unstable = struct {
         self.entries_size = 0;
     }
 
-    pub fn restore(self: *Unstable, snapshot: Snapshot) void {
+    pub fn restore(self: *Unstable, snapshot: Snapshot) !void {
+        var restored_snapshot = try cloneSnapshot(self.allocator, snapshot);
+        errdefer restored_snapshot.deinit(self.allocator);
+
         for (self.entries.items) |*e| e.deinit(self.allocator);
         self.entries.clearRetainingCapacity();
         self.entries_size = 0;
         self.offset = snapshot.metadata.index + 1;
         if (self.snapshot) |*old| old.deinit(self.allocator);
-        self.snapshot = cloneSnapshot(self.allocator, snapshot) catch @panic("OOM in Unstable.restore");
+        self.snapshot = restored_snapshot;
     }
 
     /// Append (or replace) entries starting at `ents[0].index`. Three paths:
@@ -327,7 +330,7 @@ test "unstable restore resets entries and clones snapshot" {
     defer uns.deinit();
 
     const s = Snapshot{ .metadata = .{ .index = 6, .term = 2 } };
-    uns.restore(s);
+    try uns.restore(s);
 
     try std.testing.expectEqual(@as(u64, 7), uns.offset);
     try std.testing.expectEqual(@as(usize, 0), uns.entries.items.len);

@@ -271,9 +271,9 @@ pub const ConfChanger = struct {
         for (ccs) |cc| {
             if (cc.node_id == 0) continue;
             switch (cc.change_type) {
-                .add_node => makeVoter(cfg, prs, cc.node_id),
-                .remove_node => remove(cfg, prs, cc.node_id),
-                .add_learner_node => makeLearner(cfg, prs, cc.node_id),
+                .add_node => try makeVoter(cfg, prs, cc.node_id),
+                .remove_node => try remove(cfg, prs, cc.node_id),
+                .add_learner_node => try makeLearner(cfg, prs, cc.node_id),
             }
         }
         if (cfg.voters.incoming.isEmpty()) return error.RemovedAllVoters;
@@ -288,19 +288,19 @@ pub const ConfChanger = struct {
         try prs.appendChange(id, .add);
     }
 
-    fn makeVoter(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) void {
+    fn makeVoter(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) Error!void {
         if (!prs.contains(id)) {
-            initProgress(cfg, prs, id, false) catch return;
+            try initProgress(cfg, prs, id, false);
             return;
         }
-        cfg.voters.incoming.add(id) catch return;
+        try cfg.voters.incoming.add(id);
         _ = cfg.learners.remove(id);
         _ = cfg.learners_next.remove(id);
     }
 
-    fn makeLearner(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) void {
+    fn makeLearner(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) Error!void {
         if (!prs.contains(id)) {
-            initProgress(cfg, prs, id, true) catch return;
+            try initProgress(cfg, prs, id, true);
             return;
         }
         if (cfg.learners.contains(id)) return;
@@ -310,13 +310,13 @@ pub const ConfChanger = struct {
         _ = cfg.learners_next.remove(id);
 
         if (cfg.voters.outgoing.contains(id)) {
-            cfg.learners_next.put(id, {}) catch return;
+            try cfg.learners_next.put(id, {});
         } else {
-            cfg.learners.put(id, {}) catch return;
+            try cfg.learners.put(id, {});
         }
     }
 
-    fn remove(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) void {
+    fn remove(cfg: *TrackerConfiguration, prs: *IncrChangeMap, id: u64) Error!void {
         if (!prs.contains(id)) return;
 
         _ = cfg.voters.incoming.remove(id);
@@ -326,7 +326,7 @@ pub const ConfChanger = struct {
         // Keep the Progress entry if the peer is still a voter in the
         // outgoing config (joint transition).
         if (!cfg.voters.outgoing.contains(id)) {
-            prs.appendChange(id, .remove) catch return;
+            try prs.appendChange(id, .remove);
         }
     }
 };

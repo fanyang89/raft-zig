@@ -244,6 +244,61 @@ fn makeConfig(id: u64) RaftorConfig {
     return rc;
 }
 
+fn makeReadyEntries(term: u64, first: u64, count: usize) ![]raft.Entry {
+    const entries = try allocator.alloc(raft.Entry, count);
+    var initialized: usize = 0;
+    errdefer {
+        for (entries[0..initialized]) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    for (entries, 0..) |*entry, offset| {
+        entry.* = .{
+            .term = term,
+            .index = first + offset,
+            .data = try allocator.dupe(u8, "entry"),
+        };
+        initialized += 1;
+    }
+    return entries;
+}
+
+fn stageSnapshotAndSuffix(r: *Raftor) !void {
+    const snapshot_data = try allocator.dupe(u8, "snapshot-10");
+    const voters = allocator.dupe(u64, &.{ 1, 2 }) catch |err| {
+        allocator.free(snapshot_data);
+        return err;
+    };
+    try r.getRawNode().step(.{
+        .msg_type = .snapshot,
+        .from = 2,
+        .to = 1,
+        .term = 3,
+        .snapshot = .{
+            .data = snapshot_data,
+            .metadata = .{
+                .index = 10,
+                .term = 3,
+                .conf_state = .{ .voters = voters },
+            },
+        },
+    });
+    try r.getRawNode().step(.{
+        .msg_type = .append,
+        .from = 2,
+        .to = 1,
+        .term = 3,
+        .index = 10,
+        .log_term = 3,
+        .commit = 12,
+        .entries = try makeReadyEntries(3, 11, 3),
+    });
+}
+
+fn processOneReady(r: *Raftor) !void {
+    try std.testing.expect(try r.processReadyStep());
+    while (r.getReadyPhase() != null) try std.testing.expect(try r.processReadyStep());
+}
+
 const ProposalTester = struct {
     applied: bool = false,
     response: ?[]u8 = null,
@@ -859,6 +914,8 @@ test "raftor: Ready persistence resumes at the failed phase" {
     try std.testing.expect(try r.processReadyStep());
     try std.testing.expectEqual(raft.ReadyPhase.validate, r.getReadyPhase().?);
     try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.persist_snapshot, r.getReadyPhase().?);
+    try std.testing.expect(try r.processReadyStep());
     try std.testing.expectEqual(raft.ReadyPhase.persist_entries, r.getReadyPhase().?);
 
     failing.fail_index = failing.alloc_index;
@@ -869,6 +926,111 @@ test "raftor: Ready persistence resumes at the failed phase" {
     try std.testing.expect(try r.tick());
     try std.testing.expectEqual(@as(?raft.ReadyPhase, null), r.getReadyPhase());
     try std.testing.expect(r.isLeader());
+}
+
+test "raftor: Ready persists snapshot before its suffix and HardState" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try stageSnapshotAndSuffix(r);
+    try processOneReady(r);
+
+    var snapshot = (try storage.localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 10), snapshot.metadata.index);
+    try std.testing.expectEqual(@as(u64, 13), try storage.lastIndex());
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 12), state.hard_state.commit);
+    try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    try std.testing.expect(!r.getRawNode().hasReady());
+}
+
+test "raftor: WAL recovers snapshot Ready suffix and HardState" {
+    var fixture = try raft.FsTestFixture.init(allocator, .real);
+    defer fixture.deinit();
+
+    {
+        var storage = try raft.WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
+        defer storage.deinit();
+        var transport = raft.NoopTransport.init(allocator);
+        defer transport.deinit();
+        var machine = DurableStateMachine.init(allocator);
+        defer machine.deinit();
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        });
+        defer r.destroy();
+        try stageSnapshotAndSuffix(r);
+        try processOneReady(r);
+        try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    }
+
+    var recovered = try raft.WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
+    defer recovered.deinit();
+    const storage = recovered.asWritableStorage();
+    var snapshot = (try storage.localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 10), snapshot.metadata.index);
+    try std.testing.expectEqual(@as(u64, 11), try storage.firstIndex());
+    try std.testing.expectEqual(@as(u64, 13), try storage.lastIndex());
+    const entries = try storage.entries(allocator, 11, 14, null, .{ .empty = .{ .can_async = false } });
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+    for (entries, 11..) |entry, index| try std.testing.expectEqual(index, entry.index);
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 12), state.hard_state.commit);
+}
+
+test "raftor: snapshot sync failure does not restore application state" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try stageSnapshotAndSuffix(r);
+    failing_storage.fail_sync = true;
+
+    try std.testing.expect(try r.processReadyStep());
+    while (r.getReadyPhase() != raft.ReadyPhase.sync) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    try std.testing.expectError(error.WalSyncFailed, r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.sync, r.getReadyPhase().?);
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    try std.testing.expectEqual(@as(u64, 0), r.getStatus().applied_index);
+
+    failing_storage.fail_sync = false;
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.restore_snapshot, r.getReadyPhase().?);
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    while (r.getReadyPhase() != null) try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    try std.testing.expectEqual(@as(u64, 12), r.getStatus().applied_index);
 }
 
 test "raftor: bootstrap sync failure aborts creation" {
@@ -1023,6 +1185,63 @@ test "raftor: configuration persistence failure is terminal" {
     try std.testing.expectError(error.WalWriteFailed, r.tick());
     try std.testing.expectEqual(@as(u64, 1), r.getStatus().applied_index);
     try std.testing.expectError(error.WalWriteFailed, r.tick());
+}
+
+test "raftor: configuration sync failure is terminal before apply advances" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    try r.addNode(2, "peer-2");
+
+    try std.testing.expect(try r.processReadyStep());
+    while (r.getReadyPhase() != raft.ReadyPhase.apply_advanced_committed) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    failing_storage.fail_sync = true;
+    try std.testing.expectError(error.WalSyncFailed, r.processReadyStep());
+    try std.testing.expectEqual(@as(u64, 1), r.getStatus().applied_index);
+    try std.testing.expectError(error.WalSyncFailed, r.tick());
+}
+
+test "raftor: WAL recovers membership immediately after configuration apply" {
+    var fixture = try raft.FsTestFixture.init(allocator, .real);
+    defer fixture.deinit();
+
+    {
+        var storage = try raft.WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
+        defer storage.deinit();
+        var transport = raft.NoopTransport.init(allocator);
+        defer transport.deinit();
+        var machine = MockStateMachine.init(allocator);
+        defer machine.deinit();
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .bootstrap, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        });
+        defer r.destroy();
+        try r.campaign();
+        try r.addNode(2, "peer-2");
+        try processOneReady(r);
+    }
+
+    var recovered = try raft.WALStorage.openWithFs(allocator, fixture.walDir(), fixture.fs());
+    defer recovered.deinit();
+    var state = try recovered.asWritableStorage().initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, state.conf_state.voters);
 }
 
 test "raftor: advanced commit survives restart" {

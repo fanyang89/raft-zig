@@ -28,7 +28,7 @@ fn installSnapshot(peer: *network.Peer) !void {
     } };
     defer snapshot.deinit(allocator);
 
-    try std.testing.expect(peer.raft.restoreSnapshot(snapshot));
+    try std.testing.expect(try peer.raft.restoreSnapshot(snapshot));
     const pending = peer.raft.raft_log.unstable.snapshot.?;
     try peer.storage.applySnapshot(allocator, pending);
     peer.raft.raft_log.stableSnapshot(pending.metadata.index);
@@ -238,7 +238,7 @@ test "raft-rs: test_raft_snap::test_request_snapshot" {
         .conf_state = .{ .voters = try allocator.dupe(u64, &.{ 1, 2 }) },
     } };
     defer snapshot.deinit(allocator);
-    try std.testing.expect(node.raft.restoreSnapshot(snapshot));
+    try std.testing.expect(try node.raft.restoreSnapshot(snapshot));
     node.raft.becomeFollower(snapshot.metadata.term, raft.invalid_id);
     const pending = node.raft.raft_log.unstable.snapshot.?;
     try node.storage.applySnapshot(allocator, pending);

@@ -453,11 +453,11 @@ pub const RaftLog = struct {
         if (index < self.committed) {
             return error.Fatal;
         }
+        try self.unstable.restore(snapshot);
         if (self.persisted > self.committed) {
             self.persisted = self.committed;
         }
         self.committed = index;
-        self.unstable.restore(snapshot);
     }
 
     pub fn appliedIndexUpperBound(self: *const RaftLog) u64 {

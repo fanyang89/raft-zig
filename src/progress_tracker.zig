@@ -96,23 +96,32 @@ pub const ProgressTracker = struct {
         changes: MapChange,
         next_idx: u64,
     ) !void {
-        // Swap in the new config; destroy the previous one with the same allocator.
-        var old = self.conf;
-        defer old.deinit();
-        self.conf = try conf.clone();
+        var new_conf = try conf.clone();
+        errdefer new_conf.deinit();
 
+        var additions: u32 = 0;
+        for (changes) |change| {
+            if (change.kind == .add and !self.progress.contains(change.id)) {
+                additions = std.math.add(u32, additions, 1) catch return error.OutOfMemory;
+            }
+        }
+        try self.progress.ensureUnusedCapacity(additions);
+
+        var old_conf = self.conf;
+        self.conf = new_conf;
         for (changes) |change| {
             switch (change.kind) {
                 .add => {
                     var pr = Progress.init(self.allocator, next_idx, self.max_inflight);
                     pr.recent_active = true;
-                    try self.progress.put(change.id, pr);
+                    self.progress.putAssumeCapacity(change.id, pr);
                 },
                 .remove => {
                     _ = self.progress.remove(change.id);
                 },
             }
         }
+        old_conf.deinit();
     }
 
     pub fn resetVotes(self: *ProgressTracker) void {

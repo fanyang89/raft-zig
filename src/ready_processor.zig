@@ -1,16 +1,16 @@
 //! Ready processing pipeline: drives RawNode → Ready → persist → apply → advance.
 //!
 //! Ports `lib/raftor/ready_processor.{h,cc}`. Each `process()` call pulls one
-//! Ready from the RawNode, runs it through an 8-step pipeline, and returns
+//! Ready from the RawNode, runs it through a persistence/apply pipeline, and returns
 //! whether there was work to do:
 //!
 //!   1. Validate entries (optional CRC32C checksum)
-//!   2. Persist unstable entries to storage
-//!   3. Persist HardState (if changed)
-//!   4. Apply snapshot (if present)
-//!   5. Send outbound messages via transport
-//!   6. Apply committed entries to StateMachine
-//!   7. Enqueue read-index states
+//!   2. Persist an incoming snapshot as the new storage baseline
+//!   3. Persist unstable entries after that snapshot
+//!   4. Persist HardState (if changed) and sync storage
+//!   5. Restore the durable snapshot into the StateMachine
+//!   6. Send persistence-dependent outbound messages via transport
+//!   7. Apply committed entries and complete read-index states
 //!   8. Advance RawNode + process light ready (more committed entries + messages)
 
 const std = @import("std");
@@ -47,11 +47,11 @@ const log = std.log.scoped(.raft_zig_ready_processor);
 
 pub const ReadyPhase = enum {
     validate,
+    persist_snapshot,
     persist_entries,
     persist_hard_state,
-    restore_snapshot,
-    persist_snapshot,
     sync,
+    restore_snapshot,
     send_messages,
     apply_committed,
     complete_reads,
@@ -169,6 +169,12 @@ pub const ReadyProcessor = struct {
         switch (pending.phase) {
             .validate => {
                 if (self.checksum_enabled) try self.validateEntries(pending.ready.entries);
+                pending.phase = .persist_snapshot;
+            },
+            .persist_snapshot => {
+                if (pending.ready.snapshot) |snapshot| {
+                    if (snapshot.metadata.index > 0) try self.persistSnapshot(snapshot);
+                }
                 pending.phase = .persist_entries;
             },
             .persist_entries => {
@@ -181,22 +187,17 @@ pub const ReadyProcessor = struct {
                 if (pending.ready.hs) |hs| {
                     try self.storage.setHardState(hs);
                 }
+                pending.phase = .sync;
+            },
+            .sync => {
+                const has_snapshot = if (pending.ready.snapshot) |snapshot| snapshot.metadata.index > 0 else false;
+                if (pending.ready.must_sync or has_snapshot) try self.storage.sync();
                 pending.phase = .restore_snapshot;
             },
             .restore_snapshot => {
                 if (pending.ready.snapshot) |snapshot| {
                     if (snapshot.metadata.index > 0) try self.restoreSnapshot(snapshot);
                 }
-                pending.phase = .persist_snapshot;
-            },
-            .persist_snapshot => {
-                if (pending.ready.snapshot) |snapshot| {
-                    if (snapshot.metadata.index > 0) try self.persistSnapshot(snapshot);
-                }
-                pending.phase = .sync;
-            },
-            .sync => {
-                if (pending.ready.must_sync) try self.storage.sync();
                 pending.phase = .send_messages;
             },
             .send_messages => {
@@ -311,13 +312,12 @@ pub const ReadyProcessor = struct {
 
         var reader = state_machine_mod.BufferSnapshotReader.init(snap.data);
         try self.state_machine.restoreSnapshot(snap.metadata, reader.reader());
+        self.applied_index = snap.metadata.index;
+        self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
     fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
         try self.storage.applySnapshot(self.allocator, snap);
-
-        self.applied_index = snap.metadata.index;
-        self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
     fn applyCommittedEntries(self: *ReadyProcessor, entries: []Entry) Error!void {
@@ -357,6 +357,7 @@ pub const ReadyProcessor = struct {
                 var applied_cs = try self.raw_node.*.applyConfChange(cc);
                 defer applied_cs.deinit(self.allocator);
                 try self.storage.setConfState(self.allocator, applied_cs);
+                try self.storage.sync();
                 for (cc.changes) |change| switch (change.change_type) {
                     .add_node, .add_learner_node => _ = self.transport.addPeer(change.node_id, cc.context) catch |err| {
                         log.warn("failed to add transport peer {}: {s}", .{ change.node_id, @errorName(err) });
