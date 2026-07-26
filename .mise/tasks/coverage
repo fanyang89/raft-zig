@@ -3,4 +3,5 @@
 set -euo pipefail
 
 rm -rf zig-out/coverage
+mkdir -p zig-out/coverage
 exec zig build test -Dcoverage --summary all "$@"
