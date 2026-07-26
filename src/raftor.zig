@@ -312,6 +312,14 @@ pub const Raftor = struct {
         } else if (initial_state.membership_index != 0) {
             return error.MissingClusterMembership;
         }
+        if (self.transport.identity()) |identity| {
+            if (identity.node_id != config.nodeId()) return error.TransportIdentityMismatch;
+            if (initial_state.cluster_membership) |membership| {
+                if (!std.mem.eql(u8, &identity.cluster_id, &membership.cluster_id)) {
+                    return error.TransportIdentityMismatch;
+                }
+            } else return error.MissingClusterMembership;
+        }
         const incarnation = try self.storage.reserveIncarnation();
         self.request_context_generator = request_context_mod.Generator.init(config.nodeId(), incarnation);
         const initial_applied_index = if (startup_mode == .restart)

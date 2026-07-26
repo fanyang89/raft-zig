@@ -248,13 +248,16 @@ pub const decodeFramed = codec_mod.decodeFramed;
 
 pub const LoopbackNetwork = loopback_transport_mod.LoopbackNetwork;
 pub const LoopbackTransport = loopback_transport_mod.LoopbackTransport;
+pub const TransportIdentity = transport_mod.TransportIdentity;
 
 pub const ProposalQueue = proposal_queue_mod.ProposalQueue;
 pub const ReadIndexQueue = proposal_queue_mod.ReadIndexQueue;
 
 pub const InboundMailbox = rpc_inbound_mailbox.InboundMailbox;
 pub const PeerManager = rpc_peer_manager.PeerManager;
+pub const PeerLifecycleState = rpc_peer_manager.LifecycleState;
 pub const GrpcLiteTransport = rpc_grpc_transport.GrpcLiteTransport;
+pub const GrpcLiteTransportConfig = rpc_grpc_transport.Config;
 
 pub const version = version_info.string;
 

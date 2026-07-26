@@ -164,6 +164,7 @@ const RecordingTransport = struct {
     delivered_message_count: usize = 0,
     delivered_peer_event_count: usize = 0,
     stopped: bool = false,
+    identity_value: raft.TransportIdentity = .{ .cluster_id = .{0} ** 16, .node_id = 0 },
 
     fn init(alloc: std.mem.Allocator) RecordingTransport {
         return .{ .allocator = alloc };
@@ -283,6 +284,15 @@ const RecordingTransport = struct {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
+    fn transportWithIdentity(self: *RecordingTransport, value: raft.TransportIdentity) raft.Transport {
+        self.identity_value = value;
+        return .{ .ctx = self, .vtable = &identity_vtable };
+    }
+
+    fn identity(ctx: *anyopaque) raft.TransportIdentity {
+        return cast(ctx).identity_value;
+    }
+
     const vtable: raft.Transport.VTable = .{
         .start = start,
         .stop = stop,
@@ -292,6 +302,18 @@ const RecordingTransport = struct {
         .set_message_callback = setMessageCallback,
         .set_peer_event_callback = setPeerEventCallback,
         .poll_one = pollOne,
+    };
+
+    const identity_vtable: raft.Transport.VTable = .{
+        .start = start,
+        .stop = stop,
+        .add_peer = addPeer,
+        .remove_peer = removePeer,
+        .send = send,
+        .set_message_callback = setMessageCallback,
+        .set_peer_event_callback = setPeerEventCallback,
+        .poll_one = pollOne,
+        .identity = identity,
     };
 };
 
@@ -2252,6 +2274,29 @@ test "raftor: durable bootstrap persists sorted membership and validates restart
         error.ClusterIdMismatch,
         Raftor.createWithDependencies(allocator, wrong_config, .restart, dependencies),
     );
+}
+
+test "raftor: transport identity mismatch fails before transport start" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const mismatched_identity = raft.TransportIdentity{
+        .cluster_id = .{9} ** 16,
+        .node_id = 1,
+    };
+
+    try std.testing.expectError(
+        error.TransportIdentityMismatch,
+        Raftor.createWithDependencies(allocator, makeDurableConfig(1, "node-1"), .bootstrap, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transportWithIdentity(mismatched_identity),
+            .state_machine = machine.stateMachine(),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
 }
 
 test "raftor: durable bootstrap validates peer addresses and IDs" {

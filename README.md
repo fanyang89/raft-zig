@@ -20,6 +20,12 @@ module conventions follow the author's Zig [gRPC runtime](https://github.com/fan
 - **Write-Ahead Log** — segmented log files with CRC32C checksums.
 - **Pluggable RPC** — abstract `Transport` interface with a grpc-lite backend.
 
+The grpc-lite backend uses persistent directed raw streams with bounded
+application and gRPC buffers. Stream identity metadata detects cluster and
+node-address misconfiguration; it is not authentication. The transport has no
+TLS support and must run only on a trusted network or behind a separately
+secured network boundary.
+
 ## Development
 
 Requires Zig 0.16.0 and [mise](https://mise.jdx.dev/).

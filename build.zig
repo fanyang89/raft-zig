@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         b.option(bool, "invariant-checks", "Enable fast Raft invariant checks") orelse
             (optimize == .Debug or optimize == .ReleaseSafe),
     );
+    raft_zig_options.addOption(bool, "sanitize_thread", sanitizers.thread orelse false);
 
     const raft_zig = b.addModule("raft_zig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -52,6 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    const rpc_test_step = b.step("test-rpc", "Run grpc transport tests");
     const test_specs = [_]TestSpec{
         .{ .name = "public-api", .source = "tests/public_api_test.zig" },
         .{ .name = "storage", .source = "tests/storage_test.zig" },
@@ -84,6 +86,7 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = module });
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
+        if (std.mem.eql(u8, spec.name, "rpc")) rpc_test_step.dependOn(&run_tests.step);
     }
 
     const upstream_specs = [_]TestSpec{

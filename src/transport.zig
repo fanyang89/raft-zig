@@ -13,6 +13,11 @@ const storage_mod = @import("storage.zig");
 const Error = error_model.Error;
 const Message = types.Message;
 
+pub const TransportIdentity = struct {
+    cluster_id: [16]u8,
+    node_id: u64,
+};
+
 pub const PeerEventKind = enum {
     @"unreachable",
     snapshot_failure,
@@ -58,6 +63,7 @@ pub const Transport = struct {
         set_message_callback: *const fn (ctx: *anyopaque, cb: ?MessageCallback) void,
         set_peer_event_callback: *const fn (ctx: *anyopaque, cb: ?PeerEventCallback) void,
         poll_one: *const fn (ctx: *anyopaque) Error!bool,
+        identity: ?*const fn (ctx: *anyopaque) TransportIdentity = null,
     };
 
     pub fn start(self: Transport) Error!void {
@@ -83,6 +89,10 @@ pub const Transport = struct {
     }
     pub fn pollOne(self: Transport) Error!bool {
         return self.vtable.poll_one(self.ctx);
+    }
+    pub fn identity(self: Transport) ?TransportIdentity {
+        const get_identity = self.vtable.identity orelse return null;
+        return get_identity(self.ctx);
     }
 };
 

@@ -94,6 +94,11 @@ pub const Error = error{
     HandshakeInvalidMagic,
     HandshakeBufferTooSmall,
     MessageTooLarge,
+    TransportBackpressure,
+    TransportIdentityMismatch,
+    MessageSourceMismatch,
+    MessageDestinationMismatch,
+    LocalMessageOnTransport,
     Timeout,
 
     // Config validation errors.
@@ -205,6 +210,11 @@ pub fn name(e: Error) []const u8 {
         error.HandshakeInvalidMagic => "HandshakeInvalidMagic",
         error.HandshakeBufferTooSmall => "HandshakeBufferTooSmall",
         error.MessageTooLarge => "MessageTooLarge",
+        error.TransportBackpressure => "TransportBackpressure",
+        error.TransportIdentityMismatch => "TransportIdentityMismatch",
+        error.MessageSourceMismatch => "MessageSourceMismatch",
+        error.MessageDestinationMismatch => "MessageDestinationMismatch",
+        error.LocalMessageOnTransport => "LocalMessageOnTransport",
         error.Timeout => "Timeout",
         error.InvalidNodeId => "InvalidNodeId",
         error.HeartbeatTickTooSmall => "HeartbeatTickTooSmall",
