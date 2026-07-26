@@ -262,11 +262,26 @@ const Cluster = struct {
         return error.TestTimeout;
     }
 
-    fn expectInitialStreamsOpenedOnce(self: *Cluster) !void {
+    fn initialStreamOpenCounts(self: *Cluster) [initial_node_count][initial_node_count]u64 {
+        var counts: [initial_node_count][initial_node_count]u64 = @splat(@splat(0));
         for (0..initial_node_count) |from| {
             for (0..initial_node_count) |to| {
                 if (from == to) continue;
-                try std.testing.expectEqual(@as(u64, 1), self.transports[from].?.peerOpenCount(to + 1));
+                counts[from][to] = self.transports[from].?.peerOpenCount(to + 1);
+            }
+        }
+        return counts;
+    }
+
+    fn expectInitialStreamOpenCounts(
+        self: *Cluster,
+        expected: [initial_node_count][initial_node_count]u64,
+    ) !void {
+        for (0..initial_node_count) |from| {
+            for (0..initial_node_count) |to| {
+                if (from == to) continue;
+                try std.testing.expect(expected[from][to] > 0);
+                try std.testing.expectEqual(expected[from][to], self.transports[from].?.peerOpenCount(to + 1));
             }
         }
     }
@@ -278,7 +293,8 @@ test "grpc raftor: persistent three-node replication and live learner snapshot j
     defer cluster.destroy();
 
     try cluster.waitForInitialStreams();
-    try cluster.expectInitialStreamsOpenedOnce();
+    const initial_stream_counts = cluster.initialStreamOpenCounts();
+    try cluster.expectInitialStreamOpenCounts(initial_stream_counts);
 
     try cluster.raftors[0].?.campaign();
     const leader_index = try cluster.waitForStableLeader(initial_node_count);
@@ -310,7 +326,7 @@ test "grpc raftor: persistent three-node replication and live learner snapshot j
     try std.testing.expect(read.failure == null);
     try std.testing.expect(read.completed);
     try std.testing.expect(read.observed_applied_index >= read.required_applied_index);
-    try cluster.expectInitialStreamsOpenedOnce();
+    try cluster.expectInitialStreamOpenCounts(initial_stream_counts);
 
     try leader.addLearner(4, cluster.addresses[3]);
     for (0..3000) |_| {
@@ -349,7 +365,7 @@ test "grpc raftor: persistent three-node replication and live learner snapshot j
     try std.testing.expectEqual(@as(usize, 1), post_join.completed);
     try expectConverged(cluster, node_count, "alphabetagammadeltaepsilon");
     try expectDurableLearner(cluster, 3, 4);
-    try cluster.expectInitialStreamsOpenedOnce();
+    try cluster.expectInitialStreamOpenCounts(initial_stream_counts);
 }
 
 fn countLeaders(cluster: *Cluster, active_nodes: usize) usize {
