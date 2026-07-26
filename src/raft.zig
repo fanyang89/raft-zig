@@ -94,9 +94,14 @@ pub const UncommittedState = struct {
     }
 
     pub fn maybeIncreaseUncommittedSize(self: *UncommittedState, entries: []const Entry) bool {
+        if (self.isNoLimit()) return true;
+
         const entry_count = std.math.cast(u64, entries.len) orelse return false;
-        const next_entry_count = std.math.add(u64, self.uncommitted_entries, entry_count) catch return false;
-        if (next_entry_count > self.max_uncommitted_entries) return false;
+        var next_entry_count = self.uncommitted_entries;
+        if (self.max_uncommitted_entries != std.math.maxInt(u64)) {
+            next_entry_count = std.math.add(u64, self.uncommitted_entries, entry_count) catch return false;
+            if (next_entry_count > self.max_uncommitted_entries) return false;
+        }
 
         var size: u64 = 0;
         if (self.max_uncommitted_size != std.math.maxInt(u64)) {
@@ -116,22 +121,24 @@ pub const UncommittedState = struct {
     }
 
     pub fn maybeReduceUncommittedSize(self: *UncommittedState, entries: []const Entry) bool {
-        if (entries.len == 0) return true;
+        if (self.isNoLimit() or entries.len == 0) return true;
 
         var size: u64 = 0;
         var entry_count: u64 = 0;
         for (entries) |entry| {
             if (entry.index <= self.last_log_tail_index) continue;
-            entry_count += 1;
+            if (self.max_uncommitted_entries != std.math.maxInt(u64)) entry_count += 1;
             if (self.max_uncommitted_size != std.math.maxInt(u64)) size += entry.data.len;
         }
 
         var valid = true;
-        if (entry_count > self.uncommitted_entries) {
-            self.uncommitted_entries = 0;
-            valid = false;
-        } else {
-            self.uncommitted_entries -= entry_count;
+        if (self.max_uncommitted_entries != std.math.maxInt(u64)) {
+            if (entry_count > self.uncommitted_entries) {
+                self.uncommitted_entries = 0;
+                valid = false;
+            } else {
+                self.uncommitted_entries -= entry_count;
+            }
         }
         if (self.max_uncommitted_size != std.math.maxInt(u64)) {
             if (size > self.uncommitted_size) {
