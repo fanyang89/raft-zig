@@ -5,6 +5,7 @@ const BenchmarkOptions = struct {
     proposals: usize = 1_000_000,
     batch_size: usize = 256,
     payload_size: usize = 32,
+    compact_every: usize = 65_536,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -36,12 +37,17 @@ pub fn main(init: std.process.Init) !void {
 
     const start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var proposed: usize = 0;
+    var last_compaction: usize = 0;
     while (proposed < options.proposals) {
         const batch_end = proposed + @min(options.batch_size, options.proposals - proposed);
         while (proposed < batch_end) : (proposed += 1) {
             try node.propose("", payload);
         }
         try drainReady(allocator, &node, &storage, &last_applied);
+        if (options.compact_every != 0 and proposed - last_compaction >= options.compact_every) {
+            try storage.compact(allocator, last_applied);
+            last_compaction = proposed;
+        }
     }
     const elapsed_ns: u64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds - start);
 
@@ -53,11 +59,12 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     try stdout.print(
-        "proposals={} batch={} payload={} elapsed_ns={} proposals_per_second={} ns_per_proposal={}\n",
+        "proposals={} batch={} payload={} compact_every={} elapsed_ns={} proposals_per_second={} ns_per_proposal={}\n",
         .{
             options.proposals,
             options.batch_size,
             options.payload_size,
+            options.compact_every,
             elapsed_ns,
             proposals_per_second,
             elapsed_ns / options.proposals,
@@ -80,6 +87,8 @@ fn parseOptions(init: std.process.Init) !BenchmarkOptions {
             options.batch_size = value;
         } else if (std.mem.eql(u8, arg, "--payload")) {
             options.payload_size = value;
+        } else if (std.mem.eql(u8, arg, "--compact-every")) {
+            options.compact_every = value;
         } else {
             return error.UnknownArgument;
         }
