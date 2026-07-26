@@ -14,6 +14,7 @@ const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
 const util = @import("core/util.zig");
 const storage_mod = @import("storage.zig");
+const cluster_membership_mod = @import("cluster_membership.zig");
 
 pub const Error = error_model.Error;
 pub const Entry = types.Entry;
@@ -25,6 +26,7 @@ pub const RaftState = storage_mod.RaftState;
 pub const GetEntriesContext = storage_mod.GetEntriesContext;
 pub const Storage = storage_mod.Storage;
 pub const WritableStorage = storage_mod.WritableStorage;
+pub const ClusterMembership = cluster_membership_mod.ClusterMembership;
 
 /// Non-locking core. Tests and single-threaded callers use this directly.
 pub const MemoryStorageCore = struct {
@@ -295,13 +297,35 @@ pub const MemoryStorage = struct {
     }
 
     pub fn setRaftState(self: *MemoryStorage, allocator: std.mem.Allocator, raft_state: RaftState) !void {
+        const cloned = try raft_state.clone(allocator);
         self.core.raft_state.deinit(allocator);
-        self.core.raft_state = try raft_state.clone(allocator);
+        self.core.raft_state = cloned;
     }
 
     pub fn setConfState(self: *MemoryStorage, allocator: std.mem.Allocator, cs: ConfState) Error!void {
+        const cloned = try storage_mod.cloneConfState(allocator, cs);
         self.core.raft_state.conf_state.deinit(allocator);
-        self.core.raft_state.conf_state = try storage_mod.cloneConfState(allocator, cs);
+        self.core.raft_state.conf_state = cloned;
+    }
+
+    pub fn setMembershipState(
+        self: *MemoryStorage,
+        allocator: std.mem.Allocator,
+        conf_state: ConfState,
+        cluster_membership: ClusterMembership,
+        membership_index: u64,
+    ) Error!void {
+        cluster_membership.validate(conf_state) catch return error.InvalidClusterMembership;
+        var cloned_conf_state = try storage_mod.cloneConfState(allocator, conf_state);
+        errdefer cloned_conf_state.deinit(allocator);
+        var cloned_membership = try cluster_membership.clone(allocator);
+        errdefer cloned_membership.deinit(allocator);
+
+        self.core.raft_state.conf_state.deinit(allocator);
+        if (self.core.raft_state.cluster_membership) |*membership| membership.deinit(allocator);
+        self.core.raft_state.conf_state = cloned_conf_state;
+        self.core.raft_state.cluster_membership = cloned_membership;
+        self.core.raft_state.membership_index = membership_index;
     }
 
     pub fn setHardState(self: *MemoryStorage, hs: HardState) Error!void {
@@ -464,6 +488,17 @@ pub const MemoryStorage = struct {
         return self.setConfState(allocator, cs);
     }
 
+    fn set_membership_state_impl(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        conf_state: ConfState,
+        cluster_membership: ClusterMembership,
+        membership_index: u64,
+    ) Error!void {
+        const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
+        return self.setMembershipState(allocator, conf_state, cluster_membership, membership_index);
+    }
+
     fn apply_snapshot_impl(ctx: *anyopaque, allocator: std.mem.Allocator, snapshot: Snapshot) Error!void {
         const self: *MemoryStorage = @ptrCast(@alignCast(ctx));
         return self.applySnapshot(allocator, snapshot);
@@ -499,6 +534,7 @@ pub const MemoryStorage = struct {
         .append = append_impl,
         .set_hard_state = set_hard_state_impl,
         .set_conf_state = set_conf_state_impl,
+        .set_membership_state = set_membership_state_impl,
         .apply_snapshot = apply_snapshot_impl,
         .apply_local_snapshot = apply_local_snapshot_impl,
         .local_snapshot = local_snapshot_impl,
@@ -695,4 +731,94 @@ test "memory storage reserves monotonically increasing incarnations" {
     try std.testing.expectEqual(@as(u64, 2), try storage.reserveIncarnation());
     storage.incarnation = std.math.maxInt(u64);
     try std.testing.expectError(error.IncarnationExhausted, storage.reserveIncarnation());
+}
+
+test "memory storage atomically owns membership state" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+
+    var voters = [_]u64{ 1, 2 };
+    var address_1 = [_]u8{ 'n', 'o', 'd', 'e', '-', '1' };
+    var address_2 = [_]u8{ 'n', 'o', 'd', 'e', '-', '2' };
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = &address_1 },
+        .{ .node_id = 2, .address = &address_2 },
+    };
+    try storage.asWritableStorage().setMembershipState(
+        allocator,
+        .{ .voters = &voters },
+        .{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+        7,
+    );
+
+    voters[0] = 9;
+    address_1[0] = 'X';
+    peers[1].node_id = 8;
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 7), state.membership_index);
+    try std.testing.expectEqualStrings("node-1", state.cluster_membership.?.peers[0].address);
+    try std.testing.expectEqual(@as(u64, 2), state.cluster_membership.?.peers[1].node_id);
+
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+    try std.testing.expectEqual(@as(u64, 7), storage.core.raft_state.membership_index);
+    try std.testing.expectEqualStrings("node-1", storage.core.raft_state.cluster_membership.?.peers[0].address);
+}
+
+test "memory storage membership failures do not mutate state" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers };
+    try storage.setMembershipState(allocator, .{ .voters = @constCast(&[_]u64{1}) }, membership, 4);
+
+    try std.testing.expectError(
+        error.InvalidClusterMembership,
+        storage.setMembershipState(allocator, .{ .voters = @constCast(&[_]u64{2}) }, membership, 5),
+    );
+    try std.testing.expectEqualSlices(u64, &.{1}, storage.core.raft_state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 4), storage.core.raft_state.membership_index);
+
+    var empty_buffer: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&empty_buffer);
+    var replacement_peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try std.testing.expectError(error.OutOfMemory, storage.setMembershipState(
+        fixed.allocator(),
+        .{ .voters = @constCast(&[_]u64{2}) },
+        .{ .cluster_id = .{2} ++ .{0} ** 15, .peers = &replacement_peers },
+        6,
+    ));
+    try std.testing.expectEqualSlices(u64, &.{1}, storage.core.raft_state.conf_state.voters);
+    try std.testing.expectEqual(@as(u64, 4), storage.core.raft_state.membership_index);
+}
+
+test "memory storage membership allocation failures clean up" {
+    const Check = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            conf_state: ConfState,
+            membership: ClusterMembership,
+        ) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.setMembershipState(allocator, conf_state, membership, 3);
+            var state = try storage.initialState(allocator);
+            defer state.deinit(allocator);
+        }
+    };
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{
+        ConfState{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+        ClusterMembership{ .cluster_id = .{1} ++ .{0} ** 15, .peers = &peers },
+    });
 }

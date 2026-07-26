@@ -10,6 +10,7 @@ const std = @import("std");
 
 const error_model = @import("core/error.zig");
 const types = @import("core/types.zig");
+const ClusterMembership = @import("cluster_membership.zig").ClusterMembership;
 
 pub const Error = error_model.Error;
 pub const Entry = types.Entry;
@@ -22,17 +23,29 @@ pub const ConfState = types.ConfState;
 pub const RaftState = struct {
     hard_state: HardState = .{},
     conf_state: ConfState = .{},
+    cluster_membership: ?ClusterMembership = null,
+    membership_index: u64 = 0,
 
     pub fn deinit(self: *RaftState, allocator: std.mem.Allocator) void {
         self.hard_state = .{};
         self.conf_state.deinit(allocator);
+        if (self.cluster_membership) |*membership| membership.deinit(allocator);
+        self.cluster_membership = null;
+        self.membership_index = 0;
     }
 
     /// Deep clone using `allocator`. The caller owns the result.
     pub fn clone(self: RaftState, allocator: std.mem.Allocator) !RaftState {
+        var conf_state = try cloneConfState(allocator, self.conf_state);
+        errdefer conf_state.deinit(allocator);
+        var cluster_membership: ?ClusterMembership = null;
+        if (self.cluster_membership) |membership| cluster_membership = try membership.clone(allocator);
+        errdefer if (cluster_membership) |*membership| membership.deinit(allocator);
         return .{
             .hard_state = self.hard_state,
-            .conf_state = try cloneConfState(allocator, self.conf_state),
+            .conf_state = conf_state,
+            .cluster_membership = cluster_membership,
+            .membership_index = self.membership_index,
         };
     }
 };
@@ -249,6 +262,13 @@ pub const WritableStorage = struct {
         append: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, to_append: []const Entry) Error!void,
         set_hard_state: *const fn (ctx: *anyopaque, hs: HardState) Error!void,
         set_conf_state: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, cs: ConfState) Error!void,
+        set_membership_state: *const fn (
+            ctx: *anyopaque,
+            allocator: std.mem.Allocator,
+            conf_state: ConfState,
+            cluster_membership: ClusterMembership,
+            membership_index: u64,
+        ) Error!void,
         apply_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         apply_local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, snap: Snapshot) Error!void,
         local_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) Error!?Snapshot,
@@ -310,6 +330,22 @@ pub const WritableStorage = struct {
         cs: ConfState,
     ) Error!void {
         return self.vtable.set_conf_state(self.ctx, allocator, cs);
+    }
+
+    pub fn setMembershipState(
+        self: WritableStorage,
+        allocator: std.mem.Allocator,
+        conf_state: ConfState,
+        cluster_membership: ClusterMembership,
+        membership_index: u64,
+    ) Error!void {
+        return self.vtable.set_membership_state(
+            self.ctx,
+            allocator,
+            conf_state,
+            cluster_membership,
+            membership_index,
+        );
     }
 
     pub fn applySnapshot(
@@ -391,6 +427,13 @@ test "raft state clone is deep" {
             .voters = try allocator.dupe(u64, &.{ 1, 2, 3 }),
             .learners = try allocator.dupe(u64, &.{4}),
         },
+        .cluster_membership = .{
+            .cluster_id = .{1} ++ .{0} ** 15,
+            .peers = try allocator.dupe(@import("cluster_membership.zig").PeerEndpoint, &.{
+                .{ .node_id = 1, .address = try allocator.dupe(u8, "node-1") },
+            }),
+        },
+        .membership_index = 4,
     };
     defer original.deinit(allocator);
 
@@ -398,6 +441,9 @@ test "raft state clone is deep" {
     defer copy.deinit(allocator);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, copy.conf_state.voters);
     try std.testing.expect(copy.conf_state.voters.ptr != original.conf_state.voters.ptr);
+    try std.testing.expectEqual(@as(u64, 4), copy.membership_index);
+    try std.testing.expect(copy.cluster_membership.?.peers.ptr != original.cluster_membership.?.peers.ptr);
+    try std.testing.expect(copy.cluster_membership.?.peers[0].address.ptr != original.cluster_membership.?.peers[0].address.ptr);
 }
 
 test "clone helpers clean up allocation failures" {
@@ -442,11 +488,27 @@ test "clone helpers clean up allocation failures" {
             });
             defer cloned.deinit(allocator);
         }
+
+        fn cloneRaftStateAll(allocator: std.mem.Allocator) !void {
+            var state = RaftState{
+                .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+                .cluster_membership = .{
+                    .cluster_id = .{1} ++ .{0} ** 15,
+                    .peers = @constCast(&[_]@import("cluster_membership.zig").PeerEndpoint{
+                        .{ .node_id = 1, .address = @constCast("node-1") },
+                        .{ .node_id = 2, .address = @constCast("node-2") },
+                    }),
+                },
+            };
+            var cloned = try state.clone(allocator);
+            defer cloned.deinit(allocator);
+        }
     };
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneEntryAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneSnapshotAll, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneMessageAll, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helpers.cloneRaftStateAll, .{});
 }
 
 test "cloneMessage deeply copies nested buffers" {

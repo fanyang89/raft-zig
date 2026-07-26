@@ -61,6 +61,18 @@ const SyncFailingStorage = struct {
         return self.inner.setConfState(alloc, conf_state);
     }
 
+    fn setMembershipState(
+        ctx: *anyopaque,
+        alloc: std.mem.Allocator,
+        conf_state: raft.ConfState,
+        cluster_membership: raft.ClusterMembership,
+        membership_index: u64,
+    ) raft.Error!void {
+        const self = cast(ctx);
+        if (self.fail_conf_state) return error.WalWriteFailed;
+        return self.inner.setMembershipState(alloc, conf_state, cluster_membership, membership_index);
+    }
+
     fn applySnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, snapshot: raft.Snapshot) raft.Error!void {
         return cast(ctx).inner.applySnapshot(alloc, snapshot);
     }
@@ -99,6 +111,7 @@ const SyncFailingStorage = struct {
         .append = append,
         .set_hard_state = setHardState,
         .set_conf_state = setConfState,
+        .set_membership_state = setMembershipState,
         .apply_snapshot = applySnapshot,
         .apply_local_snapshot = applyLocalSnapshot,
         .local_snapshot = localSnapshot,

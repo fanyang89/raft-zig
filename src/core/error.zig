@@ -27,6 +27,9 @@ pub const Error = error{
     MetadataCrcMismatch,
     HardStateParseError,
     ConfStateParseError,
+    ClusterMembershipParseError,
+    InvalidClusterMembership,
+    MissingClusterMembership,
     PeerAddressBookParseError,
 
     // Segment errors.
@@ -136,6 +139,9 @@ pub fn name(e: Error) []const u8 {
         error.MetadataCrcMismatch => "MetadataCrcMismatch",
         error.HardStateParseError => "HardStateParseError",
         error.ConfStateParseError => "ConfStateParseError",
+        error.ClusterMembershipParseError => "ClusterMembershipParseError",
+        error.InvalidClusterMembership => "InvalidClusterMembership",
+        error.MissingClusterMembership => "MissingClusterMembership",
         error.PeerAddressBookParseError => "PeerAddressBookParseError",
         error.CurrentSegmentNotFound => "CurrentSegmentNotFound",
         error.SegmentNotOpen => "SegmentNotOpen",

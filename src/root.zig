@@ -58,6 +58,7 @@ const codec_mod = @import("codec.zig");
 const loopback_transport_mod = @import("loopback_transport.zig");
 const proposal_queue_mod = @import("proposal_queue.zig");
 const request_context_mod = @import("request_context.zig");
+const cluster_membership_mod = @import("cluster_membership.zig");
 const rpc_inbound_mailbox = @import("rpc/inbound_mailbox.zig");
 const rpc_peer_manager = @import("rpc/peer_manager.zig");
 const rpc_grpc_transport = @import("rpc/grpc_lite_transport.zig");
@@ -91,6 +92,11 @@ pub const Message = types.Message;
 pub const invalid_index = primitives.invalid_index;
 pub const invalid_id = primitives.invalid_id;
 pub const request_context = request_context_mod;
+pub const ClusterId = cluster_membership_mod.ClusterId;
+pub const PeerEndpoint = cluster_membership_mod.PeerEndpoint;
+pub const ClusterMembership = cluster_membership_mod.ClusterMembership;
+pub const decodeClusterMembership = cluster_membership_mod.decode;
+pub const collectEffectiveMemberIds = cluster_membership_mod.collectEffectiveMemberIds;
 
 pub const StateRole = state_role.StateRole;
 pub const SoftState = state_role.SoftState;
@@ -286,6 +292,7 @@ test "re-exported modules compile" {
     _ = loopback_transport_mod;
     _ = proposal_queue_mod;
     _ = request_context_mod;
+    _ = cluster_membership_mod;
     _ = rpc_inbound_mailbox;
     _ = rpc_peer_manager;
     _ = rpc_grpc_transport;

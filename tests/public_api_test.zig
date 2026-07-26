@@ -33,6 +33,11 @@ test "stable public API compiles for downstream consumers" {
         _ = raft.ConfChangeV2;
         _ = raft.ConfChange;
         _ = raft.Message;
+        _ = raft.ClusterId;
+        _ = raft.PeerEndpoint;
+        _ = raft.ClusterMembership;
+        _ = raft.decodeClusterMembership;
+        _ = raft.collectEffectiveMemberIds;
 
         // Roles / status.
         _ = raft.StateRole;
@@ -176,6 +181,10 @@ test "memory storage vtable wiring is callable" {
 
     var writable = storage.asWritableStorage();
     try std.testing.expectEqual(@as(u64, 1), try writable.firstIndex());
+    try writable.setMembershipState(allocator, .{}, .{ .cluster_id = .{1} ++ .{0} ** 15 }, 0);
+    var state = try writable.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expect(state.cluster_membership != null);
 
     const read_iface = writable.asStorage();
     try std.testing.expectEqual(@as(u64, 1), try read_iface.firstIndex());

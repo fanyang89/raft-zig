@@ -5,11 +5,12 @@ const fs_testing = @import("../fs/testing.zig");
 const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
 const metadata_magic: u32 = 0x4D455441;
-const format_version: u32 = 3;
+const format_version: u32 = 4;
 const header_size: usize = 16;
 const content_size_v1: usize = 24;
 const content_size_v2: usize = 32;
-const content_size: usize = 40;
+const content_size_v3: usize = 40;
+const content_size: usize = 48;
 const max_metadata_size: usize = 16 * 1024 * 1024;
 
 pub const Metadata = struct {
@@ -18,12 +19,15 @@ pub const Metadata = struct {
     snapshot_term: u64 = 0,
     first_segment_id: u64 = 0,
     incarnation: u64 = 0,
+    membership_index: u64 = 0,
     hard_state: []u8 = &.{},
     conf_state: []u8 = &.{},
+    cluster_membership: []u8 = &.{},
 
     pub fn deinit(self: *Metadata, allocator: std.mem.Allocator) void {
         if (self.hard_state.len > 0) allocator.free(self.hard_state);
         if (self.conf_state.len > 0) allocator.free(self.conf_state);
+        if (self.cluster_membership.len > 0) allocator.free(self.cluster_membership);
         self.* = .{};
     }
 };
@@ -104,9 +108,11 @@ pub fn removeFiles(allocator: std.mem.Allocator, fs: fs_mod.Fs, dir: [:0]const u
 fn encode(allocator: std.mem.Allocator, metadata: Metadata) ![]u8 {
     const hard_state_len = std.math.cast(u32, metadata.hard_state.len) orelse return error.MetadataCorrupt;
     const conf_state_len = std.math.cast(u32, metadata.conf_state.len) orelse return error.MetadataCorrupt;
+    const cluster_membership_len = std.math.cast(u32, metadata.cluster_membership.len) orelse return error.MetadataCorrupt;
     var total = try std.math.add(usize, header_size, content_size);
     total = try std.math.add(usize, total, 4 + metadata.hard_state.len);
     total = try std.math.add(usize, total, 4 + metadata.conf_state.len);
+    total = try std.math.add(usize, total, 4 + metadata.cluster_membership.len);
     if (total > max_metadata_size) return error.MetadataCorrupt;
 
     const data = try allocator.alloc(u8, total);
@@ -118,6 +124,7 @@ fn encode(allocator: std.mem.Allocator, metadata: Metadata) ![]u8 {
     std.mem.writeInt(u64, data[32..40], metadata.snapshot_term, .little);
     std.mem.writeInt(u64, data[40..48], metadata.first_segment_id, .little);
     std.mem.writeInt(u64, data[48..56], metadata.incarnation, .little);
+    std.mem.writeInt(u64, data[56..64], metadata.membership_index, .little);
 
     var offset: usize = header_size + content_size;
     std.mem.writeInt(u32, data[offset..][0..4], hard_state_len, .little);
@@ -127,6 +134,10 @@ fn encode(allocator: std.mem.Allocator, metadata: Metadata) ![]u8 {
     std.mem.writeInt(u32, data[offset..][0..4], conf_state_len, .little);
     offset += 4;
     @memcpy(data[offset .. offset + metadata.conf_state.len], metadata.conf_state);
+    offset += metadata.conf_state.len;
+    std.mem.writeInt(u32, data[offset..][0..4], cluster_membership_len, .little);
+    offset += 4;
+    @memcpy(data[offset .. offset + metadata.cluster_membership.len], metadata.cluster_membership);
 
     const crc = Crc32Iscsi.hash(data[12..]);
     std.mem.writeInt(u32, data[8..12], crc, .little);
@@ -138,6 +149,17 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
     if (std.mem.readInt(u32, data[0..4], .little) != metadata_magic) return error.MetadataCorrupt;
     const version = std.mem.readInt(u32, data[4..8], .little);
     if (version < 1 or version > format_version) return error.MetadataCorrupt;
+    const fixed_content_size = switch (version) {
+        1 => content_size_v1,
+        2 => content_size_v2,
+        3 => content_size_v3,
+        4 => content_size,
+        else => unreachable,
+    };
+    const length_fields_size: usize = if (version >= 4) 12 else 8;
+    const minimum_size = std.math.add(usize, header_size + fixed_content_size, length_fields_size) catch
+        return error.MetadataCorrupt;
+    if (data.len < minimum_size) return error.MetadataCorrupt;
     const expected_crc = std.mem.readInt(u32, data[8..12], .little);
     if (Crc32Iscsi.hash(data[12..]) != expected_crc) return error.MetadataCorrupt;
 
@@ -147,16 +169,12 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
         .snapshot_term = std.mem.readInt(u64, data[32..40], .little),
         .first_segment_id = if (version >= 2) std.mem.readInt(u64, data[40..48], .little) else 0,
         .incarnation = if (version >= 3) std.mem.readInt(u64, data[48..56], .little) else 0,
+        .membership_index = if (version >= 4) std.mem.readInt(u64, data[56..64], .little) else 0,
     };
     errdefer result.deinit(allocator);
     if (result.first_index == 0) return error.MetadataCorrupt;
 
-    var offset: usize = header_size + switch (version) {
-        1 => content_size_v1,
-        2 => content_size_v2,
-        3 => content_size,
-        else => unreachable,
-    };
+    var offset: usize = header_size + fixed_content_size;
     const hard_state_len = try readLength(data, &offset);
     const hard_state_end = std.math.add(usize, offset, hard_state_len) catch return error.MetadataCorrupt;
     if (hard_state_end > data.len) return error.MetadataCorrupt;
@@ -165,8 +183,18 @@ fn decode(allocator: std.mem.Allocator, data: []const u8) !Metadata {
 
     const conf_state_len = try readLength(data, &offset);
     const conf_state_end = std.math.add(usize, offset, conf_state_len) catch return error.MetadataCorrupt;
-    if (conf_state_end != data.len) return error.MetadataCorrupt;
+    if (conf_state_end > data.len) return error.MetadataCorrupt;
     if (conf_state_len > 0) result.conf_state = try allocator.dupe(u8, data[offset..conf_state_end]);
+    offset = conf_state_end;
+    if (version < 4) {
+        if (offset != data.len) return error.MetadataCorrupt;
+        return result;
+    }
+
+    const cluster_membership_len = try readLength(data, &offset);
+    const cluster_membership_end = std.math.add(usize, offset, cluster_membership_len) catch return error.MetadataCorrupt;
+    if (cluster_membership_end != data.len) return error.MetadataCorrupt;
+    if (cluster_membership_len > 0) result.cluster_membership = try allocator.dupe(u8, data[offset..cluster_membership_end]);
     return result;
 }
 
@@ -201,8 +229,10 @@ test "metadata store round-trips and rejects corruption" {
         .snapshot_term = 3,
         .first_segment_id = 4,
         .incarnation = 11,
+        .membership_index = 9,
         .hard_state = @constCast("hard"),
         .conf_state = @constCast("conf"),
+        .cluster_membership = @constCast("cluster"),
     });
 
     var loaded = (try store.load()).?;
@@ -210,8 +240,10 @@ test "metadata store round-trips and rejects corruption" {
     try std.testing.expectEqual(@as(u64, 7), loaded.first_index);
     try std.testing.expectEqual(@as(u64, 4), loaded.first_segment_id);
     try std.testing.expectEqual(@as(u64, 11), loaded.incarnation);
+    try std.testing.expectEqual(@as(u64, 9), loaded.membership_index);
     try std.testing.expectEqualStrings("hard", loaded.hard_state);
     try std.testing.expectEqualStrings("conf", loaded.conf_state);
+    try std.testing.expectEqualStrings("cluster", loaded.cluster_membership);
 
     const tmp_fd = try fs.open(store.tmp_path, .write_truncate);
     try fs.pwriteAll(tmp_fd, "stale", 0);
@@ -226,7 +258,23 @@ test "metadata store round-trips and rejects corruption" {
     try std.testing.expectError(error.MetadataCorrupt, store.load());
 }
 
-test "metadata store decodes v2 with zero incarnation" {
+fn legacyMetadata(allocator: std.mem.Allocator, current: []const u8, version: u32, cluster_len: usize) ![]u8 {
+    const legacy_content_size = switch (version) {
+        1 => content_size_v1,
+        2 => content_size_v2,
+        3 => content_size_v3,
+        else => unreachable,
+    };
+    const two_blobs_len = current.len - (header_size + content_size) - (4 + cluster_len);
+    const legacy = try allocator.alloc(u8, header_size + legacy_content_size + two_blobs_len);
+    @memcpy(legacy[0 .. header_size + legacy_content_size], current[0 .. header_size + legacy_content_size]);
+    @memcpy(legacy[header_size + legacy_content_size ..], current[header_size + content_size ..][0..two_blobs_len]);
+    std.mem.writeInt(u32, legacy[4..8], version, .little);
+    std.mem.writeInt(u32, legacy[8..12], Crc32Iscsi.hash(legacy[12..]), .little);
+    return legacy;
+}
+
+test "metadata store decodes v1 through v3 with membership defaults" {
     const allocator = std.testing.allocator;
     const current = try encode(allocator, .{
         .first_index = 7,
@@ -234,21 +282,37 @@ test "metadata store decodes v2 with zero incarnation" {
         .snapshot_term = 3,
         .first_segment_id = 4,
         .incarnation = 11,
+        .membership_index = 9,
         .hard_state = @constCast("hard"),
         .conf_state = @constCast("conf"),
+        .cluster_membership = @constCast("cluster"),
     });
     defer allocator.free(current);
-    const legacy = try allocator.alloc(u8, current.len - 8);
-    defer allocator.free(legacy);
-    @memcpy(legacy[0 .. header_size + content_size_v2], current[0 .. header_size + content_size_v2]);
-    @memcpy(legacy[header_size + content_size_v2 ..], current[header_size + content_size ..]);
-    std.mem.writeInt(u32, legacy[4..8], 2, .little);
-    std.mem.writeInt(u32, legacy[8..12], Crc32Iscsi.hash(legacy[12..]), .little);
+    for (1..4) |version_usize| {
+        const version: u32 = @intCast(version_usize);
+        const legacy = try legacyMetadata(allocator, current, version, "cluster".len);
+        defer allocator.free(legacy);
+        var metadata = try decode(allocator, legacy);
+        defer metadata.deinit(allocator);
+        try std.testing.expectEqual(if (version >= 2) @as(u64, 4) else 0, metadata.first_segment_id);
+        try std.testing.expectEqual(if (version >= 3) @as(u64, 11) else 0, metadata.incarnation);
+        try std.testing.expectEqual(@as(u64, 0), metadata.membership_index);
+        try std.testing.expectEqual(@as(usize, 0), metadata.cluster_membership.len);
+        try std.testing.expectEqualStrings("hard", metadata.hard_state);
+        try std.testing.expectEqualStrings("conf", metadata.conf_state);
+    }
+}
 
-    var metadata = try decode(allocator, legacy);
-    defer metadata.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 4), metadata.first_segment_id);
-    try std.testing.expectEqual(@as(u64, 0), metadata.incarnation);
-    try std.testing.expectEqualStrings("hard", metadata.hard_state);
-    try std.testing.expectEqualStrings("conf", metadata.conf_state);
+test "metadata store rejects malformed cluster membership blob" {
+    const allocator = std.testing.allocator;
+    var encoded = try encode(allocator, .{
+        .hard_state = @constCast("hard"),
+        .conf_state = @constCast("conf"),
+        .cluster_membership = @constCast("cluster"),
+    });
+    defer allocator.free(encoded);
+    const cluster_length_offset = header_size + content_size + 4 + "hard".len + 4 + "conf".len;
+    std.mem.writeInt(u32, encoded[cluster_length_offset..][0..4], 100, .little);
+    std.mem.writeInt(u32, encoded[8..12], Crc32Iscsi.hash(encoded[12..]), .little);
+    try std.testing.expectError(error.MetadataCorrupt, decode(allocator, encoded));
 }
