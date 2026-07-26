@@ -28,6 +28,11 @@ pub const ProposalQueueLimits = struct {
     max_bytes: usize = std.math.maxInt(usize),
 };
 
+pub const ProposalQueueStats = struct {
+    count: usize,
+    bytes: usize,
+};
+
 fn spinLock(m: *std.atomic.Mutex) void {
     while (!m.tryLock()) {}
 }
@@ -91,18 +96,11 @@ pub const ProposalQueue = struct {
         return self.items.len == 0;
     }
 
-    pub fn count(self: *const ProposalQueue) usize {
+    pub fn stats(self: *const ProposalQueue) ProposalQueueStats {
         const mutex = @constCast(&self.mutex);
         spinLock(mutex);
         defer mutex.unlock();
-        return self.items.len;
-    }
-
-    pub fn byteCount(self: *const ProposalQueue) usize {
-        const mutex = @constCast(&self.mutex);
-        spinLock(mutex);
-        defer mutex.unlock();
-        return self.queued_bytes;
+        return .{ .count = self.items.len, .bytes = self.queued_bytes };
     }
 };
 
@@ -225,22 +223,19 @@ test "proposal queue enforces item and byte limits" {
     const data = try std.testing.allocator.dupe(u8, "data");
     const ctx = try std.testing.allocator.dupe(u8, "ctx");
     try queue.push(data, ctx, callback);
-    try std.testing.expectEqual(@as(usize, 1), queue.count());
-    try std.testing.expectEqual(@as(usize, 7), queue.byteCount());
+    try std.testing.expectEqual(ProposalQueueStats{ .count = 1, .bytes = 7 }, queue.stats());
 
     const rejected_data = try std.testing.allocator.dupe(u8, "x");
     defer std.testing.allocator.free(rejected_data);
     const rejected_ctx = try std.testing.allocator.dupe(u8, "y");
     defer std.testing.allocator.free(rejected_ctx);
     try std.testing.expectError(error.ProposalBackpressure, queue.push(rejected_data, rejected_ctx, callback));
-    try std.testing.expectEqual(@as(usize, 1), queue.count());
-    try std.testing.expectEqual(@as(usize, 7), queue.byteCount());
+    try std.testing.expectEqual(ProposalQueueStats{ .count = 1, .bytes = 7 }, queue.stats());
 
     const item = queue.tryPop().?;
     std.testing.allocator.free(item.data);
     std.testing.allocator.free(item.ctx);
-    try std.testing.expectEqual(@as(usize, 0), queue.count());
-    try std.testing.expectEqual(@as(usize, 0), queue.byteCount());
+    try std.testing.expectEqual(ProposalQueueStats{ .count = 0, .bytes = 0 }, queue.stats());
 
     const oversized_data = try std.testing.allocator.dupe(u8, "oversized");
     defer std.testing.allocator.free(oversized_data);

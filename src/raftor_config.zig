@@ -62,6 +62,8 @@ pub const RaftorConfig = struct {
     max_queued_proposal_bytes: usize = 64 * 1024 * 1024,
     /// Maximum number of queued proposals submitted to Raft per tick.
     proposal_drain_budget: usize = 4096,
+    /// Maximum number of queued read-index requests submitted per tick.
+    read_index_drain_budget: usize = 256,
     /// Number of applied entries above which a snapshot is triggered.
     /// 0 = disabled.
     snapshot_entries_threshold: u64 = 10_000,
@@ -88,6 +90,7 @@ test "raftor config defaults" {
     try std.testing.expectEqual(@as(usize, 4096), c.max_queued_proposals);
     try std.testing.expectEqual(@as(usize, 64 * 1024 * 1024), c.max_queued_proposal_bytes);
     try std.testing.expectEqual(@as(usize, 4096), c.proposal_drain_budget);
+    try std.testing.expectEqual(@as(usize, 256), c.read_index_drain_budget);
     try std.testing.expectEqual(@as(u64, 10_000), c.snapshot_entries_threshold);
     try std.testing.expectEqual(@as(usize, 0), c.initial_peers.len);
     try std.testing.expectEqual(@as(?fs_mod.Fs, null), c.file_system);

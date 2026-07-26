@@ -1,12 +1,8 @@
 //! Top-level Raftor orchestration: ties RawNode, ReadyProcessor, Transport,
 //! and StateMachine into a complete Raft server.
 //!
-//! Design choices:
-//!   * Uses MemoryStorage instead of WAL (durable storage arrives later).
-//!   * Accepts any Transport implementation (NoopTransport for single-node,
-//!     LoopbackTransport for multi-node testing, future TCP for production).
-//!   * Single-threaded: no mutexes, no cross-thread proposal queues.
-//!   * No telemetry / OpenTelemetry.
+//! Raft mutation is single-threaded on the event loop. Proposal and read-index
+//! ingress queues are thread-safe, and storage and transport are pluggable.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -160,7 +156,6 @@ pub const NodeStatus = struct {
     pending_proposals: usize = 0,
     queued_proposals: usize = 0,
     queued_proposal_bytes: usize = 0,
-    uncommitted_entries: u64 = 0,
     incarnation: u64 = 0,
 };
 
@@ -312,6 +307,7 @@ pub const Raftor = struct {
         if (config.transport_poll_budget == 0) return error.InvalidConfig;
         if (config.max_queued_proposals == 0 or config.max_queued_proposal_bytes == 0) return error.InvalidConfig;
         if (config.proposal_drain_budget == 0) return error.InvalidConfig;
+        if (config.read_index_drain_budget == 0) return error.InvalidConfig;
         try self.prepareStorage(startup_mode);
         var initial_state = try self.storage.initialState(allocator);
         defer initial_state.deinit(allocator);
@@ -615,7 +611,7 @@ pub const Raftor = struct {
 
         // Drain pending reads.
         const read_timeout = if (self.config.read_index_timeout_ticks > 0) self.config.read_index_timeout_ticks else 0;
-        while (true) {
+        for (0..self.config.read_index_drain_budget) |_| {
             spinLock(&self.lifecycle_mutex);
             if (self.lifecycle != .active) {
                 self.lifecycle_mutex.unlock();
@@ -940,6 +936,7 @@ pub const Raftor = struct {
 
     pub fn getStatus(self: *const Raftor) NodeStatus {
         const r = self.raw_node.raftConst();
+        const queue_stats = self.proposal_queue.stats();
         return .{
             .id = r.id,
             .role = r.state,
@@ -948,9 +945,8 @@ pub const Raftor = struct {
             .commit_index = r.raft_log.committed,
             .applied_index = self.ready_processor.applied_index,
             .pending_proposals = self.proposal_tracker.pendingCount(),
-            .queued_proposals = self.proposal_queue.count(),
-            .queued_proposal_bytes = self.proposal_queue.byteCount(),
-            .uncommitted_entries = if (r.state == .leader) r.uncommitted_state.uncommitted_entries else 0,
+            .queued_proposals = queue_stats.count,
+            .queued_proposal_bytes = queue_stats.bytes,
             .incarnation = self.request_context_generator.incarnation,
         };
     }

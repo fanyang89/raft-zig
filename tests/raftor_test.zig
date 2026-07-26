@@ -997,6 +997,42 @@ test "raftor: proposal drain budget preserves transport progress" {
     try std.testing.expectEqual(@as(usize, 0), r.getStatus().queued_proposals);
 }
 
+test "raftor: read-index drain budget preserves transport progress" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.read_index_drain_budget = 2;
+    config.transport_poll_budget = 1;
+    const r = try Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+
+    var reads = [_]ErrorTester{ .{}, .{}, .{} };
+    for (&reads, 0..) |*read, i| {
+        const ctx = try std.fmt.allocPrint(allocator, "read-{}", .{i});
+        defer allocator.free(ctx);
+        try r.readIndex(ctx, read.readCallback());
+    }
+    try transport.queueMessage(.{ .msg_type = .hup });
+
+    _ = try r.tick();
+    try std.testing.expect(reads[0].completed);
+    try std.testing.expect(reads[1].completed);
+    try std.testing.expect(!reads[2].completed);
+    try std.testing.expectEqual(@as(usize, 1), transport.delivered_message_count);
+
+    _ = try r.tick();
+    try std.testing.expect(reads[2].completed);
+}
+
 test "raftor: zero transport poll budget is invalid" {
     var storage = raft.MemoryStorage.init();
     defer storage.deinit(allocator);
@@ -1048,6 +1084,23 @@ test "raftor: zero proposal drain budget is invalid" {
     defer sm.deinit();
     var config = makeConfig(1);
     config.proposal_drain_budget = 0;
+    try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = sm.stateMachine(),
+    }));
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+}
+
+test "raftor: zero read-index drain budget is invalid" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+    var config = makeConfig(1);
+    config.read_index_drain_budget = 0;
     try std.testing.expectError(error.InvalidConfig, Raftor.createWithDependencies(allocator, config, .bootstrap, .{
         .storage = storage.asWritableStorage(),
         .transport = transport.transport(),
