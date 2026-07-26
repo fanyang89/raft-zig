@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run fuzz corpus smoke tests"
+set -euo pipefail
+
+exec zig build fuzz-smoke --summary all "$@"

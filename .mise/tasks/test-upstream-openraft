@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run adapted OpenRaft tests"
+set -euo pipefail
+
+exec zig build test-upstream-openraft --summary all "$@"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Fuzz deterministic cluster simulation"
+set -euo pipefail
+
+exec scripts/run-fuzz.sh fuzz-sim 10K "$@"

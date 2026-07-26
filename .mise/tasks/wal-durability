@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run Marionette WAL durability tests"
+set -euo pipefail
+
+exec zig build wal-durability --summary all "$@"

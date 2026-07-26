@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run Marionette integration smoke tests"
+set -euo pipefail
+
+exec zig build vopr-smoke --summary all "$@"

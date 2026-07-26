@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Fuzz RPC codecs"
+set -euo pipefail
+
+exec scripts/run-fuzz.sh fuzz-codec 100K "$@"

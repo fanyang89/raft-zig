@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run formatting and tests"
+#MISE depends=["fmt-check"]
+set -euo pipefail
+
+exec mise run test "$@"

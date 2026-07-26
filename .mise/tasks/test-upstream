@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run all adapted upstream test suites"
+set -euo pipefail
+
+exec zig build test-upstream --summary all "$@"

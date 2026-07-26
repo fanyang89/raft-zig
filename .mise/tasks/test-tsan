@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run all tests with ThreadSanitizer"
+set -euo pipefail
+
+export TSAN_OPTIONS="halt_on_error=1:exitcode=66"
+exec zig build test -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe -Dsanitize-thread=true -Dsanitize-c=false --summary all "$@"

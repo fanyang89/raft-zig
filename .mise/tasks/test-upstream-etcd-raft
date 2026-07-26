@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run adapted etcd/raft tests"
+set -euo pipefail
+
+exec zig build test-upstream-etcd-raft --summary all "$@"

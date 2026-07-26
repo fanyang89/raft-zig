@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run adapted Dragonboat tests"
+set -euo pipefail
+
+exec zig build test-upstream-dragonboat --summary all "$@"

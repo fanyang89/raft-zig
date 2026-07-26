@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run grpc Raftor integration tests"
+set -euo pipefail
+
+exec zig build test-grpc-raftor --summary all "$@"

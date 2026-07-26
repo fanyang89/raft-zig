@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Fuzz configuration change codecs"
+set -euo pipefail
+
+exec scripts/run-fuzz.sh fuzz-confchange 100K "$@"

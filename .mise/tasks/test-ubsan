@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run all tests with C undefined behavior detection"
+set -euo pipefail
+
+export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+exec zig build test -Doptimize=Debug -Dsanitize-thread=false -Dsanitize-c=true --summary all "$@"

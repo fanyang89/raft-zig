@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Format Zig sources"
+set -euo pipefail
+
+exec zig fmt build.zig src examples tests "$@"

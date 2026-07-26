@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run clean-room HashiCorp Raft tests"
+set -euo pipefail
+
+exec zig build test-upstream-hashicorp-raft --summary all "$@"

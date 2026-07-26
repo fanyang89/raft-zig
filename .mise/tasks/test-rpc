@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run grpc transport tests"
+set -euo pipefail
+
+exec zig build test-rpc --summary all "$@"

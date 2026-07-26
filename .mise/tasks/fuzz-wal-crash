@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Fuzz WAL crash recovery on Marionette SimDisk"
+set -euo pipefail
+
+exec scripts/run-fuzz.sh fuzz-wal-crash 1K "$@"

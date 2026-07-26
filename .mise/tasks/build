@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Build raft-zig"
+set -euo pipefail
+
+exec zig build "$@"

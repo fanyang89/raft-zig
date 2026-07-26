@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run adapted raft-rs tests"
+set -euo pipefail
+
+exec zig build test-upstream-raft-rs --summary all "$@"

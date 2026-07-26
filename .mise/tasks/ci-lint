@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Validate GitHub Actions workflows"
+set -euo pipefail
+
+exec actionlint "$@"

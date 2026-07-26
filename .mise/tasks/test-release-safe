@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Run all tests with ReleaseSafe optimization"
+set -euo pipefail
+
+exec zig build test -Doptimize=ReleaseSafe --summary all "$@"
