@@ -60,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
     // Configure single-node cluster.
     var config = raft.RaftorConfig{};
     config.raft.id = 1;
+    config.cluster_id = .{1} ++ .{0} ** 15;
+    config.advertise_addr = "127.0.0.1:9000";
     config.raft.election_tick = 10;
     config.raft.heartbeat_tick = 1;
     config.raft.election_timeout_seed = 42;

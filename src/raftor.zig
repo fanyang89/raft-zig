@@ -55,6 +55,8 @@ const ReadyPhase = ready_processor_mod.ReadyPhase;
 const RaftorConfig = raftor_config_mod.RaftorConfig;
 const StateRole = state_role_mod.StateRole;
 const ClusterMembership = cluster_membership_mod.ClusterMembership;
+const ClusterId = cluster_membership_mod.ClusterId;
+const PeerEndpoint = cluster_membership_mod.PeerEndpoint;
 const Peer = raw_node_mod.Peer;
 
 const log = std.log.scoped(.raft_zig_raftor);
@@ -134,6 +136,7 @@ const StorageBackend = union(enum) {
 pub const StartupMode = enum {
     bootstrap,
     restart,
+    join,
 };
 
 /// Dependencies are borrowed for the lifetime of the Raftor.
@@ -214,7 +217,7 @@ pub const Raftor = struct {
         errdefer if (self.noop_transport) |*transport| transport.deinit();
 
         const storage = self.owned_storage.?.asWritableStorage();
-        const startup_mode = try detectStartupMode(allocator, storage);
+        const startup_mode = try detectStartupMode(allocator, storage, config);
         try self.initInternal(allocator, config, startup_mode, .{
             .storage = storage,
             .transport = self.noop_transport.?.transport(),
@@ -239,7 +242,7 @@ pub const Raftor = struct {
         self.noop_transport = null;
 
         const storage = self.owned_storage.?.asWritableStorage();
-        const startup_mode = try detectStartupMode(allocator, storage);
+        const startup_mode = try detectStartupMode(allocator, storage, config);
         try self.initInternal(allocator, config, startup_mode, .{
             .storage = storage,
             .transport = transport,
@@ -329,7 +332,7 @@ pub const Raftor = struct {
 
         // Build RawNode AFTER storage is at its final address.
         var raft_config = config.raft;
-        raft_config.load_state_on_startup = startup_mode == .restart;
+        raft_config.load_state_on_startup = startup_mode != .bootstrap;
         raft_config.applied = initial_applied_index;
         self.raw_node = try RawNode.init(allocator, raft_config, self.storage.asStorage());
         errdefer self.raw_node.deinit();
@@ -383,16 +386,49 @@ pub const Raftor = struct {
                 if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try self.storage.lastIndex() != 0) {
                     return error.IncompatibleStorage;
                 }
-                const voters = if (self.config.initial_peers.len > 0)
-                    try buildVoterIds(self.allocator, self.config)
-                else
-                    try self.allocator.dupe(u64, &.{self.config.nodeId()});
-                defer self.allocator.free(voters);
-                try self.storage.setConfState(self.allocator, .{ .voters = voters });
+                if (self.config.cluster_id) |_| {
+                    var initial = try buildInitialMembership(self.allocator, self.config, false);
+                    defer initial.deinit(self.allocator);
+                    try self.storage.setMembershipState(
+                        self.allocator,
+                        .{ .voters = initial.voters },
+                        initial.membership,
+                        0,
+                    );
+                } else {
+                    const voters = if (self.config.initial_peers.len > 0)
+                        try buildVoterIds(self.allocator, self.config)
+                    else
+                        try self.allocator.dupe(u64, &.{self.config.nodeId()});
+                    defer self.allocator.free(voters);
+                    try self.storage.setConfState(self.allocator, .{ .voters = voters });
+                }
                 try self.storage.sync();
             },
             .restart => {
                 if (confStateIsEmpty(state.conf_state)) return error.IncompatibleStorage;
+                if (state.cluster_membership) |membership| {
+                    if (self.config.cluster_id) |cluster_id| {
+                        if (!std.mem.eql(u8, &cluster_id, &membership.cluster_id)) return error.ClusterIdMismatch;
+                    }
+                    if (containsSorted(membership.retired_node_ids, self.config.nodeId())) return error.NodeRetired;
+                } else if (self.config.cluster_id != null) {
+                    return error.LegacyMembershipMigrationRequired;
+                }
+            },
+            .join => {
+                if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try self.storage.lastIndex() != 0) {
+                    return error.IncompatibleStorage;
+                }
+                var initial = try buildInitialMembership(self.allocator, self.config, true);
+                defer initial.deinit(self.allocator);
+                try self.storage.setMembershipState(
+                    self.allocator,
+                    .{ .voters = initial.voters },
+                    initial.membership,
+                    0,
+                );
+                try self.storage.sync();
             },
         }
     }
@@ -639,18 +675,64 @@ pub const Raftor = struct {
     }
 
     pub fn addNode(self: *Raftor, id: u64, addr: []const u8) Error!void {
+        return self.proposeNodeAddressChange(.add_node, id, addr);
+    }
+
+    pub fn addLearner(self: *Raftor, id: u64, addr: []const u8) Error!void {
+        return self.proposeNodeAddressChange(.add_learner_node, id, addr);
+    }
+
+    pub fn updateNodeAddress(self: *Raftor, id: u64, addr: []const u8) Error!void {
         try self.enterEventLoop();
         defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
-        const inserted = if (self.ready_processor.getClusterMembership() == null)
-            try self.transport.addPeer(id, addr)
-        else
-            false;
-        errdefer if (inserted) self.transport.removePeer(id) catch {};
+        const membership = self.ready_processor.getClusterMembership() orelse return error.MissingClusterMembership;
+        try rejectRetiredId(membership.*, id);
+        if (addr.len == 0) return error.PeerAddressMissing;
+        const current_addr = membership.addressOf(id) orelse return error.StepPeerNotFound;
+        if (std.mem.eql(u8, current_addr, addr)) return error.ConflictingPeerAddress;
+        try self.proposeNodeAddressChangeImpl(.update_node, id, addr, true);
+    }
+
+    fn proposeNodeAddressChange(self: *Raftor, change_type: types.ConfChangeType, id: u64, addr: []const u8) Error!void {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
+        if (self.driverError()) |err| return err;
+        try self.proposeNodeAddressChangeImpl(change_type, id, addr, false);
+    }
+
+    fn proposeNodeAddressChangeImpl(
+        self: *Raftor,
+        change_type: types.ConfChangeType,
+        id: u64,
+        addr: []const u8,
+        durable_required: bool,
+    ) Error!void {
+        if (id == 0) return error.InvalidNodeId;
+        const membership = self.ready_processor.getClusterMembership();
+        if (durable_required and membership == null) return error.MissingClusterMembership;
+        if (membership) |current| try rejectRetiredId(current.*, id);
+
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
-        cc.changes[0] = .{ .change_type = .add_node, .node_id = id };
-        cc.context = try self.allocator.dupe(u8, addr);
+        cc.changes[0] = .{ .change_type = change_type, .node_id = id };
+        if (membership) |current| {
+            if (addr.len == 0) return error.PeerAddressMissing;
+            const current_addr = current.addressOf(id);
+            if (change_type != .update_node and current_addr != null and !std.mem.eql(u8, current_addr.?, addr)) {
+                return error.ConflictingPeerAddress;
+            }
+            var endpoints = [_]PeerEndpoint{.{ .node_id = id, .address = @constCast(addr) }};
+            const context_endpoints: []PeerEndpoint = if (change_type == .update_node or current_addr == null) &endpoints else &.{};
+            cc.context = (cluster_membership_mod.MembershipContext{ .endpoints = context_endpoints }).encode(self.allocator) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidNodeId => error.InvalidNodeId,
+                error.EmptyAddress => error.PeerAddressMissing,
+                else => error.InvalidClusterMembership,
+            };
+        } else {
+            cc.context = try self.allocator.dupe(u8, addr);
+        }
         defer self.allocator.free(cc.context);
         try self.raw_node.proposeConfChange(addr, cc);
     }
@@ -659,6 +741,7 @@ pub const Raftor = struct {
         try self.enterEventLoop();
         defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
+        if (self.ready_processor.getClusterMembership()) |membership| try rejectRetiredId(membership.*, id);
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
         cc.changes[0] = .{ .change_type = .remove_node, .node_id = id };
@@ -889,11 +972,15 @@ fn openStorage(allocator: std.mem.Allocator, config: RaftorConfig) Error!Storage
     ) };
 }
 
-fn detectStartupMode(allocator: std.mem.Allocator, storage: storage_mod.WritableStorage) Error!StartupMode {
+fn detectStartupMode(
+    allocator: std.mem.Allocator,
+    storage: storage_mod.WritableStorage,
+    config: RaftorConfig,
+) Error!StartupMode {
     var state = try storage.initialState(allocator);
     defer state.deinit(allocator);
     if (!state.hard_state.isEmpty() or !confStateIsEmpty(state.conf_state) or try storage.lastIndex() != 0) return .restart;
-    return .bootstrap;
+    return if (config.join) .join else .bootstrap;
 }
 
 fn confStateIsEmpty(conf_state: ConfState) bool {
@@ -907,6 +994,94 @@ fn buildVoterIds(allocator: std.mem.Allocator, config: RaftorConfig) ![]u64 {
     var ids = try allocator.alloc(u64, config.initial_peers.len);
     for (config.initial_peers, 0..) |peer, i| ids[i] = peer.id;
     return ids;
+}
+
+const InitialMembership = struct {
+    voters: []u64,
+    membership: ClusterMembership,
+
+    fn deinit(self: *InitialMembership, allocator: std.mem.Allocator) void {
+        allocator.free(self.voters);
+        self.membership.deinit(allocator);
+    }
+};
+
+fn buildInitialMembership(
+    allocator: std.mem.Allocator,
+    config: RaftorConfig,
+    join: bool,
+) Error!InitialMembership {
+    const cluster_id = config.cluster_id orelse return error.ClusterIdRequired;
+    if (std.mem.eql(u8, &cluster_id, &(@as(ClusterId, .{0} ** 16)))) return error.ClusterIdRequired;
+
+    const peer_count = if (config.initial_peers.len == 0) @as(usize, 1) else config.initial_peers.len;
+    if (join and config.initial_peers.len == 0) return error.InvalidConfig;
+    var peers = try allocator.alloc(PeerEndpoint, peer_count);
+    var initialized: usize = 0;
+    errdefer {
+        for (peers[0..initialized]) |*peer| peer.deinit(allocator);
+        allocator.free(peers);
+    }
+
+    if (config.initial_peers.len == 0) {
+        const address = localAddress(config);
+        if (address.len == 0) return error.PeerAddressMissing;
+        peers[0] = try PeerEndpoint.init(allocator, config.nodeId(), address);
+        initialized = 1;
+    } else {
+        for (config.initial_peers) |peer| {
+            if (peer.id == 0) return error.InvalidNodeId;
+            const address = peer.context orelse return error.PeerAddressMissing;
+            if (address.len == 0) return error.PeerAddressMissing;
+            peers[initialized] = try PeerEndpoint.init(allocator, peer.id, address);
+            initialized += 1;
+        }
+    }
+    std.mem.sort(PeerEndpoint, peers, {}, struct {
+        fn lessThan(_: void, lhs: PeerEndpoint, rhs: PeerEndpoint) bool {
+            return lhs.node_id < rhs.node_id;
+        }
+    }.lessThan);
+
+    var local_present = false;
+    for (peers, 0..) |peer, index| {
+        if (index > 0 and peers[index - 1].node_id == peer.node_id) return error.DuplicatePeerId;
+        if (peer.node_id == config.nodeId()) local_present = true;
+    }
+    if ((!join and !local_present) or (join and local_present)) return error.NodeIdNotInInitialPeers;
+    if (join and localAddress(config).len == 0) return error.PeerAddressMissing;
+
+    const voters = try allocator.alloc(u64, peers.len);
+    errdefer allocator.free(voters);
+    for (peers, 0..) |peer, index| voters[index] = peer.node_id;
+    return .{
+        .voters = voters,
+        .membership = .{ .cluster_id = cluster_id, .peers = peers },
+    };
+}
+
+fn localAddress(config: RaftorConfig) []const u8 {
+    return if (config.advertise_addr.len != 0) config.advertise_addr else config.listen_addr;
+}
+
+fn containsSorted(ids: []const u64, id: u64) bool {
+    var low: usize = 0;
+    var high = ids.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (ids[mid] < id) {
+            low = mid + 1;
+        } else if (ids[mid] > id) {
+            high = mid;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn rejectRetiredId(membership: ClusterMembership, id: u64) Error!void {
+    if (containsSorted(membership.retired_node_ids, id)) return error.NodeRetired;
 }
 
 // ===========================================================================

@@ -66,6 +66,21 @@ Fast Raft invariant checks are enabled by default in Debug and ReleaseSafe build
 | --- | --- |
 | [`examples/minimal_node.zig`](examples/minimal_node.zig) | Single-node bootstrap. Will grow into a self-electing demo as the consensus core lands. |
 
+## Durable Membership
+
+Set `RaftorConfig.cluster_id` to enable durable membership. For bootstrap,
+`initial_peers` contains the initial voters and each `Peer.context` contains
+that peer's advertised address. An empty list creates a one-node cluster using
+`advertise_addr`, or `listen_addr` when no advertised address is set.
+
+For a fresh joining node, set `join = true`, provide seed nodes in
+`initial_peers`, and do not include the local node ID. The joining node remains
+non-promotable until it installs a cluster snapshot containing its ID. Existing
+storage is always detected as restart state, regardless of `join`.
+
+Leaving `cluster_id` null explicitly selects the legacy ID-only startup mode.
+Legacy storage is not migrated automatically.
+
 ## Architecture
 
 ```
