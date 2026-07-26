@@ -18,6 +18,7 @@ const SyncFailingStorage = struct {
     fail_sync: bool = false,
     fail_conf_state: bool = false,
     fail_incarnation: bool = false,
+    successful_syncs: usize = 0,
 
     fn cast(ctx: *anyopaque) *SyncFailingStorage {
         return @ptrCast(@alignCast(ctx));
@@ -94,7 +95,8 @@ const SyncFailingStorage = struct {
     fn sync(ctx: *anyopaque) raft.Error!void {
         const self = cast(ctx);
         if (self.fail_sync) return error.WalSyncFailed;
-        return self.inner.sync();
+        try self.inner.sync();
+        self.successful_syncs += 1;
     }
 
     fn writableStorage(self: *SyncFailingStorage) raft.WritableStorage {
@@ -117,6 +119,101 @@ const SyncFailingStorage = struct {
         .local_snapshot = localSnapshot,
         .reserve_incarnation = reserveIncarnation,
         .sync_ = sync,
+    };
+};
+
+const RecordingTransport = struct {
+    const EventKind = enum { add, remove };
+    const Event = struct {
+        kind: EventKind,
+        node_id: u64,
+        address: [64]u8 = undefined,
+        address_len: usize = 0,
+        successful_syncs: usize = 0,
+
+        fn addressSlice(self: *const Event) []const u8 {
+            return self.address[0..self.address_len];
+        }
+    };
+
+    events: std.ArrayList(Event) = .empty,
+    callback: ?raft.MessageCallback = null,
+    allocator: std.mem.Allocator,
+    sync_counter: ?*const usize = null,
+    fail_add: bool = false,
+    fail_remove: bool = false,
+    start_count: usize = 0,
+
+    fn init(alloc: std.mem.Allocator) RecordingTransport {
+        return .{ .allocator = alloc };
+    }
+
+    fn deinit(self: *RecordingTransport) void {
+        self.events.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn clear(self: *RecordingTransport) void {
+        self.events.clearRetainingCapacity();
+    }
+
+    fn cast(ctx: *anyopaque) *RecordingTransport {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn appendEvent(self: *RecordingTransport, kind: EventKind, node_id: u64, address: []const u8) raft.Error!void {
+        if (address.len > 64) return error.MessageTooLarge;
+        var event = Event{
+            .kind = kind,
+            .node_id = node_id,
+            .successful_syncs = if (self.sync_counter) |counter| counter.* else 0,
+        };
+        @memcpy(event.address[0..address.len], address);
+        event.address_len = address.len;
+        try self.events.append(self.allocator, event);
+    }
+
+    fn start(ctx: *anyopaque) raft.Error!void {
+        cast(ctx).start_count += 1;
+    }
+
+    fn stop(_: *anyopaque) void {}
+
+    fn addPeer(ctx: *anyopaque, node_id: u64, address: []const u8) raft.Error!bool {
+        const self = cast(ctx);
+        if (self.fail_add) return error.ConnectionClosed;
+        try self.appendEvent(.add, node_id, address);
+        return true;
+    }
+
+    fn removePeer(ctx: *anyopaque, node_id: u64) raft.Error!void {
+        const self = cast(ctx);
+        if (self.fail_remove) return error.ConnectionClosed;
+        try self.appendEvent(.remove, node_id, "");
+    }
+
+    fn send(_: *anyopaque, _: []const raft.Message) raft.Error!void {}
+
+    fn setMessageCallback(ctx: *anyopaque, callback: ?raft.MessageCallback) void {
+        cast(ctx).callback = callback;
+    }
+
+    fn pollOne(_: *anyopaque) raft.Error!bool {
+        return false;
+    }
+
+    fn transport(self: *RecordingTransport) raft.Transport {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    const vtable: raft.Transport.VTable = .{
+        .start = start,
+        .stop = stop,
+        .add_peer = addPeer,
+        .remove_peer = removePeer,
+        .send = send,
+        .set_message_callback = setMessageCallback,
+        .poll_one = pollOne,
     };
 };
 
@@ -255,6 +352,43 @@ fn makeConfig(id: u64) RaftorConfig {
     rc.raft.heartbeat_tick = 1;
     rc.raft.election_timeout_seed = id * 999;
     return rc;
+}
+
+fn seedMembership(
+    storage: *raft.MemoryStorage,
+    conf_state: raft.ConfState,
+    peers: []raft.PeerEndpoint,
+    retired_node_ids: []u64,
+    membership_index: u64,
+    hard_state: raft.HardState,
+) !void {
+    try storage.setMembershipState(allocator, conf_state, .{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = peers,
+        .retired_node_ids = retired_node_ids,
+    }, membership_index);
+    try storage.setHardState(hard_state);
+}
+
+fn stageCommittedConfChange(r: *Raftor, term: u64, index: u64, cc: raft.ConfChangeV2) !void {
+    const data = try raft.core.util.encodeConfChangeV2(allocator, cc);
+    const entries = try allocator.alloc(raft.Entry, 1);
+    entries[0] = .{
+        .entry_type = .conf_change_v2,
+        .term = term,
+        .index = index,
+        .data = data,
+    };
+    try r.getRawNode().step(.{
+        .msg_type = .append,
+        .from = 2,
+        .to = 1,
+        .term = term,
+        .index = index - 1,
+        .log_term = if (index == 1) 0 else term,
+        .commit = index,
+        .entries = entries,
+    });
 }
 
 fn makeReadyEntries(term: u64, first: u64, count: usize) ![]raft.Entry {
@@ -1401,4 +1535,392 @@ test "raftor: WAL restart restores snapshot before replaying its suffix" {
         try std.testing.expect(saw_beta);
         try std.testing.expect(saw_gamma);
     }
+}
+
+test "raftor: durable membership add syncs before transport add" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &peers, &.{}, 0, .{});
+
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    transport.sync_counter = &failing_storage.successful_syncs;
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    transport.clear();
+    const syncs_before = failing_storage.successful_syncs;
+
+    try r.addNode(2, "node-2");
+    try std.testing.expectEqual(@as(usize, 0), transport.events.items.len);
+    for (0..16) |_| _ = try r.tick();
+
+    try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
+    const event = transport.events.items[0];
+    try std.testing.expectEqual(RecordingTransport.EventKind.add, event.kind);
+    try std.testing.expectEqual(@as(u64, 2), event.node_id);
+    try std.testing.expectEqualStrings("node-2", event.addressSlice());
+    try std.testing.expect(event.successful_syncs > syncs_before);
+    try std.testing.expectEqual(r.getMembershipIndex(), storage.core.raft_state.membership_index);
+    try std.testing.expectEqualStrings("node-2", r.getClusterMembership().?.addressOf(2).?);
+}
+
+test "raftor: membership sync failure leaves runtime and transport unchanged" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &peers, &.{}, 0, .{});
+
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    transport.clear();
+    try r.addNode(2, "node-2");
+
+    try std.testing.expect(try r.processReadyStep());
+    while (r.getReadyPhase() != raft.ReadyPhase.apply_advanced_committed) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    failing_storage.fail_sync = true;
+    try std.testing.expectError(error.WalSyncFailed, r.processReadyStep());
+    try std.testing.expectEqual(@as(u64, 0), r.getMembershipIndex());
+    try std.testing.expect(r.getClusterMembership().?.addressOf(2) == null);
+    try std.testing.expectEqual(@as(usize, 0), transport.events.items.len);
+}
+
+test "raftor: durable transport failure is terminal after membership install" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &peers, &.{}, 0, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    transport.fail_add = true;
+
+    try r.addNode(2, "node-2");
+    try std.testing.expectError(error.ConnectionClosed, r.tick());
+    try std.testing.expectEqualStrings("node-2", r.getClusterMembership().?.addressOf(2).?);
+    try std.testing.expectEqual(r.getMembershipIndex(), storage.core.raft_state.membership_index);
+    try std.testing.expectError(error.ConnectionClosed, r.tick());
+}
+
+test "raftor: joint removal retains transport endpoint until leave joint" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{ 1, 2 }) }, &peers, &.{}, 0, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    transport.clear();
+
+    var remove = [_]raft.ConfChangeSingle{.{ .change_type = .remove_node, .node_id = 2 }};
+    try stageCommittedConfChange(r, 3, 1, .{ .transition = .explicit, .changes = &remove });
+    try processOneReady(r);
+    try std.testing.expectEqualStrings("node-2", r.getClusterMembership().?.addressOf(2).?);
+    try std.testing.expectEqual(@as(usize, 0), transport.events.items.len);
+
+    try stageCommittedConfChange(r, 3, 2, .{});
+    try processOneReady(r);
+    try std.testing.expect(r.getClusterMembership().?.addressOf(2) == null);
+    try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
+    try std.testing.expectEqual(RecordingTransport.EventKind.remove, transport.events.items[0].kind);
+    try std.testing.expectEqual(@as(u64, 2), transport.events.items[0].node_id);
+}
+
+test "raftor: membership address update removes then adds transport peer" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2-old") },
+    };
+    try seedMembership(&storage, .{
+        .voters = @constCast(&[_]u64{1}),
+        .learners = @constCast(&[_]u64{2}),
+    }, &peers, &.{}, 0, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+    transport.clear();
+
+    var endpoints = [_]raft.PeerEndpoint{.{ .node_id = 2, .address = @constCast("node-2-new") }};
+    const context = try (raft.MembershipContext{ .endpoints = &endpoints }).encode(allocator);
+    defer allocator.free(context);
+    var update = [_]raft.ConfChangeSingle{.{ .change_type = .update_node, .node_id = 2 }};
+    try r.getRawNode().proposeConfChange("", .{ .changes = &update, .context = context });
+    for (0..16) |_| _ = try r.tick();
+
+    try std.testing.expectEqual(@as(usize, 2), transport.events.items.len);
+    try std.testing.expectEqual(RecordingTransport.EventKind.remove, transport.events.items[0].kind);
+    try std.testing.expectEqual(RecordingTransport.EventKind.add, transport.events.items[1].kind);
+    try std.testing.expectEqualStrings("node-2-new", transport.events.items[1].addressSlice());
+    try std.testing.expectEqualStrings("node-2-new", r.getClusterMembership().?.addressOf(2).?);
+}
+
+test "raftor: membership index skips already durable joint entries on restart" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(
+        &storage,
+        .{ .voters = @constCast(&[_]u64{1}) },
+        &peers,
+        @constCast(&[_]u64{2}),
+        2,
+        .{ .term = 3, .commit = 2 },
+    );
+    var remove = [_]raft.ConfChangeSingle{.{ .change_type = .remove_node, .node_id = 2 }};
+    var entries = [_]raft.Entry{
+        .{
+            .entry_type = .conf_change_v2,
+            .term = 3,
+            .index = 1,
+            .data = try raft.core.util.encodeConfChangeV2(allocator, .{ .transition = .explicit, .changes = &remove }),
+        },
+        .{
+            .entry_type = .conf_change_v2,
+            .term = 3,
+            .index = 2,
+            .data = try raft.core.util.encodeConfChangeV2(allocator, .{}),
+        },
+    };
+    defer for (&entries) |*entry| entry.deinit(allocator);
+    try storage.setEntries(allocator, &entries);
+
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try processOneReady(r);
+    try std.testing.expectEqual(@as(u64, 2), r.getStatus().applied_index);
+    try std.testing.expectEqual(@as(u64, 2), r.getMembershipIndex());
+    try std.testing.expectEqual(@as(usize, 0), transport.events.items.len);
+}
+
+test "raftor: incoming snapshot syncs before membership reconcile" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var initial_peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &initial_peers, &.{}, 0, .{});
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    transport.sync_counter = &failing_storage.successful_syncs;
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    transport.clear();
+    failing_storage.successful_syncs = 0;
+
+    var snapshot_peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    const membership = try (raft.ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &snapshot_peers,
+    }).encode(allocator);
+    const voters = try allocator.dupe(u64, &.{1});
+    const learners = try allocator.dupe(u64, &.{2});
+    try r.getRawNode().step(.{
+        .msg_type = .snapshot,
+        .from = 2,
+        .to = 1,
+        .term = 4,
+        .snapshot = .{
+            .membership = membership,
+            .data = try allocator.dupe(u8, "snapshot"),
+            .metadata = .{
+                .index = 10,
+                .term = 4,
+                .conf_state = .{ .voters = voters, .learners = learners },
+            },
+        },
+    });
+
+    try std.testing.expect(try r.processReadyStep());
+    while (r.getReadyPhase() != raft.ReadyPhase.sync) try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(@as(usize, 0), transport.events.items.len);
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
+    try std.testing.expectEqual(@as(usize, 1), transport.events.items[0].successful_syncs);
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    while (r.getReadyPhase() != null) try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    try std.testing.expectEqual(@as(u64, 10), r.getMembershipIndex());
+}
+
+test "raftor: incoming snapshot requires membership after migration" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &peers, &.{}, 3, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.getRawNode().step(.{
+        .msg_type = .snapshot,
+        .from = 2,
+        .to = 1,
+        .term = 4,
+        .snapshot = .{
+            .data = try allocator.dupe(u8, "snapshot"),
+            .metadata = .{
+                .index = 10,
+                .term = 4,
+                .conf_state = .{ .voters = try allocator.dupe(u64, &.{1}) },
+            },
+        },
+    });
+
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(raft.ReadyPhase.persist_snapshot, r.getReadyPhase().?);
+    try std.testing.expectError(error.MissingClusterMembership, r.processReadyStep());
+    try std.testing.expectEqual(@as(u64, 3), r.getMembershipIndex());
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+}
+
+test "raftor: local snapshot injects membership and restores it on restart" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+    try seedMembership(
+        &storage,
+        .{ .voters = @constCast(&[_]u64{1}) },
+        &peers,
+        &.{},
+        0,
+        .{ .term = 1, .commit = 1 },
+    );
+    try storage.setEntries(allocator, &.{.{ .term = 1, .index = 1 }});
+    var config = makeConfig(1);
+    config.raft.applied = 1;
+
+    var first_transport = RecordingTransport.init(allocator);
+    defer first_transport.deinit();
+    var first_machine = DurableStateMachine.init(allocator);
+    defer first_machine.deinit();
+    {
+        const r = try Raftor.createWithDependencies(allocator, config, .restart, .{
+            .storage = storage.asWritableStorage(),
+            .transport = first_transport.transport(),
+            .state_machine = first_machine.stateMachine(),
+        });
+        defer r.destroy();
+        try r.takeSnapshot();
+    }
+
+    var snapshot = (try storage.localSnapshot(allocator)).?;
+    defer snapshot.deinit(allocator);
+    try std.testing.expect(snapshot.membership.len > 0);
+    var decoded = try raft.decodeClusterMembership(allocator, snapshot.membership);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("node-1", decoded.addressOf(1).?);
+
+    var second_transport = RecordingTransport.init(allocator);
+    defer second_transport.deinit();
+    var second_machine = DurableStateMachine.init(allocator);
+    defer second_machine.deinit();
+    const restarted = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = second_transport.transport(),
+        .state_machine = second_machine.stateMachine(),
+    });
+    defer restarted.destroy();
+    try std.testing.expectEqual(@as(u64, 1), restarted.getMembershipIndex());
+    try std.testing.expectEqualStrings("node-1", restarted.getClusterMembership().?.addressOf(1).?);
+}
+
+test "raftor: restart hydrates persisted nonlocal transport peers" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    try seedMembership(&storage, .{
+        .voters = @constCast(&[_]u64{1}),
+        .learners = @constCast(&[_]u64{2}),
+    }, &peers, &.{}, 7, .{});
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
+    try std.testing.expectEqual(RecordingTransport.EventKind.add, transport.events.items[0].kind);
+    try std.testing.expectEqual(@as(u64, 2), transport.events.items[0].node_id);
+    try std.testing.expectEqualStrings("node-2", transport.events.items[0].addressSlice());
+    try std.testing.expectEqual(@as(usize, 0), transport.start_count);
+    try std.testing.expectEqual(@as(u64, 7), r.getMembershipIndex());
 }

@@ -24,6 +24,7 @@ const state_machine_mod = @import("state_machine.zig");
 const transport_mod = @import("transport.zig");
 const proposal_tracker_mod = @import("proposal_tracker.zig");
 const state_role_mod = @import("core/state_role.zig");
+const cluster_membership_mod = @import("cluster_membership.zig");
 
 const Error = error_model.Error;
 const Entry = types.Entry;
@@ -42,6 +43,7 @@ const StateMachine = state_machine_mod.StateMachine;
 const Transport = transport_mod.Transport;
 const ProposalTracker = proposal_tracker_mod.ProposalTracker;
 const StateRole = state_role_mod.StateRole;
+const ClusterMembership = cluster_membership_mod.ClusterMembership;
 
 const log = std.log.scoped(.raft_zig_ready_processor);
 
@@ -66,9 +68,11 @@ pub const ReadyPhase = enum {
 const PendingReady = struct {
     ready: Ready,
     light_ready: LightReady = .{},
+    snapshot_membership: ?ClusterMembership = null,
     phase: ReadyPhase = .validate,
 
     fn deinit(self: *PendingReady, allocator: std.mem.Allocator) void {
+        if (self.snapshot_membership) |*membership| membership.deinit(allocator);
         self.light_ready.deinit(allocator);
         self.ready.deinit(allocator);
     }
@@ -82,6 +86,8 @@ pub const ReadyProcessor = struct {
     proposal_tracker: *ProposalTracker,
     node_id: u64,
     applied_index: u64,
+    cluster_membership: ?ClusterMembership,
+    membership_index: u64,
     prev_role: StateRole,
     prev_leader: u64,
     prev_term: u64,
@@ -101,6 +107,8 @@ pub const ReadyProcessor = struct {
         node_id: u64,
         checksum_enabled: bool,
         initial_applied_index: u64,
+        initial_membership: ?ClusterMembership,
+        initial_membership_index: u64,
     ) ReadyProcessor {
         const ss = raw_node.raftConst().softState();
         return .{
@@ -111,6 +119,8 @@ pub const ReadyProcessor = struct {
             .proposal_tracker = proposal_tracker,
             .node_id = node_id,
             .applied_index = initial_applied_index,
+            .cluster_membership = initial_membership,
+            .membership_index = initial_membership_index,
             .prev_role = ss.role,
             .prev_leader = ss.leader_id,
             .prev_term = raw_node.raftConst().term,
@@ -125,6 +135,8 @@ pub const ReadyProcessor = struct {
     pub fn deinit(self: *ReadyProcessor) void {
         if (self.pending) |*pending| pending.deinit(self.allocator);
         self.pending = null;
+        if (self.cluster_membership) |*membership| membership.deinit(self.allocator);
+        self.cluster_membership = null;
     }
 
     pub fn isLeader(self: ReadyProcessor) bool {
@@ -137,6 +149,19 @@ pub const ReadyProcessor = struct {
 
     pub fn getAppliedIndex(self: ReadyProcessor) u64 {
         return self.applied_index;
+    }
+
+    pub fn getClusterMembership(self: *const ReadyProcessor) ?*const ClusterMembership {
+        return if (self.cluster_membership) |*membership| membership else null;
+    }
+
+    pub fn getMembershipIndex(self: ReadyProcessor) u64 {
+        return self.membership_index;
+    }
+
+    pub fn hydrateTransport(self: *ReadyProcessor) Error!void {
+        const membership = self.cluster_membership orelse return;
+        try self.reconcileTransport(null, membership);
     }
 
     pub fn phase(self: ReadyProcessor) ?ReadyPhase {
@@ -173,7 +198,9 @@ pub const ReadyProcessor = struct {
             },
             .persist_snapshot => {
                 if (pending.ready.snapshot) |snapshot| {
-                    if (snapshot.metadata.index > 0) try self.persistSnapshot(snapshot);
+                    if (snapshot.metadata.index > 0) {
+                        pending.snapshot_membership = try self.persistSnapshot(snapshot);
+                    }
                 }
                 pending.phase = .persist_entries;
             },
@@ -192,6 +219,10 @@ pub const ReadyProcessor = struct {
             .sync => {
                 const has_snapshot = if (pending.ready.snapshot) |snapshot| snapshot.metadata.index > 0 else false;
                 if (pending.ready.must_sync or has_snapshot) try self.storage.sync();
+                if (pending.snapshot_membership) |membership| {
+                    pending.snapshot_membership = null;
+                    self.installMembership(membership, pending.ready.snapshot.?.metadata.index);
+                }
                 pending.phase = .restore_snapshot;
             },
             .restore_snapshot => {
@@ -316,8 +347,30 @@ pub const ReadyProcessor = struct {
         self.proposal_tracker.completeReadyReads(self.applied_index);
     }
 
-    fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!void {
+    fn persistSnapshot(self: *ReadyProcessor, snap: Snapshot) Error!?ClusterMembership {
+        if (snap.membership.len == 0 and self.cluster_membership != null) {
+            return error.MissingClusterMembership;
+        }
+        if (snap.membership.len == 0) {
+            try self.storage.applySnapshot(self.allocator, snap);
+            return null;
+        }
+
         try self.storage.applySnapshot(self.allocator, snap);
+        var membership = cluster_membership_mod.decode(self.allocator, snap.membership) catch |err| {
+            const mapped: Error = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidClusterMembership,
+            };
+            self.fatal_error = mapped;
+            return mapped;
+        };
+        errdefer membership.deinit(self.allocator);
+        membership.validate(snap.metadata.conf_state) catch {
+            self.fatal_error = error.InvalidClusterMembership;
+            return error.InvalidClusterMembership;
+        };
+        return membership;
     }
 
     fn applyCommittedEntries(self: *ReadyProcessor, entries: []Entry) Error!void {
@@ -351,8 +404,30 @@ pub const ReadyProcessor = struct {
                 }
             },
             .conf_change, .conf_change_v2 => {
+                if (self.cluster_membership != null and entry.index <= self.membership_index) return;
+
                 var cc = util.decodeConfChangeV2(self.allocator, entry.data) catch return error.ConfChangeParseError;
                 defer cc.deinit(self.allocator);
+
+                if (self.cluster_membership) |membership| {
+                    var previous = try self.storage.initialState(self.allocator);
+                    defer previous.deinit(self.allocator);
+
+                    var applied_cs = try self.raw_node.*.applyConfChange(cc);
+                    defer applied_cs.deinit(self.allocator);
+                    var candidate = try cluster_membership_mod.deriveClusterMembership(
+                        self.allocator,
+                        membership,
+                        previous.conf_state,
+                        applied_cs,
+                        cc,
+                    );
+                    errdefer candidate.deinit(self.allocator);
+                    try self.storage.setMembershipState(self.allocator, applied_cs, candidate, entry.index);
+                    try self.storage.sync();
+                    self.installMembership(candidate, entry.index);
+                    return;
+                }
 
                 var applied_cs = try self.raw_node.*.applyConfChange(cc);
                 defer applied_cs.deinit(self.allocator);
@@ -371,6 +446,55 @@ pub const ReadyProcessor = struct {
                     .update_node => {},
                 };
             },
+        }
+    }
+
+    fn installMembership(self: *ReadyProcessor, membership: ClusterMembership, membership_index: u64) void {
+        const previous = self.cluster_membership;
+        self.cluster_membership = membership;
+        self.membership_index = membership_index;
+        self.reconcileTransport(previous, membership) catch |err| {
+            log.warn("failed to reconcile transport membership: {s}", .{@errorName(err)});
+            self.fatal_after_ready = err;
+        };
+        if (previous) |value| {
+            var owned = value;
+            owned.deinit(self.allocator);
+        }
+    }
+
+    fn reconcileTransport(
+        self: *ReadyProcessor,
+        previous: ?ClusterMembership,
+        current: ClusterMembership,
+    ) Error!void {
+        const old_peers = if (previous) |membership| membership.peers else &.{};
+        const new_peers = current.peers;
+        var old_index: usize = 0;
+        var new_index: usize = 0;
+        while (old_index < old_peers.len or new_index < new_peers.len) {
+            if (new_index == new_peers.len or
+                (old_index < old_peers.len and old_peers[old_index].node_id < new_peers[new_index].node_id))
+            {
+                const old_peer = old_peers[old_index];
+                old_index += 1;
+                if (old_peer.node_id != self.node_id) try self.transport.removePeer(old_peer.node_id);
+                continue;
+            }
+            if (old_index == old_peers.len or new_peers[new_index].node_id < old_peers[old_index].node_id) {
+                const new_peer = new_peers[new_index];
+                new_index += 1;
+                if (new_peer.node_id != self.node_id) _ = try self.transport.addPeer(new_peer.node_id, new_peer.address);
+                continue;
+            }
+
+            const old_peer = old_peers[old_index];
+            const new_peer = new_peers[new_index];
+            old_index += 1;
+            new_index += 1;
+            if (old_peer.node_id == self.node_id or std.mem.eql(u8, old_peer.address, new_peer.address)) continue;
+            try self.transport.removePeer(old_peer.node_id);
+            _ = try self.transport.addPeer(new_peer.node_id, new_peer.address);
         }
     }
 };

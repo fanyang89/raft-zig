@@ -28,6 +28,7 @@ const request_context_mod = @import("request_context.zig");
 const ready_processor_mod = @import("ready_processor.zig");
 const raftor_config_mod = @import("raftor_config.zig");
 const state_role_mod = @import("core/state_role.zig");
+const cluster_membership_mod = @import("cluster_membership.zig");
 
 const Error = error_model.Error;
 const Entry = types.Entry;
@@ -53,6 +54,7 @@ const ReadyProcessor = ready_processor_mod.ReadyProcessor;
 const ReadyPhase = ready_processor_mod.ReadyPhase;
 const RaftorConfig = raftor_config_mod.RaftorConfig;
 const StateRole = state_role_mod.StateRole;
+const ClusterMembership = cluster_membership_mod.ClusterMembership;
 const Peer = raw_node_mod.Peer;
 
 const log = std.log.scoped(.raft_zig_raftor);
@@ -298,6 +300,13 @@ pub const Raftor = struct {
 
         try config.raft.validate();
         try self.prepareStorage(startup_mode);
+        var initial_state = try self.storage.initialState(allocator);
+        defer initial_state.deinit(allocator);
+        if (initial_state.cluster_membership) |membership| {
+            membership.validate(initial_state.conf_state) catch return error.InvalidClusterMembership;
+        } else if (initial_state.membership_index != 0) {
+            return error.MissingClusterMembership;
+        }
         const incarnation = try self.storage.reserveIncarnation();
         self.request_context_generator = request_context_mod.Generator.init(config.nodeId(), incarnation);
         const initial_applied_index = if (startup_mode == .restart)
@@ -325,13 +334,9 @@ pub const Raftor = struct {
         self.raw_node = try RawNode.init(allocator, raft_config, self.storage.asStorage());
         errdefer self.raw_node.deinit();
 
-        // Register inbound message callback: transport → raw_node.step().
-        self.transport.setMessageCallback(.{
-            .ctx = self,
-            .function = onMessage,
-        });
-
         // Build ReadyProcessor AFTER raw_node is at its final address.
+        const initial_membership = initial_state.cluster_membership;
+        initial_state.cluster_membership = null;
         self.ready_processor = ReadyProcessor.init(
             allocator,
             &self.raw_node,
@@ -342,7 +347,17 @@ pub const Raftor = struct {
             config.nodeId(),
             config.checksum_enabled,
             initial_applied_index,
+            initial_membership,
+            initial_state.membership_index,
         );
+        errdefer self.ready_processor.deinit();
+        try self.ready_processor.hydrateTransport();
+
+        // Register inbound message callback: transport → raw_node.step().
+        self.transport.setMessageCallback(.{
+            .ctx = self,
+            .function = onMessage,
+        });
     }
 
     fn restoreLocalSnapshot(self: *Raftor, state_machine: StateMachine, fallback_applied_index: u64) Error!u64 {
@@ -627,7 +642,10 @@ pub const Raftor = struct {
         try self.enterEventLoop();
         defer self.leaveEventLoop();
         if (self.driverError()) |err| return err;
-        const inserted = try self.transport.addPeer(id, addr);
+        const inserted = if (self.ready_processor.getClusterMembership() == null)
+            try self.transport.addPeer(id, addr)
+        else
+            false;
         errdefer if (inserted) self.transport.removePeer(id) catch {};
         var cc = ConfChangeV2{ .changes = try self.allocator.alloc(types.ConfChangeSingle, 1) };
         defer self.allocator.free(cc.changes);
@@ -678,6 +696,15 @@ pub const Raftor = struct {
             is_copy.conf_state,
         );
         defer snap.deinit(self.allocator);
+
+        if (self.ready_processor.getClusterMembership()) |membership| {
+            const encoded_membership = membership.encode(self.allocator) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidClusterMembership,
+            };
+            if (snap.membership.len != 0) self.allocator.free(snap.membership);
+            snap.membership = encoded_membership;
+        }
 
         log.info("node {} taking snapshot at index {} term {}", .{ self.raw_node.raftConst().id, applied_index, applied_term });
         try self.storage.applyLocalSnapshot(self.allocator, snap);
@@ -757,6 +784,14 @@ pub const Raftor = struct {
 
     pub fn getRawNode(self: *Raftor) *RawNode {
         return &self.raw_node;
+    }
+
+    pub fn getClusterMembership(self: *const Raftor) ?*const ClusterMembership {
+        return self.ready_processor.getClusterMembership();
+    }
+
+    pub fn getMembershipIndex(self: *const Raftor) u64 {
+        return self.ready_processor.getMembershipIndex();
     }
 
     pub fn getReadyPhase(self: *const Raftor) ?ReadyPhase {
