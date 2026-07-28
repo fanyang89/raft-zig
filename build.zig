@@ -7,11 +7,14 @@ pub fn grpcLiteDependency(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Dependency {
-    return dependency.builder.dependency("grpc_lite", .{
-        .target = target,
-        .optimize = optimize,
-        .protobuf = false,
-    });
+    return grpcLiteDependencyFromBuilder(
+        dependency.builder,
+        target,
+        optimize,
+        false,
+        false,
+        false,
+    );
 }
 
 pub fn createProtocStep(
@@ -26,6 +29,24 @@ pub fn createProtocStep(
         optimize,
         options,
     );
+}
+
+fn grpcLiteDependencyFromBuilder(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: bool,
+    sanitize_c: bool,
+    enable_gperftools: bool,
+) *std.Build.Dependency {
+    return b.dependency("grpc_lite", .{
+        .target = target,
+        .optimize = optimize,
+        .@"sanitize-thread" = sanitize_thread,
+        .@"sanitize-c" = sanitize_c,
+        .gperftools = enable_gperftools,
+        .protobuf = false,
+    });
 }
 
 pub fn build(b: *std.Build) void {
@@ -84,14 +105,14 @@ pub fn build(b: *std.Build) void {
     raft_zig.addImport("crc32c", crc32c);
 
     // grpc-lite RPC backend (optional dependency).
-    const grpc_dep = b.dependency("grpc_lite", .{
-        .target = target,
-        .optimize = optimize,
-        .@"sanitize-thread" = sanitizers.thread orelse false,
-        .@"sanitize-c" = sanitizers.c == .full,
-        .gperftools = enable_gperftools,
-        .protobuf = false,
-    });
+    const grpc_dep = grpcLiteDependencyFromBuilder(
+        b,
+        target,
+        optimize,
+        sanitizers.thread orelse false,
+        sanitizers.c == .full,
+        enable_gperftools,
+    );
     const grpc_lite = grpc_dep.module("grpc_lite");
     const nanozlog = b.dependency("nanozlog", .{
         .target = target,
