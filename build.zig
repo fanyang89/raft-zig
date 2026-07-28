@@ -1,5 +1,32 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
+const grpc_lite_build = @import("grpc_lite");
+
+pub fn grpcLiteDependency(
+    dependency: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Dependency {
+    return dependency.builder.dependency("grpc_lite", .{
+        .target = target,
+        .optimize = optimize,
+        .protobuf = false,
+    });
+}
+
+pub fn createProtocStep(
+    dependency: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    options: grpc_lite_build.protobuf_codegen.RunProtocStep.Options,
+) *grpc_lite_build.protobuf_codegen.RunProtocStep {
+    return grpc_lite_build.createProtocStep(
+        grpcLiteDependency(dependency, target, optimize),
+        target,
+        optimize,
+        options,
+    );
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
