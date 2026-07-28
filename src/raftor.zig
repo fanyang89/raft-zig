@@ -200,6 +200,7 @@ pub const Raftor = struct {
     transport_stopped: bool = false,
 
     // Snapshot triggering state.
+    last_snapshot_index: u64 = 0,
     last_snapshot_attempt_index: u64 = 0,
     last_snapshot_attempt_tick: u64 = 0,
     last_snapshot_tick: u64 = 0,
@@ -365,6 +366,7 @@ pub const Raftor = struct {
             self.proposal_tracker.deinit();
         }
         self.tick_count = 0;
+        self.last_snapshot_index = initial_applied_index;
         self.last_snapshot_attempt_index = 0;
         self.last_snapshot_attempt_tick = 0;
         self.last_snapshot_tick = 0;
@@ -912,7 +914,9 @@ pub const Raftor = struct {
         try self.storage.applyLocalSnapshot(self.allocator, snap);
 
         self.last_snapshot_tick = self.tick_count;
+        self.last_snapshot_index = applied_index;
         self.last_snapshot_attempt_index = applied_index;
+        self.last_snapshot_attempt_tick = self.tick_count;
     }
 
     /// Check if a snapshot should be automatically triggered based on the
@@ -937,10 +941,12 @@ pub const Raftor = struct {
         }
 
         // Condition 1: entry count threshold.
-        const snapshot_index = self.last_snapshot_attempt_index;
+        const snapshot_index = self.last_snapshot_index;
         if (entries_threshold > 0 and applied_index > snapshot_index and
             (applied_index - snapshot_index) >= entries_threshold)
         {
+            self.last_snapshot_attempt_index = applied_index;
+            self.last_snapshot_attempt_tick = self.tick_count;
             try self.takeSnapshotImpl();
             return;
         }
@@ -949,13 +955,11 @@ pub const Raftor = struct {
         if (interval_ticks > 0 and
             (self.tick_count - self.last_snapshot_tick) >= interval_ticks)
         {
+            self.last_snapshot_attempt_index = applied_index;
+            self.last_snapshot_attempt_tick = self.tick_count;
             try self.takeSnapshotImpl();
             return;
         }
-
-        // Record the attempt so rate limiting works even if no condition fired.
-        self.last_snapshot_attempt_index = applied_index;
-        self.last_snapshot_attempt_tick = self.tick_count;
     }
 
     // -----------------------------------------------------------------------

@@ -1579,6 +1579,30 @@ test "raftor: snapshot triggers at entries threshold" {
     try std.testing.expect(sm.snapshot_count >= 1);
 }
 
+test "raftor: snapshot threshold accumulates entries across ticks" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    var config = makeConfig(1);
+    config.snapshot_entries_threshold = 3;
+    config.snapshot_retry_min_ticks = 0;
+    var r = try Raftor.create(allocator, config, sm.stateMachine());
+    defer r.destroy();
+
+    try r.campaign();
+    for (0..3) |_| {
+        var tester = ProposalTester{};
+        try r.propose("x", tester.callback());
+        for (0..10) |_| {
+            _ = try r.tick();
+            if (tester.applied) break;
+        }
+        try std.testing.expect(tester.applied);
+    }
+
+    try std.testing.expect(sm.snapshot_count >= 1);
+}
+
 test "raftor: snapshot triggers at interval" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();
