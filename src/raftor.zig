@@ -165,6 +165,35 @@ pub const NodeStatus = struct {
     incarnation: u64 = 0,
 };
 
+pub const LeaderServicePolicy = struct {
+    check_quorum: bool,
+    disable_proposal_forwarding: bool,
+    proposal_timeout_ticks: u64,
+    read_index_timeout_ticks: u64,
+
+    pub fn isSafe(self: LeaderServicePolicy) bool {
+        return self.check_quorum and
+            self.disable_proposal_forwarding and
+            self.proposal_timeout_ticks > 0 and
+            self.read_index_timeout_ticks > 0;
+    }
+};
+
+test "leader service policy requires bounded leader-only requests" {
+    try std.testing.expect(!(LeaderServicePolicy{
+        .check_quorum = true,
+        .disable_proposal_forwarding = true,
+        .proposal_timeout_ticks = 0,
+        .read_index_timeout_ticks = 10,
+    }).isSafe());
+    try std.testing.expect((LeaderServicePolicy{
+        .check_quorum = true,
+        .disable_proposal_forwarding = true,
+        .proposal_timeout_ticks = 10,
+        .read_index_timeout_ticks = 10,
+    }).isSafe());
+}
+
 /// A complete Raftor instance. Because the internal MemoryStorage's address
 /// is captured by the Storage vtable, this struct must not be moved after
 /// `init` returns. Callers should heap-allocate it via `create`.
@@ -987,6 +1016,15 @@ pub const Raftor = struct {
 
     pub fn getLeaderId(self: *const Raftor) u64 {
         return self.observedCoreStatus().leader_id;
+    }
+
+    pub fn leaderServicePolicy(self: *const Raftor) LeaderServicePolicy {
+        return .{
+            .check_quorum = self.config.raft.check_quorum,
+            .disable_proposal_forwarding = self.config.raft.disable_proposal_forwarding,
+            .proposal_timeout_ticks = self.config.proposal_timeout_ticks,
+            .read_index_timeout_ticks = self.config.read_index_timeout_ticks,
+        };
     }
 
     /// Return a mutable escape hatch for event-loop-thread-only use.

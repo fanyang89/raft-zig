@@ -224,6 +224,7 @@ pub const StartupMode = raftor_mod.StartupMode;
 pub const RaftorDependencies = raftor_mod.RaftorDependencies;
 pub const ReadyPhase = ready_processor_mod.ReadyPhase;
 pub const NodeStatus = raftor_mod.NodeStatus;
+pub const LeaderServicePolicy = raftor_mod.LeaderServicePolicy;
 pub const Raftor = raftor_mod.Raftor;
 
 pub const Fs = fs_mod.Fs;
