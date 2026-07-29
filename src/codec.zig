@@ -548,6 +548,93 @@ test "codec: entry count is bounded by the remaining payload" {
     try std.testing.expectError(error.TruncatedMessage, decodeMessage(allocator, encoded));
 }
 
+test "codec: rich message allocation failures clean up" {
+    const allocator = std.testing.allocator;
+    var entries = [_]Entry{
+        .{
+            .entry_type = .normal,
+            .term = 8,
+            .index = 12,
+            .checksum = 0x12345678,
+            .data = @constCast("entry-data"),
+            .context = @constCast("entry-context"),
+        },
+        .{
+            .entry_type = .conf_change_v2,
+            .term = 8,
+            .index = 13,
+            .data = @constCast("configuration"),
+            .context = @constCast("change-context"),
+        },
+    };
+    const message = Message{
+        .msg_type = .snapshot,
+        .to = 9,
+        .from = 4,
+        .term = 8,
+        .log_term = 7,
+        .index = 13,
+        .commit = 12,
+        .commit_term = 8,
+        .request_snapshot = 11,
+        .reject = true,
+        .reject_hint = 10,
+        .priority = -3,
+        .context = @constCast("message-context"),
+        .entries = &entries,
+        .snapshot = .{
+            .membership = @constCast("membership-data"),
+            .data = @constCast("snapshot-data"),
+            .metadata = .{
+                .index = 11,
+                .term = 7,
+                .conf_state = .{
+                    .voters = @constCast(&[_]u64{ 1, 2, 3 }),
+                    .learners = @constCast(&[_]u64{4}),
+                    .voters_outgoing = @constCast(&[_]u64{ 1, 2 }),
+                    .learners_next = @constCast(&[_]u64{5}),
+                    .auto_leave = true,
+                },
+            },
+        },
+    };
+    const encoded = try encodeMessage(allocator, message);
+    defer allocator.free(encoded);
+    const framed = try encodeFramed(allocator, message, message.from, message.to);
+    defer allocator.free(framed);
+
+    const Check = struct {
+        fn encode(failing_allocator: std.mem.Allocator, msg: Message) !void {
+            const result = try encodeMessage(failing_allocator, msg);
+            defer failing_allocator.free(result);
+        }
+
+        fn encodeFrame(failing_allocator: std.mem.Allocator, msg: Message) !void {
+            const result = try encodeFramed(failing_allocator, msg, msg.from, msg.to);
+            defer failing_allocator.free(result);
+        }
+
+        fn decode(failing_allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var result = try decodeMessage(failing_allocator, bytes);
+            defer result.deinit(failing_allocator);
+            try std.testing.expectEqual(@as(usize, 2), result.entries.len);
+            try std.testing.expect(result.snapshot != null);
+        }
+
+        fn decodeFrame(failing_allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var result = try decodeFramed(failing_allocator, bytes);
+            defer result.message.deinit(failing_allocator);
+            try std.testing.expectEqual(bytes.len, result.bytes_consumed);
+            try std.testing.expect(result.message.snapshot != null);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(allocator, Check.encode, .{message});
+    try std.testing.checkAllAllocationFailures(allocator, Check.encodeFrame, .{message});
+    try std.testing.checkAllAllocationFailures(allocator, Check.decode, .{encoded});
+    try std.testing.checkAllAllocationFailures(allocator, Check.decodeFrame, .{framed});
+}
+
 test "fuzz: codec decoders" {
     try std.testing.fuzz({}, fuzzCodec, .{ .corpus = &.{
         "",

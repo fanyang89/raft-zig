@@ -1408,6 +1408,13 @@ test "wal: hardstate serialize/deserialize" {
 }
 
 test "wal: fixed-size payload decoders reject wrong lengths" {
+    var snapshot_bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, snapshot_bytes[0..8], 42, .little);
+    std.mem.writeInt(u64, snapshot_bytes[8..16], 7, .little);
+    const snapshot = try deserializeSnapshotMetadata(&snapshot_bytes);
+    try std.testing.expectEqual(@as(u64, 42), snapshot.index);
+    try std.testing.expectEqual(@as(u64, 7), snapshot.term);
+
     try std.testing.expectError(error.HardStateParseError, deserializeHardState(&([_]u8{0} ** 23)));
     try std.testing.expectError(error.HardStateParseError, deserializeHardState(&([_]u8{0} ** 25)));
     try std.testing.expectError(error.SnapshotParseError, deserializeSnapshotMetadata(&([_]u8{0} ** 15)));
@@ -1679,6 +1686,32 @@ test "wal: compact removes old entries" {
     }
 }
 
+test "wal: compact tolerates empty and already compacted ranges" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+
+    var wal = try WAL.open(allocator, .{ .dir = fixture.walDir(), .segment_size = 4096 });
+    defer wal.deinit();
+    try wal.compact(1);
+    try wal.append(&.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 1 },
+        .{ .index = 3, .term = 1 },
+    });
+
+    try wal.compact(2);
+    try wal.compact(2);
+    try wal.compact(1);
+    try std.testing.expectEqual(@as(u64, 2), wal.firstIndex());
+    try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+
+    try wal.compact(4);
+    try wal.compact(4);
+    try std.testing.expectEqual(@as(u64, 4), wal.firstIndex());
+    try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
+}
+
 test "wal: suffix overwrite is idempotent and restart-safe" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -1846,6 +1879,34 @@ test "wal: WALStorage applyLocalSnapshot compacts" {
         }
         try std.testing.expectEqual(@as(usize, 2), entries.len);
     }
+}
+
+test "wal: WALStorage getSnapshot covers unavailable and cloned snapshots" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    var ws = try WALStorage.open(allocator, fixture.walDir());
+    defer ws.deinit();
+    const storage = ws.asStorage();
+
+    try std.testing.expectError(
+        error.SnapshotTemporarilyUnavailable,
+        storage.getSnapshot(allocator, 0, 2),
+    );
+    try ws.asWritableStorage().applySnapshot(allocator, .{
+        .data = @constCast("snapshot-state"),
+        .metadata = .{ .index = 3, .term = 2 },
+    });
+    try std.testing.expectError(
+        error.SnapshotTemporarilyUnavailable,
+        storage.getSnapshot(allocator, 4, 2),
+    );
+
+    var snapshot = try storage.getSnapshot(allocator, 3, 2);
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqualStrings("snapshot-state", snapshot.data);
+    snapshot.data[0] = 'S';
+    try std.testing.expectEqualStrings("snapshot-state", ws.wal.snapshot.?.data);
 }
 
 test "wal: incoming snapshot replaces the previous log generation" {
@@ -2431,6 +2492,42 @@ test "wal: membership recovery preserves parse and missing errors" {
     try std.testing.expectError(error.MissingClusterMembership, WALStorage.openWithFs(allocator, path, fixture.fs()));
 }
 
+test "wal: membership recovery rejects conf state mismatch" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path });
+        try wal.sync();
+        wal.deinit();
+    }
+
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(allocator);
+    defer allocator.free(membership);
+    const conf_state = try serializeConfState(allocator, .{ .voters = @constCast(&[_]u64{2}) });
+    defer allocator.free(conf_state);
+    var store = try metadata_store_mod.MetadataStore.init(allocator, fixture.fs(), path);
+    defer store.deinit();
+    try store.save(.{
+        .first_segment_id = 1,
+        .membership_index = 1,
+        .conf_state = conf_state,
+        .cluster_membership = membership,
+    });
+
+    try std.testing.expectError(
+        error.InvalidClusterMembership,
+        WALStorage.openWithFs(allocator, path, fixture.fs()),
+    );
+}
+
 test "wal: incarnation reservation survives metadata rewrites and restart" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -2521,6 +2618,43 @@ test "wal: recovery truncates a corrupt record envelope in the active tail" {
         defer wal.deinit();
         try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
         try std.testing.expectEqual(@as(u64, 2), wal.hard_state.commit);
+    }
+}
+
+test "wal: recovery truncates an active tail with a bad CRC" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const path = fixture.walDir();
+    var tail_offset: u64 = 0;
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
+        try wal.sync();
+        try wal.append(&.{.{ .index = 3, .term = 2, .data = @constCast("volatile") }});
+        const location = wal.wal_index.lookup(3).?;
+        tail_offset = location.offset;
+        const segment = wal.segment_manager.get(location.segment_id).?;
+        const corrupt_payload = [_]u8{'V'};
+        const data_offset = location.offset + RECORD_HEADER_SIZE + 1 + 8 + 8 + 4 + 4;
+        const rc = linux.pwrite(@intCast(segment.fd.?), &corrupt_payload, corrupt_payload.len, @intCast(data_offset));
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        try segment.sync();
+    }
+
+    {
+        var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 2), wal.lastIndex());
+        try std.testing.expectEqual(tail_offset, wal.segment_manager.getCurrent().?.file_size);
+        try wal.append(&.{.{ .index = 3, .term = 2, .data = @constCast("recovered") }});
+        try std.testing.expectEqual(@as(u64, 3), wal.lastIndex());
     }
 }
 

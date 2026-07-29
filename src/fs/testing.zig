@@ -85,3 +85,14 @@ pub const FsFixture = struct {
         };
     }
 };
+
+test "real fixture cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var fixture = try FsFixture.init(allocator, .real);
+            defer fixture.deinit();
+            try std.testing.expect(std.mem.endsWith(u8, fixture.walDir(), "/wal"));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}

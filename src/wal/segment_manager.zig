@@ -7,6 +7,7 @@
 const std = @import("std");
 const segment_mod = @import("segment.zig");
 const fs_mod = @import("../fs.zig");
+const fs_testing = @import("../fs/testing.zig");
 
 const Segment = segment_mod.Segment;
 
@@ -162,3 +163,26 @@ pub const SegmentManager = struct {
         self.directory_dirty = false;
     }
 };
+
+test "segment manager tolerates missing segment IDs" {
+    const allocator = std.testing.allocator;
+    var fixture = try fs_testing.FsFixture.init(allocator, .real);
+    defer fixture.deinit();
+    const dir = fixture.walDir();
+    const fs = fixture.fs();
+    _ = try fs.makeDir(dir);
+
+    const first = try Segment.create(allocator, fs, dir, 1, 1);
+    first.destroy();
+    const third = try Segment.create(allocator, fs, dir, 3, 8);
+    third.destroy();
+
+    var manager = try SegmentManager.init(allocator, fs, dir);
+    defer manager.deinit();
+    const ids = try manager.sortedIds(allocator);
+    defer allocator.free(ids);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 3 }, ids);
+    try std.testing.expect(manager.get(2) == null);
+    try std.testing.expectEqual(@as(u64, 3), manager.getCurrent().?.segment_id);
+    try std.testing.expectEqual(@as(u64, 4), (try manager.rollToNew(9)).segment_id);
+}

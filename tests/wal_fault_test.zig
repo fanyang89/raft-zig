@@ -44,6 +44,28 @@ test "FaultFs retries interrupted and short positional I/O" {
     try backend.assertConsumed();
 }
 
+test "FaultFs segment creation removes files after header write failure" {
+    const allocator = std.testing.allocator;
+    for ([_]fault.Effect{ .fail_before, .fail_after }) |effect| {
+        var fixture = try raft.FsTestFixture.init(allocator, .real);
+        defer fixture.deinit();
+        const path = fixture.walDir();
+        const base = fixture.fs();
+        var backend = fault.FaultFs.init(base);
+        backend.inject(.{ .operation = .pwrite, .occurrence = 1, .effect = effect });
+
+        try std.testing.expectError(
+            error.WriteFailed,
+            raft.WAL.open(allocator, .{ .dir = path, .fs = backend.fs() }),
+        );
+        try backend.assertConsumed();
+
+        const segment_path = try std.fmt.allocPrintSentinel(allocator, "{s}/segment-000001.wal", .{path}, 0);
+        defer allocator.free(segment_path);
+        try std.testing.expectError(error.FileNotFound, base.open(segment_path, .read_only));
+    }
+}
+
 test "FaultFs metadata faults recover an atomic incarnation" {
     const allocator = std.testing.allocator;
     const Case = struct {

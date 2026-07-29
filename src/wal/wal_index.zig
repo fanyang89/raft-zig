@@ -89,6 +89,14 @@ test "WALIndex inserts and truncates locations" {
 
     index.truncateFrom(5);
     try std.testing.expectEqual(@as(u64, 4), index.lastIndex());
+    index.truncateFrom(3);
+    try std.testing.expectEqual(@as(usize, 0), index.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 2), index.lastIndex());
+
+    try index.ensureUnusedCapacity(1);
+    try index.insertAssumeCapacity(3, .{ .segment_id = 3, .offset = 32, .length = 48, .term = 3 });
+    index.truncateFrom(2);
+    try std.testing.expectEqual(@as(usize, 0), index.entries.items.len);
     index.truncateBefore(4);
     try std.testing.expect(index.lookup(3) == null);
     try std.testing.expectEqual(@as(u64, 4), index.first_index);

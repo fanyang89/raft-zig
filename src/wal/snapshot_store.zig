@@ -356,6 +356,19 @@ test "snapshot store rejects corruption and metadata mismatch" {
     try store.save(snapshot);
     try std.testing.expectError(error.FileNotFound, store.load(4, 2));
 
+    const original_path = try makePath(allocator, dir, 3, 2, false);
+    defer allocator.free(original_path);
+    const mismatched_path = try makePath(allocator, dir, 4, 2, false);
+    defer allocator.free(mismatched_path);
+    try fs.rename(original_path, mismatched_path);
+    try std.testing.expectError(error.MetadataCorrupt, store.load(4, 2));
+    try fs.rename(mismatched_path, original_path);
+
+    try store.remove(0, 0);
+    try store.remove(3, 2);
+    try std.testing.expectError(error.FileNotFound, store.load(3, 2));
+    try store.save(snapshot);
+
     const path = try makePath(allocator, dir, 3, 2, false);
     defer allocator.free(path);
     const fd = try fs.open(path, .write_truncate);
