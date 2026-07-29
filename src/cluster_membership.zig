@@ -614,6 +614,7 @@ const Decoder = struct {
     }
 };
 
+// KCOV_EXCL_START
 fn testMembership(allocator: std.mem.Allocator) !ClusterMembership {
     var peers = try allocator.alloc(PeerEndpoint, 3);
     var initialized: usize = 0;
@@ -1105,3 +1106,4 @@ test "derive membership allocation failures are atomic" {
     try std.testing.expectEqualStrings("node-1", current.addressOf(1).?);
     try std.testing.expect(current.addressOf(2) == null);
 }
+// KCOV_EXCL_STOP

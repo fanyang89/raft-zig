@@ -195,6 +195,7 @@ pub const LoopbackTransport = struct {
 // Tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 test "loopback: route delivers message to target inbox" {
     const allocator = std.testing.allocator;
     const net = try LoopbackNetwork.create(allocator);
@@ -309,3 +310,4 @@ test "loopback: allocation failures clean up network and messages" {
         .{},
     );
 }
+// KCOV_EXCL_STOP

@@ -448,6 +448,7 @@ fn lock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
 }
 
+// KCOV_EXCL_START
 const TestEventSink = struct {
     fn emit(_: *anyopaque, _: transport_mod.PeerEvent, _: u64) void {}
 };
@@ -533,3 +534,4 @@ test "grpc transport error mapping is stable" {
     };
     for (codec_cases) |case| try std.testing.expectEqual(case.expected, mapCodecError(case.input));
 }
+// KCOV_EXCL_STOP

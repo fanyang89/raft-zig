@@ -1,3 +1,4 @@
+// KCOV_EXCL_START
 const std = @import("std");
 const builtin = @import("builtin");
 const fs_mod = @import("../fs.zig");
@@ -96,3 +97,4 @@ test "real fixture cleans up allocation failures" {
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
+// KCOV_EXCL_STOP

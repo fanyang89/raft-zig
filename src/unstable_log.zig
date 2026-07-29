@@ -207,6 +207,7 @@ pub const Unstable = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "unstable maybeFirstIndex with and without snapshot" {
     const allocator = std.testing.allocator;
 
@@ -441,3 +442,4 @@ test "unstable truncateAndAppend handles append/replace/truncate" {
         try std.testing.expectEqual(want_size, uns.entries_size);
     }
 }
+// KCOV_EXCL_STOP

@@ -221,6 +221,7 @@ pub const ProgressTracker = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "progress tracker applyConf adds and removes progress entries" {
     const allocator = std.testing.allocator;
     var tr = ProgressTracker.init(allocator, 8);
@@ -311,3 +312,4 @@ test "progress tracker isSingleton" {
     try tr.conf.voters.incoming.add(2);
     try std.testing.expect(!tr.isSingleton());
 }
+// KCOV_EXCL_STOP

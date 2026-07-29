@@ -186,6 +186,7 @@ fn validInflights(progress: anytype) bool {
     return true;
 }
 
+// KCOV_EXCL_START
 test "fast invariant violation carries index details" {
     const Log = struct {
         applied: u64,
@@ -239,6 +240,7 @@ test "fast invariant checker accepts a valid raft state" {
     try std.testing.expectEqual(Kind.missing_progress, violation.kind);
     try std.testing.expectEqual(@as(u64, 1), violation.peer_id);
 }
+// KCOV_EXCL_STOP
 
 fn checkLogOrder(log: anytype) ?Violation {
     if (log.applied > log.committed) return .{

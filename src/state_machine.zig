@@ -118,6 +118,7 @@ pub const StateMachine = struct {
 
 fn noopOnLeadershipChange(_: *anyopaque, _: bool, _: u64, _: u64) void {}
 
+// KCOV_EXCL_START
 /// In-memory StateMachine for tests: stores every applied entry's data in a
 /// list and echoes back the data as the ApplyResult response.
 pub const MockStateMachine = struct {
@@ -210,3 +211,4 @@ test "mock state machine leaves state unchanged on allocation failure" {
     try std.testing.expectEqual(@as(u64, 0), sm.last_applied_index);
     try std.testing.expectEqual(@as(usize, 0), sm.applied.items.len);
 }
+// KCOV_EXCL_STOP

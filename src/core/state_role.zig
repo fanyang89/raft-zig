@@ -31,6 +31,7 @@ pub const SoftState = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "role names are stable" {
     try std.testing.expectEqualStrings("Leader", roleName(.leader));
     try std.testing.expectEqualStrings("PreCandidate", roleName(.pre_candidate));
@@ -43,3 +44,4 @@ test "softstate eql" {
     try std.testing.expect(a.eql(b));
     try std.testing.expect(!a.eql(c));
 }
+// KCOV_EXCL_STOP

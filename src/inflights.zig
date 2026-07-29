@@ -172,6 +172,7 @@ pub const Inflights = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "add linear then wrap" {
     const allocator = std.testing.allocator;
     var inflight = Inflights.init(10);
@@ -306,3 +307,4 @@ test "ordinary boundaries and deferred shrink" {
     try std.testing.expectEqual(@as(usize, 1), inflight.capacity);
     try std.testing.expect(inflight.incoming_capacity == null);
 }
+// KCOV_EXCL_STOP

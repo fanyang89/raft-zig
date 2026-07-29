@@ -277,6 +277,7 @@ pub const ProgressMap = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "progress resume clears paused via maybeUpdate and maybeDecTo" {
     var p = Progress.init(std.testing.allocator, 2, 256);
     defer p.deinit();
@@ -445,3 +446,4 @@ test "progress map remove reports missing entries" {
     try std.testing.expect(progress.remove(1));
     try std.testing.expect(!progress.remove(1));
 }
+// KCOV_EXCL_STOP

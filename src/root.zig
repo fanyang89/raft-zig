@@ -201,7 +201,9 @@ pub const ApplyResult = state_machine_mod.ApplyResult;
 pub const SnapshotWriter = state_machine_mod.SnapshotWriter;
 pub const SnapshotReader = state_machine_mod.SnapshotReader;
 pub const StateMachine = state_machine_mod.StateMachine;
+// KCOV_EXCL_START
 pub const MockStateMachine = state_machine_mod.MockStateMachine;
+// KCOV_EXCL_STOP
 
 pub const MessageCallback = transport_mod.MessageCallback;
 pub const PeerEventKind = transport_mod.PeerEventKind;
@@ -235,8 +237,10 @@ pub const FsDirListing = fs_mod.DirListing;
 pub const FsDirEntryKind = fs_mod.EntryKind;
 pub const realFileSystem = fs_mod.realFileSystem;
 
+// KCOV_EXCL_START
 pub const FsTestBackend = if (builtin.is_test) fs_testing_mod.Backend else void;
 pub const FsTestFixture = if (builtin.is_test) fs_testing_mod.FsFixture else void;
+// KCOV_EXCL_STOP
 
 pub const WAL = wal_mod.WAL;
 pub const WALStorage = wal_mod.WALStorage;
@@ -268,6 +272,7 @@ pub const GrpcLiteTransportConfig = rpc_grpc_transport.Config;
 
 pub const version = version_info.string;
 
+// KCOV_EXCL_START
 test "version is parseable" {
     _ = try std.SemanticVersion.parse(version);
 }
@@ -320,3 +325,4 @@ test "re-exported modules compile" {
     _ = rpc_grpc_transport;
     _ = version_info;
 }
+// KCOV_EXCL_STOP

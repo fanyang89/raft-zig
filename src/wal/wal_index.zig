@@ -77,6 +77,7 @@ pub const WALIndex = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "WALIndex inserts and truncates locations" {
     var index = WALIndex.init(std.testing.allocator);
     defer index.deinit();
@@ -101,3 +102,4 @@ test "WALIndex inserts and truncates locations" {
     try std.testing.expect(index.lookup(3) == null);
     try std.testing.expectEqual(@as(u64, 4), index.first_index);
 }
+// KCOV_EXCL_STOP

@@ -133,6 +133,7 @@ pub const JointConfiguration = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "joint committed index takes min of two majorities" {
     const allocator = std.testing.allocator;
     var idx = ack_indexer_mod.AckIndexer.init(allocator);
@@ -206,3 +207,4 @@ test "joint ids unions incoming and outgoing without duplicates" {
     defer allocator.free(got);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, got);
 }
+// KCOV_EXCL_STOP

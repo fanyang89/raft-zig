@@ -369,6 +369,7 @@ const CheckAndCopyResult = struct {
 // Tests
 // =========================================================================
 
+// KCOV_EXCL_START
 fn newConfChange(change_type: ConfChangeType, node_id: u64) ConfChangeSingle {
     return .{ .change_type = change_type, .node_id = node_id };
 }
@@ -539,3 +540,4 @@ test "conf changer: update node preserves joint configuration and progress" {
     try std.testing.expectEqual(@as(u64, 5), tr.progress.getPtr(1).?.matched);
     try std.testing.expectEqual(@as(u64, 3), tr.progress.getPtr(2).?.matched);
 }
+// KCOV_EXCL_STOP

@@ -89,6 +89,7 @@ pub const RaftorConfig = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "raftor config defaults" {
     const c = RaftorConfig{};
     try std.testing.expectEqual(@as(u64, 100), c.tick_interval_ms);
@@ -106,3 +107,4 @@ test "raftor config defaults" {
     try std.testing.expect(c.legacy_membership_migration == null);
     try std.testing.expect(!c.join);
 }
+// KCOV_EXCL_STOP

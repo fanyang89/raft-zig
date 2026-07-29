@@ -572,6 +572,7 @@ fn sleepNanoseconds(nanoseconds: u64) void {
     }
 }
 
+// KCOV_EXCL_START
 const TestEventSink = struct {
     fn emit(_: *anyopaque, _: transport.PeerEvent, _: u64) void {}
 };
@@ -704,3 +705,4 @@ test "peer manager error mapping is stable" {
     try std.testing.expectEqual(error.OutOfMemory, mapWorkerError(error.OutOfMemory));
     try std.testing.expectEqual(error.ConnectionClosed, mapWorkerError(error.Unexpected));
 }
+// KCOV_EXCL_STOP

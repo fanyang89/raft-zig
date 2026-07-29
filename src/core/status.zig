@@ -27,6 +27,7 @@ pub const Status = struct {
     progress: ?*const anyopaque = null,
 };
 
+// KCOV_EXCL_START
 test "status compiles with default progress" {
     const s = Status{
         .id = 1,
@@ -37,3 +38,4 @@ test "status compiles with default progress" {
     try std.testing.expectEqual(@as(u64, 1), s.id);
     try std.testing.expect(s.progress == null);
 }
+// KCOV_EXCL_STOP

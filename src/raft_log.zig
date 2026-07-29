@@ -542,6 +542,7 @@ pub const RaftLog = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "raft log term returns 0 for out-of-range and dummy index" {
     const allocator = std.testing.allocator;
     var storage = @import("memory_storage.zig").MemoryStorage.init();
@@ -666,3 +667,4 @@ test "raft log scan walks pages and supports early exit" {
     try raft_log.scan(1, 4, 0, GetEntriesContext.empty_(false), Collector, &full);
     try std.testing.expectEqual(@as(u64, 1 + 2 + 3), full.sum);
 }
+// KCOV_EXCL_STOP

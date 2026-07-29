@@ -164,6 +164,7 @@ pub const SegmentManager = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "segment manager tolerates missing segment IDs" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -186,3 +187,4 @@ test "segment manager tolerates missing segment IDs" {
     try std.testing.expectEqual(@as(u64, 3), manager.getCurrent().?.segment_id);
     try std.testing.expectEqual(@as(u64, 4), (try manager.rollToNew(9)).segment_id);
 }
+// KCOV_EXCL_STOP

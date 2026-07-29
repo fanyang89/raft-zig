@@ -68,6 +68,7 @@ pub const AckIndexer = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "ack indexer hit and miss" {
     var ack = AckIndexer.init(std.testing.allocator);
     defer ack.deinit();
@@ -94,3 +95,4 @@ test "ack indexer vtable dispatch matches direct call" {
     try std.testing.expectEqual(direct.group_id, via_vtable.group_id);
     try std.testing.expect(generic.ackedIndex(99) == null);
 }
+// KCOV_EXCL_STOP

@@ -258,6 +258,7 @@ pub fn name(e: Error) []const u8 {
     };
 }
 
+// KCOV_EXCL_START
 test "name covers every error value" {
     const cases = [_]Error{
         error.Compacted,
@@ -269,3 +270,4 @@ test "name covers every error value" {
     };
     for (cases) |e| try std.testing.expect(name(e).len > 0);
 }
+// KCOV_EXCL_STOP

@@ -1910,6 +1910,7 @@ fn enterJoint(cc: ConfChangeV2) ?bool {
 // Smoke tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 const MemoryStorage = @import("memory_storage.zig").MemoryStorage;
 
 test "uncommitted state enforces entry count and ignores old log entries on reduction" {
@@ -2008,3 +2009,4 @@ test "raft single-node self-elects via hup" {
     try std.testing.expectEqual(StateRole.leader, r.state);
     try std.testing.expectEqual(@as(u64, 1), r.term);
 }
+// KCOV_EXCL_STOP

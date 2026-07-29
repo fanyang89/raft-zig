@@ -435,6 +435,8 @@ fn addTestRun(
         tests.setExecCmd(&.{
             "kcov",
             "--include-path=src",
+            "--exclude-line=KCOV_EXCL_LINE",
+            "--exclude-region=KCOV_EXCL_START:KCOV_EXCL_STOP",
             "zig-out/coverage",
             null,
         });

@@ -152,6 +152,7 @@ pub const ReadOnly = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "read only construction and basic add" {
     var ro = ReadOnly.init(std.testing.allocator, .safe);
     defer ro.deinit();
@@ -267,3 +268,4 @@ test "read only ack set accumulates per request" {
 
     try std.testing.expect(try ro.recvACK(2, "unknown") == null);
 }
+// KCOV_EXCL_STOP

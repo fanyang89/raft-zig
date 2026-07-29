@@ -71,6 +71,7 @@ pub fn isContinuousEntries(message: Message, entries: []const Entry) bool {
     return true;
 }
 
+// KCOV_EXCL_START
 test "limitSize keeps first entry even when max is zero" {
     var entries = [_]Entry{
         .{ .index = 1, .term = 1 },
@@ -120,6 +121,7 @@ test "isContinuousEntries detects gap" {
     try std.testing.expect(isContinuousEntries(.{}, &cont));
     try std.testing.expect(isContinuousEntries(msg, &.{}));
 }
+// KCOV_EXCL_STOP
 
 // ===========================================================================
 // Entry checksum (CRC32C)
@@ -149,6 +151,7 @@ pub fn setEntryChecksum(entry: *Entry) void {
     entry.checksum = computeEntryChecksum(entry.*);
 }
 
+// KCOV_EXCL_START
 test "computeEntryChecksum is stable and order-sensitive" {
     const allocator = std.testing.allocator;
     const hello = try allocator.dupe(u8, "hello");
@@ -181,6 +184,7 @@ test "setEntryChecksum skips exempt entries" {
     setEntryChecksum(&populated);
     try std.testing.expect(populated.checksum != 0);
 }
+// KCOV_EXCL_STOP
 
 // ===========================================================================
 // ConfChangeV2 binary codec
@@ -277,6 +281,7 @@ fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
     return null;
 }
 
+// KCOV_EXCL_START
 test "encodeConfChangeV2 round-trips through decodeConfChangeV2" {
     const allocator = std.testing.allocator;
 
@@ -387,3 +392,4 @@ fn expectConfChangeEqual(expected: ConfChangeV2, actual: ConfChangeV2) !void {
     }
     try std.testing.expectEqualSlices(u8, expected.context, actual.context);
 }
+// KCOV_EXCL_STOP

@@ -214,6 +214,7 @@ fn makePath(allocator: std.mem.Allocator, dir: [:0]const u8, basename: []const u
     return allocator.dupeZ(u8, path);
 }
 
+// KCOV_EXCL_START
 test "metadata store round-trips and rejects corruption" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -318,3 +319,4 @@ test "metadata store rejects malformed cluster membership blob" {
     std.mem.writeInt(u32, encoded[8..12], Crc32Iscsi.hash(encoded[12..]), .little);
     try std.testing.expectError(error.MetadataCorrupt, decode(allocator, encoded));
 }
+// KCOV_EXCL_STOP

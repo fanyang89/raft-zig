@@ -103,6 +103,7 @@ fn collectSorted(allocator: std.mem.Allocator, set: std.AutoHashMap(u64, void)) 
     return out;
 }
 
+// KCOV_EXCL_START
 test "tracker configuration round-trips through ConfState" {
     const allocator = std.testing.allocator;
     var tc = try TrackerConfiguration.fromVotersLearners(allocator, &.{ 3, 1, 2 }, &.{ 5, 4 });
@@ -164,3 +165,4 @@ test "toConfState cleans up allocation failures" {
     try conf.learners_next.put(4, {});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{&conf});
 }
+// KCOV_EXCL_STOP

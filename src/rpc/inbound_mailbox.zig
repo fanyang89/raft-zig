@@ -114,6 +114,7 @@ pub const InboundMailbox = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "bounded mailbox tracks count and bytes" {
     const allocator = std.testing.allocator;
     var mailbox = try InboundMailbox.init(allocator, .{ .max_messages = 2, .max_bytes = 12 });
@@ -161,3 +162,4 @@ test "bounded mailbox compacts consumed slots" {
     try std.testing.expectEqual(expected_next, second.index);
     try std.testing.expectEqual(next_index, third.index);
 }
+// KCOV_EXCL_STOP

@@ -208,6 +208,7 @@ fn isSnapshotFilename(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "snapshot-") and (std.mem.endsWith(u8, name, ".snap") or std.mem.endsWith(u8, name, ".tmp"));
 }
 
+// KCOV_EXCL_START
 test "snapshot store round-trips complete snapshots" {
     const allocator = std.testing.allocator;
     var fixture = try fs_testing.FsFixture.init(allocator, .real);
@@ -376,3 +377,4 @@ test "snapshot store rejects corruption and metadata mismatch" {
     try fs.close(fd);
     try std.testing.expectError(error.MetadataCorrupt, store.load(3, 2));
 }
+// KCOV_EXCL_STOP

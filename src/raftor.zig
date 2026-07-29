@@ -179,6 +179,7 @@ pub const LeaderServicePolicy = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "leader service policy requires bounded leader-only requests" {
     try std.testing.expect(!(LeaderServicePolicy{
         .check_quorum = true,
@@ -193,6 +194,7 @@ test "leader service policy requires bounded leader-only requests" {
         .read_index_timeout_ticks = 10,
     }).isSafe());
 }
+// KCOV_EXCL_STOP
 
 /// A complete Raftor instance. Because the internal MemoryStorage's address
 /// is captured by the Storage vtable, this struct must not be moved after
@@ -1379,6 +1381,7 @@ fn rejectRetiredId(membership: ClusterMembership, id: u64) Error!void {
 // Tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 const MockStateMachine = state_machine_mod.MockStateMachine;
 
 fn makeRaftorConfig(id: u64) RaftorConfig {
@@ -1486,3 +1489,4 @@ test "raftor: stop terminates tracked requests" {
     try std.testing.expectEqual(error.ShuttingDown, callback.proposal_error.?);
     try std.testing.expectEqual(error.ShuttingDown, callback.read_error.?);
 }
+// KCOV_EXCL_STOP

@@ -371,6 +371,7 @@ fn checkedEnum(comptime T: type, value: std.meta.Tag(T)) ?T {
 // Tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 test "codec: message round-trip with entries and data" {
     const allocator = std.testing.allocator;
 
@@ -707,3 +708,4 @@ fn fuzzCodec(_: void, smith: *std.testing.Smith) !void {
     defer allocator.free(encoded_again);
     try std.testing.expectEqualSlices(u8, canonical, encoded_again);
 }
+// KCOV_EXCL_STOP

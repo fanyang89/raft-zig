@@ -657,6 +657,7 @@ fn hardStateEql(a: HardState, b: HardState) bool {
 // Smoke tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 const MemoryStorage = @import("memory_storage.zig").MemoryStorage;
 
 fn seedStorage(allocator: std.mem.Allocator, storage: *MemoryStorage, voters: []const u64) !void {
@@ -704,3 +705,4 @@ test "isLocalMessage and isResponseMessage classification" {
     try std.testing.expect(!isResponseMessage(.append));
     try std.testing.expect(!isResponseMessage(.heartbeat));
 }
+// KCOV_EXCL_STOP

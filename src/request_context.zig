@@ -79,6 +79,7 @@ pub fn suffix(context: []const u8) ?[]const u8 {
     return context[header_size..];
 }
 
+// KCOV_EXCL_START
 test "request context has stable versioned encoding" {
     const allocator = std.testing.allocator;
     var generator = Generator.init(0x0102030405060708, 0x1112131415161718);
@@ -125,3 +126,4 @@ test "request context sequence fails before wrapping" {
         generator.next(std.testing.allocator, .proposal, ""),
     );
 }
+// KCOV_EXCL_STOP

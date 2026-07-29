@@ -317,6 +317,7 @@ fn detachExpiredRead(self: *ProposalTracker, current_tick: u64) ?std.StringHashM
 // Tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 const Tester = struct {
     result: ?ProposalResult = null,
 
@@ -559,3 +560,4 @@ test "proposal tracker timeout deadline saturates" {
     tracker.expireTimeouts(std.math.maxInt(u64));
     try std.testing.expectEqual(error.Timeout, proposal.result.?.err);
 }
+// KCOV_EXCL_STOP

@@ -675,6 +675,7 @@ fn decodeSnapshotMembership(allocator: std.mem.Allocator, snapshot: Snapshot, me
     return membership;
 }
 
+// KCOV_EXCL_START
 test "memory storage term lookup with compaction boundaries" {
     const allocator = std.testing.allocator;
     var storage = MemoryStorage.init();
@@ -1172,3 +1173,4 @@ test "memory storage rejects invalid legacy migration without mutation" {
     try std.testing.expectEqual(@as(usize, 0), storage.core.snapshot_data.membership.len);
     try std.testing.expect(storage.core.raft_state.cluster_membership == null);
 }
+// KCOV_EXCL_STOP

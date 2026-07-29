@@ -169,6 +169,7 @@ pub const MajorityConfig = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "empty majority wins votes and returns max index" {
     var c = MajorityConfig.init(std.testing.allocator);
     defer c.deinit();
@@ -257,3 +258,4 @@ test "committed index picks the majority-th match" {
     try std.testing.expectEqual(@as(u64, 20), r.index);
     try std.testing.expectEqual(false, r.use_group_commit);
 }
+// KCOV_EXCL_STOP

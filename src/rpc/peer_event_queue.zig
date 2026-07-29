@@ -70,6 +70,7 @@ fn lock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
 }
 
+// KCOV_EXCL_START
 test "full peer event queue drops oldest and compacts" {
     var queue = try PeerEventQueue.init(std.testing.allocator, 2);
     defer queue.deinit();
@@ -89,3 +90,4 @@ test "full peer event queue drops oldest and compacts" {
     try std.testing.expectEqual(next_peer_id, queue.pop().?.peer_id);
     try std.testing.expectEqual(@as(?transport.PeerEvent, null), queue.pop());
 }
+// KCOV_EXCL_STOP

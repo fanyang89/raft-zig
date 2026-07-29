@@ -1339,6 +1339,7 @@ fn mapError(err: anyerror) Error {
 // Tests
 // ===========================================================================
 
+// KCOV_EXCL_START
 test "wal: record build and parse round-trip" {
     const allocator = std.testing.allocator;
     const payload = "hello wal";
@@ -2892,3 +2893,4 @@ fn checkParsedRecord(allocator: std.mem.Allocator, parsed: ParsedRecord) void {
         .snapshot => _ = deserializeSnapshotMetadata(parsed.payload) catch {},
     }
 }
+// KCOV_EXCL_STOP

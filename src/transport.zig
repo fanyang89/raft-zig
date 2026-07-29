@@ -223,6 +223,7 @@ pub const NoopTransport = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "noop transport collects sent messages" {
     const allocator = std.testing.allocator;
     var t = NoopTransport.init(allocator);
@@ -337,3 +338,4 @@ test "noop transport send handles every allocation failure" {
         .{},
     );
 }
+// KCOV_EXCL_STOP

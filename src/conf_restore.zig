@@ -115,6 +115,7 @@ pub fn restore(
     }
 }
 
+// KCOV_EXCL_START
 test "restore builds a simple config from a ConfState" {
     const allocator = std.testing.allocator;
     var tr = ProgressTracker.init(allocator, 8);
@@ -186,3 +187,4 @@ test "restore rebuilds a joint configuration" {
     try std.testing.expect(state.eql(restored));
     try std.testing.expectEqual(@as(u64, 10), tracker.getPtr(5).?.next_idx);
 }
+// KCOV_EXCL_STOP

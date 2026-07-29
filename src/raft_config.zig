@@ -110,6 +110,7 @@ pub fn defaultConfig() Config {
     return .{};
 }
 
+// KCOV_EXCL_START
 test "validate accepts the default config after patching id" {
     var c = defaultConfig();
     c.id = 1;
@@ -165,3 +166,4 @@ test "min/max election tick default to election_tick and 2 * election_tick" {
     try std.testing.expectEqual(c.election_tick, c.minElectionTick());
     try std.testing.expectEqual(2 * c.election_tick, c.maxElectionTick());
 }
+// KCOV_EXCL_STOP

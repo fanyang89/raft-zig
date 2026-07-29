@@ -503,6 +503,7 @@ fn containsSorted(ids: []const u64, id: u64) bool {
     return false;
 }
 
+// KCOV_EXCL_START
 test "containsSorted searches both halves" {
     const ids = [_]u64{ 2, 4, 6, 8, 10 };
     try std.testing.expect(containsSorted(&ids, 2));
@@ -510,6 +511,7 @@ test "containsSorted searches both halves" {
     try std.testing.expect(!containsSorted(&ids, 1));
     try std.testing.expect(!containsSorted(&ids, 11));
 }
+// KCOV_EXCL_STOP
 
 fn writableStorage(ctx: *anyopaque) *WritableStorage {
     return @ptrCast(@alignCast(ctx));
@@ -548,6 +550,7 @@ const storage_adapter_vtable: Storage.VTable = .{
     .get_snapshot = writableSnapshot,
 };
 
+// KCOV_EXCL_START
 test "raft state clone is deep" {
     const allocator = std.testing.allocator;
     var original = RaftState{
@@ -780,3 +783,4 @@ test "get entries context canAsync" {
     } }).canAsync());
     try std.testing.expectEqual(false, (GetEntriesContext{ .gen_ready = {} }).canAsync());
 }
+// KCOV_EXCL_STOP

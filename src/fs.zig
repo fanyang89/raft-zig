@@ -350,6 +350,7 @@ const linux_vtable: Fs.VTable = .{
     .sync_dir = linuxSyncDir,
 };
 
+// KCOV_EXCL_START
 test "RealFs round-trips files and directory listings" {
     const allocator = std.testing.allocator;
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
@@ -372,3 +373,4 @@ test "RealFs round-trips files and directory listings" {
     defer listing.deinit();
     try std.testing.expectEqual(@as(usize, 1), listing.entries.items.len);
 }
+// KCOV_EXCL_STOP

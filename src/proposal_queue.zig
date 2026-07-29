@@ -168,6 +168,7 @@ pub const ReadIndexQueue = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "proposal queue push and tryPop" {
     var q = ProposalQueue.init(std.testing.allocator, .{});
     defer q.deinit();
@@ -479,3 +480,4 @@ test "read index queue supports concurrent producers and consumption" {
     try std.testing.expectEqual(producer_count * items_per_producer, consumed);
     try std.testing.expect(queue.empty());
 }
+// KCOV_EXCL_STOP

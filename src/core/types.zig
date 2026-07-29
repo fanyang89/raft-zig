@@ -335,6 +335,7 @@ pub const Message = struct {
     }
 };
 
+// KCOV_EXCL_START
 test "default entry is empty" {
     var e = Entry{};
     try std.testing.expectEqual(@as(u64, 0), e.index);
@@ -357,3 +358,4 @@ test "confstate eql compares slices" {
     a.deinit(std.testing.allocator);
     b.deinit(std.testing.allocator);
 }
+// KCOV_EXCL_STOP
