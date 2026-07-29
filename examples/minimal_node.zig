@@ -2,7 +2,7 @@
 //!
 //! Creates a Raftor with an in-memory state machine, campaigns to become
 //! leader, proposes data, and prints the applied result. Demonstrates the
-//! full lifecycle: init → election → propose → commit → apply → snapshot.
+//! lifecycle from initialization through election, commit, and apply.
 
 const std = @import("std");
 const raft = @import("raft_zig");
@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     const status = r.getStatus();
     raft.log.info(
         @src(),
-        "final state: role={s} term={} commit={} applied={} pending={} snapshot_count={}",
+        "final state: role={s} term={} commit={} applied={} pending={} applied_count={}",
         .{ raft.roleName(status.role), status.term, status.commit_index, status.applied_index, status.pending_proposals, sm.count },
     );
 

@@ -59,6 +59,8 @@ pub const Transport = struct {
         stop: *const fn (ctx: *anyopaque) void,
         add_peer: *const fn (ctx: *anyopaque, id: u64, addr: []const u8) Error!bool,
         remove_peer: *const fn (ctx: *anyopaque, id: u64) Error!void,
+        /// Messages are borrowed for this call. Asynchronous implementations
+        /// must clone or share retained values before returning.
         send: *const fn (ctx: *anyopaque, messages: []const Message) Error!void,
         set_message_callback: *const fn (ctx: *anyopaque, cb: ?MessageCallback) void,
         set_peer_event_callback: *const fn (ctx: *anyopaque, cb: ?PeerEventCallback) void,

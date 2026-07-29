@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-raft-zig is a Zig implementation of the RAFT consensus algorithm. Project
+raft-zig is a Zig implementation of the Raft consensus algorithm. Project
 layout, build system conventions, and module style follow the author's Zig
 [gRPC runtime](https://github.com/fanyang89/grpc-lite).
 
@@ -93,7 +93,7 @@ implementing a feature outside the current decision.
 | Capability                         | Decision      | Notes                                                                       |
 | ---------------------------------- | ------------- | --------------------------------------------------------------------------- |
 | Core consensus (Follower..Leader)  | Required      | Follower/Candidate/Leader transitions                                       |
-| Pre-vote                           | Required      | Enabled by default                                                          |
+| Pre-vote                           | Required      | Available through `Config.pre_vote`; disabled by default                    |
 | Joint consensus / conf changes     | Required      | `ConfChanger`, `JointConf`                                                  |
 | Linearizable reads (Safe option)   | Required      | `ReadOnly` queue; new leaders postpone ReadIndex requests until they commit an entry in their own term, then replay (etcd-aligned) |
 | `MemoryStorage`                    | Required      | Built-in default                                                            |
@@ -101,7 +101,7 @@ implementing a feature outside the current decision.
 | grpc-lite RPC transport            | Required      | Default `rpc/` backend                                                      |
 | Cap'n Proto wire format            | Out of scope  | Zig structs + grpc-lite framing                                             |
 | Seastar integration                | Out of scope  | Not applicable in Zig                                                       |
-| io_uring WAL backend               | Selected      | Linux-only, behind a build flag                                             |
+| io_uring WAL backend               | Selected      | Planned Linux-only backend; not implemented                                 |
 | Multi-tenant raft groups           | Out of scope  | One node, one group for now                                                 |
 
 ## MCP usage

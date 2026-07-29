@@ -1,5 +1,10 @@
 # 测试 Soundness 与 Completeness 审计报告
 
+> Historical report: this document records the repository as of 2026-07-24.
+> Current test coverage and inventory status are documented in
+> [`../testing.md`](../testing.md) and
+> [`../../tests/upstream/README.md`](../../tests/upstream/README.md).
+
 日期：2026-07-24
 范围：仓库内全部测试套件，以及 `tests/upstream/*/cases.jsonl` 中的上游清单
 （etcd/raft、raft-rs、OpenRaft、HashiCorp Raft 四个固定 revision，共 1032 条）。

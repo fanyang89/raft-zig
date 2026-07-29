@@ -16,7 +16,9 @@ const Snapshot = types.Snapshot;
 const SnapshotMetadata = types.SnapshotMetadata;
 const ConfState = types.ConfState;
 
-/// Optional response data returned by `StateMachine.apply`.
+/// Optional response data returned by `StateMachine.apply`. The response must
+/// use the Raftor allocator; Raftor takes ownership and frees it after invoking
+/// the proposal callback.
 pub const ApplyResult = struct {
     response: ?[]u8 = null,
 
@@ -85,9 +87,11 @@ pub const StateMachine = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        /// Apply must be atomic: returning an error must leave application
-        /// state unchanged. Raftor treats every apply error as terminal.
+        /// The entry is borrowed for this call. Apply must be atomic: returning
+        /// an error must leave application state unchanged. Raftor treats every
+        /// apply error as terminal.
         apply: *const fn (ctx: *anyopaque, entry: Entry) Error!ApplyResult,
+        /// The returned Snapshot and its owned fields must use `allocator`.
         take_snapshot: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: ConfState) Error!Snapshot,
         /// Restore must be atomic: returning an error must leave application
         /// state unchanged.

@@ -188,7 +188,7 @@ pub fn shareMessage(allocator: std.mem.Allocator, src: Message) !Message {
 }
 
 /// Caller reason for fetching entries. Drives async-fetch behavior in
-/// `MemoryStorage` and future WAL backends.
+/// `MemoryStorage` and `WALStorage` backends.
 pub const GetEntriesFor = enum(u8) {
     send_append,
     gen_ready,

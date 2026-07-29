@@ -25,6 +25,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "docs",
         "examples",
         "benchmarks",
         "tests",

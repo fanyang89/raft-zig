@@ -1,139 +1,129 @@
 # raft-zig
 
+[![CI](https://github.com/fanyang89/raft-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/fanyang89/raft-zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/fanyang89/raft-zig/graph/badge.svg)](https://codecov.io/gh/fanyang89/raft-zig)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![License](https://img.shields.io/github/license/fanyang89/raft-zig)](LICENSE)
 
-A Zig implementation of the [RAFT](https://raft.github.io/) consensus
-algorithm. Ported from the author's C++ project
-[raftpp](https://github.com/fanyang89/raftpp); project layout, build, and
-module conventions follow the author's Zig [gRPC runtime](https://github.com/fanyang89/grpc-lite).
+An embeddable [Raft](https://raft.github.io/) consensus library for Zig with a
+Ready/Advance core, durable WAL, snapshots, and a grpc-lite transport.
 
-> **Status:** scaffold. The core data types, error model, and build system are
-> in place. The full consensus state machine, storage, WAL, and RPC layers are
-> landing incrementally — see `AGENTS.md` for the porting roadmap.
+raft-zig is a functional pre-1.0 implementation ported from
+[raftpp](https://github.com/fanyang89/raftpp). Core consensus, `RawNode`,
+`Raftor`, persistent storage, durable membership, and multi-node transport are
+implemented and tested. Public APIs and persistent formats may still change
+before 1.0.
 
-## Features (planned)
+## Highlights
 
-- **Core consensus** — Follower, Candidate, PreCandidate, and Leader roles.
-- **Log management** — `RaftLog` over a pluggable `Storage` interface.
-- **Dynamic membership** — joint consensus configuration changes.
-- **Linearizable reads** — `ReadOnly` queue with the Safe option.
-- **High-level orchestration** — `Raftor` event loop, ready processing, and
-  proposal tracking (callbacks, futures, sync variants).
-- **Write-Ahead Log** — segmented log files with CRC32C checksums.
-- **Pluggable RPC** — abstract `Transport` interface with a grpc-lite backend.
+| Consensus | Integration | Durability and transport |
+| --- | --- | --- |
+| Pre-vote and check-quorum options | Low-level `RawNode` Ready/Advance API | In-memory and segmented WAL storage |
+| Joint-consensus membership changes | High-level `Raftor` event loop | CRC32C records and entry verification |
+| Safe and lease-based ReadIndex | Callback-based proposals and reads | Snapshots, compaction, and restart recovery |
+| Leadership transfer and learners | Pluggable state machine and storage | Loopback and grpc-lite transports |
 
-The grpc-lite backend uses persistent directed raw streams with bounded
-application and gRPC buffers. Stream identity metadata detects cluster and
-node-address misconfiguration; it is not authentication. The transport has no
-TLS support and must run only on a trusted network or behind a separately
-secured network boundary.
+The test suite includes deterministic network simulation, fault-injected filesystems,
+Marionette crash testing, bounded fuzzing, sanitizers, and behavioral inventories from
+five established Raft implementations.
 
-## Development
+## Quick Start
 
-Requires Zig 0.16.0 and [mise](https://mise.jdx.dev/).
+raft-zig requires Zig 0.16.0. [mise](https://mise.jdx.dev/) is recommended for
+tool installation and project tasks, but direct `zig build` commands also work.
+
+There are no release tags yet. Pin a commit when adding the package to
+`build.zig.zon`, then import its public module:
+
+```zig
+const raft_dependency = b.dependency("raft_zig", .{
+    .target = target,
+    .optimize = optimize,
+});
+app.root_module.addImport("raft_zig", raft_dependency.module("raft_zig"));
+```
+
+```zig
+const raft = @import("raft_zig");
+```
+
+Build and run the single-node example from this repository:
 
 ```bash
 mise install
 mise run build
-mise run test
-mise run check   # fmt-check + test
+./zig-out/bin/raft-zig-minimal-node
 ```
 
-Useful tasks:
+See [Getting Started](docs/getting-started.md) for dependency setup, logger
+initialization, state-machine requirements, and a complete node lifecycle.
 
-```bash
-mise run test-release-safe
-mise run test-tsan
-mise run test-ubsan
-mise run coverage
-mise run prepare-gperftools
-mise run build-gperftools
-mise run test-gperftools
-mise run bench-raft
-mise run profile-raft
-mise run fuzz-smoke
-mise run fuzz-codec
-mise run fuzz-wal
-mise run fuzz-confchange
-mise run fuzz-sim
-mise run vopr-smoke
-mise run fmt
-mise run fmt-check
-```
+## Integration Model
 
-Bounded fuzzing exits non-zero when Zig writes a reproducer to `.zig-cache/f/crash`.
-The simulation target checks core Raft safety and post-partition convergence; application and snapshot-state convergence remain separate full-stack work.
-
-Direct Zig invocations work too:
-
-```bash
-zig build
-zig build test --summary all
-zig fmt build.zig src examples tests benchmarks
-```
-
-Fast Raft invariant checks are enabled by default in Debug and ReleaseSafe builds. Override them with `-Dinvariant-checks=false` or `-Dinvariant-checks=true`.
-
-Entry checksums use [google/crc32c](https://github.com/google/crc32c), with runtime dispatch to x86 SSE4.2 or ARM64 CRC instructions and a portable fallback.
-
-On Linux, `-Dgperftools=true` replaces the process C allocator with tcmalloc and exposes CPU and heap profiling through the `raft_zig_gperftools` module. This option is incompatible with ThreadSanitizer.
-
-`Entry.data` is immutable and reference-counted inside raft-zig. Borrowed payloads are copied once when entering the Raft pipeline, then shared across Unstable, Ready, storage, WAL, and internal transports. Owned entries are linear handles and must not be duplicated with plain assignment; `cloneEntry` creates a deep copy and `shareEntry` creates another shared handle.
-
-## Logging
-
-raft-zig uses grpc-lite's process-global asynchronous logger. Initialize it once before creating application threads:
-
-```zig
-try raft.log.initGlobal(init.gpa, init.io, false);
-defer raft.log.deinitGlobal(init.gpa);
-```
-
-Logs are discarded until the logger is initialized. Set the final argument to `true` to enable debug logs and source locations.
-
-Hostname peer addresses require one process-wide `GrpcRuntime`. Pass its address through `GrpcLiteTransportConfig.runtime` and deinitialize it after all transports.
-
-## Examples
-
-| Example | Description |
+| API | Use it when |
 | --- | --- |
-| [`examples/minimal_node.zig`](examples/minimal_node.zig) | Single-node bootstrap. Will grow into a self-electing demo as the consensus core lands. |
+| `Raftor` | You want built-in Ready processing, proposal queues, snapshots, storage selection, and transport orchestration. |
+| `RawNode` | You need to own the persistence, message dispatch, apply, and event-loop pipeline. |
 
-## Durable Membership
+`Raftor.create` uses `MemoryStorage` when `data_dir` is empty and `WALStorage`
+when it is set. Applications always provide the replicated `StateMachine`.
+Multi-node deployments additionally provide a `Transport`.
 
-Set `RaftorConfig.cluster_id` to enable durable membership. For bootstrap,
-`initial_peers` contains the initial voters and each `Peer.context` contains
-that peer's advertised address. An empty list creates a one-node cluster using
-`advertise_addr`, or `listen_addr` when no advertised address is set.
-
-For a fresh joining node, set `join = true`, provide seed nodes in
-`initial_peers`, and do not include the local node ID. The joining node remains
-non-promotable until it installs a cluster snapshot containing its ID. Existing
-storage is always detected as restart state, regardless of `join`.
-
-Leaving `cluster_id` null explicitly selects the legacy ID-only startup mode.
-Legacy storage is not migrated automatically.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────┐
-│  Application (StateMachine, Proposals)  │
-├─────────────────────────────────────────┤
-│  Raftor  (event loop, ready processor,  │
-│           proposal tracker)             │
-├─────────────────────────────────────────┤
-│  Core Raft  (RawNode → Raft → RaftLog)  │
-├─────────────────────────────────────────┤
-│  WAL + RPC Transport                    │
-└─────────────────────────────────────────┘
+```text
+Application state machine and requests
+                 |
+              Raftor
+       queues, Ready processing
+                 |
+              RawNode
+          Ready / Advance API
+                 |
+       Raft, RaftLog, Storage
 ```
 
-The current scaffold covers the lowest layer (`src/core/`): plain Zig structs
-for `Entry`, `Message`, `HardState`, `ConfState`, `Snapshot`, and the
-configuration-change types, plus a single error model (`src/core/error.zig`)
-that replaces raftpp's `Result<T, RaftError>` with idiomatic Zig error unions.
+See [Architecture](docs/architecture.md) and the [Zig API guide](docs/zig-api.md)
+for the processing order and ownership contracts.
+
+## Compatibility
+
+| Capability | Status |
+| --- | --- |
+| Linux x86_64 and arm64 | Continuously tested in Debug and ReleaseSafe |
+| Core Raft, ReadIndex, learners, joint consensus | Supported |
+| MemoryStorage, WAL, snapshots, restart | Supported |
+| Single Raft group per `Raftor` | Supported scope |
+| grpc-lite authentication and TLS | Not provided by raft-zig |
+| Multi-tenant group hosting, disaster-recovery import | Out of scope or not implemented |
+
+The default filesystem and `Raftor.run` currently use Linux primitives. The
+grpc-lite transport uses stream identity metadata to reject cluster or node
+misconfiguration, but that metadata is not authentication. Run it only on a
+trusted network or behind a separately secured network boundary.
+
+Types re-exported by [`src/root.zig`](src/root.zig) are the public API surface.
+Lower-level modules remain available for experimentation and may evolve before 1.0.
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md): package setup and the first node
+- [Zig API](docs/zig-api.md): Raftor, RawNode, StateMachine, ownership, and threading
+- [Architecture](docs/architecture.md): layers and Ready processing order
+- [Durability](docs/durability.md): storage, WAL, checksums, snapshots, and recovery
+- [Membership](docs/membership.md): bootstrap, join, restart, and migration
+- [Transport](docs/transport.md): transport contract and grpc-lite integration
+- [Testing](docs/testing.md): suites, fuzzing, fault injection, and upstream inventory
+- [Development](docs/development.md): tasks, build options, profiling, and coverage
+
+## Development
+
+```bash
+mise install
+mise run check
+```
+
+See the [development guide](docs/development.md) for focused test tasks and build
+options.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+[MIT](LICENSE)

@@ -46,7 +46,7 @@ pub const RaftorConfig = struct {
     /// Explicit operator-supplied data for upgrading storage that predates
     /// durable cluster membership.
     legacy_membership_migration: ?LegacyMembershipMigration = null,
-    /// Data directory for future WAL storage. MemoryStorage ignores it.
+    /// Data directory for WAL storage. Empty selects MemoryStorage.
     data_dir: []const u8 = "",
     /// Borrowed filesystem used when `data_dir` is non-empty. The default uses
     /// the host filesystem. A custom backend must outlive the Raftor.
