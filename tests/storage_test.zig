@@ -54,6 +54,7 @@ test "storage: entries slice and limit behavior" {
 
     // compacted: low below first index.
     try std.testing.expectError(error.Compacted, storage.entries(allocator, 2, 6, null, .{ .empty = .{ .can_async = false } }));
+    try std.testing.expectError(error.Fatal, storage.entries(allocator, 3, 8, null, .{ .empty = .{ .can_async = false } }));
 
     const cases = [_]struct { lo: u64, hi: u64, max: ?u64, want: []const struct { idx: u64, term: u64 } }{
         .{ .lo = 3, .hi = 4, .max = null, .want = &.{.{ .idx = 3, .term = 3 }} },
@@ -140,6 +141,12 @@ test "storage: append overwrites, truncates, and rejects gaps" {
         .{
             // Gap; the index before firstIndex is rejected.
             .append = &.{ .{ .index = 2, .term = 3 }, .{ .index = 3, .term = 3 }, .{ .index = 4, .term = 5 } },
+            .want = &.{},
+            .want_error = error.Fatal,
+        },
+        .{
+            // Gap after lastIndex is rejected.
+            .append = &.{.{ .index = 7, .term = 7 }},
             .want = &.{},
             .want_error = error.Fatal,
         },
@@ -238,4 +245,34 @@ test "storage: writable storage vtable dispatches to methods" {
 
     const read_iface = storage.asStorage();
     try std.testing.expectEqual(@as(u64, 6), try read_iface.lastIndex());
+}
+
+test "storage: snapshot rejects commit outside retained bounds" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.applySnapshot(allocator, .{ .metadata = .{ .index = 3, .term = 2 } });
+
+    try storage.setHardState(.{ .commit = 2 });
+    try std.testing.expectError(error.Fatal, storage.core.snapshot(allocator));
+
+    try storage.append(allocator, &.{.{ .index = 4, .term = 2 }});
+    try storage.setHardState(.{ .commit = 5 });
+    try std.testing.expectError(error.Fatal, storage.core.snapshot(allocator));
+}
+
+test "storage: getSnapshot rebuilds metadata at requested index" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    try storage.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 2 },
+    });
+    try storage.setHardState(.{ .term = 2, .commit = 2 });
+
+    var snapshot = try storage.getSnapshot(allocator, 5, 2);
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), snapshot.metadata.index);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.metadata.term);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, snapshot.metadata.conf_state.voters);
 }

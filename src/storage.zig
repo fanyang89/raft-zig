@@ -503,6 +503,14 @@ fn containsSorted(ids: []const u64, id: u64) bool {
     return false;
 }
 
+test "containsSorted searches both halves" {
+    const ids = [_]u64{ 2, 4, 6, 8, 10 };
+    try std.testing.expect(containsSorted(&ids, 2));
+    try std.testing.expect(containsSorted(&ids, 10));
+    try std.testing.expect(!containsSorted(&ids, 1));
+    try std.testing.expect(!containsSorted(&ids, 11));
+}
+
 fn writableStorage(ctx: *anyopaque) *WritableStorage {
     return @ptrCast(@alignCast(ctx));
 }

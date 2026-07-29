@@ -166,3 +166,23 @@ test "toConfChangeSingle splits outgoing and incoming streams" {
     try std.testing.expectEqual(ConfChangeType.remove_node, split.incoming[0].change_type);
     try std.testing.expectEqual(ConfChangeType.add_learner_node, split.incoming[5].change_type);
 }
+
+test "restore rebuilds a joint configuration" {
+    const allocator = std.testing.allocator;
+    var tracker = ProgressTracker.init(allocator, 8);
+    defer tracker.deinit();
+
+    const state = ConfState{
+        .voters = @constCast(&[_]u64{ 1, 2, 4 }),
+        .voters_outgoing = @constCast(&[_]u64{ 1, 2, 3 }),
+        .learners = @constCast(&[_]u64{5}),
+        .learners_next = @constCast(&[_]u64{3}),
+        .auto_leave = true,
+    };
+    try restore(&tracker, 10, state);
+
+    var restored = try tracker.conf.toConfState(allocator);
+    defer restored.deinit(allocator);
+    try std.testing.expect(state.eql(restored));
+    try std.testing.expectEqual(@as(u64, 10), tracker.getPtr(5).?.next_idx);
+}

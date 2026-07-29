@@ -48,6 +48,11 @@ fn freeMsg(m: *Message) void {
     m.entries = &.{};
 }
 
+fn clearMessages(node: *raft.Raft) void {
+    for (node.messages.items) |*message| message.deinit(allocator);
+    node.messages.clearRetainingCapacity();
+}
+
 test "raft: leader election in one round RPC" {
     var net = try network_mod.newNetwork(&.{ 1, 2, 3 });
     defer net.deinit();
@@ -329,4 +334,170 @@ test "raft: network checkSafety supports snapshots" {
     // + error pattern as checkCommittedOverlap and is intentionally not
     // triggered here to avoid failing the test on the error log.
     try net.checkSafety();
+}
+
+test "raft: stale pre-vote is rejected without changing term" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2, 3 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeFollower(2, 0);
+
+    var request = Message{
+        .msg_type = .request_pre_vote,
+        .from = 2,
+        .to = 1,
+        .term = 1,
+    };
+    try node.step(&request);
+
+    try std.testing.expectEqual(@as(u64, 2), node.term);
+    try std.testing.expectEqual(@as(usize, 1), node.messages.items.len);
+    const response = node.messages.items[0];
+    try std.testing.expectEqual(MessageType.request_pre_vote_response, response.msg_type);
+    try std.testing.expectEqual(@as(u64, 2), response.term);
+    try std.testing.expect(response.reject);
+}
+
+test "raft: candidate drops or ignores messages without a leader" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2, 3 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+
+    var entries = [_]raft.Entry{.{ .data = @constCast("proposal") }};
+    var proposal = Message{ .msg_type = .propose, .from = 1, .entries = &entries };
+    try std.testing.expectError(error.ProposalDropped, node.step(&proposal));
+
+    var mismatched_vote = Message{
+        .msg_type = .request_pre_vote_response,
+        .from = 2,
+        .term = node.term,
+    };
+    try node.step(&mismatched_vote);
+    try std.testing.expectEqual(StateRole.candidate, node.state);
+
+    var timeout = Message{ .msg_type = .timeout_now, .from = 2 };
+    try node.step(&timeout);
+    var read_index = Message{ .msg_type = .read_index, .from = 1 };
+    try node.step(&read_index);
+    try std.testing.expectEqual(@as(usize, 0), node.messages.items.len);
+
+    var snapshot = Message{ .msg_type = .snapshot, .from = 2, .term = node.term };
+    try node.step(&snapshot);
+    try std.testing.expectEqual(StateRole.follower, node.state);
+    try std.testing.expectEqual(@as(u64, 2), node.leader_id);
+}
+
+test "raft: follower without leader drops transfer and read index" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+
+    var transfer = Message{ .msg_type = .transfer_leader, .from = 2 };
+    try node.step(&transfer);
+    var read_index = Message{ .msg_type = .read_index, .from = 1 };
+    try node.step(&read_index);
+    try std.testing.expectEqual(@as(usize, 0), node.messages.items.len);
+}
+
+test "raft: follower rejects invalid read index responses" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2, 3 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeFollower(1, 2);
+
+    var wrong_leader = Message{ .msg_type = .read_index_resp, .from = 3, .term = 1 };
+    try node.step(&wrong_leader);
+    var empty = Message{ .msg_type = .read_index_resp, .from = 2, .term = 1 };
+    try node.step(&empty);
+    var entries = [_]raft.Entry{ .{}, .{} };
+    var multiple = Message{ .msg_type = .read_index_resp, .from = 2, .term = 1, .entries = &entries };
+    try node.step(&multiple);
+
+    try std.testing.expectEqual(@as(usize, 0), node.read_states.items.len);
+}
+
+test "raft: leader rejects empty and multiple configuration changes" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{1}) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+    try node.becomeLeader();
+
+    var empty_entries = [_]raft.Entry{.{ .entry_type = .conf_change_v2 }};
+    var empty = Message{ .msg_type = .propose, .from = 1, .entries = &empty_entries };
+    try std.testing.expectError(error.ProposalDropped, node.step(&empty));
+
+    var multiple_entries = [_]raft.Entry{
+        .{ .entry_type = .conf_change, .data = @constCast("first") },
+        .{ .entry_type = .conf_change_v2, .data = @constCast("second") },
+    };
+    var multiple = Message{ .msg_type = .propose, .from = 1, .entries = &multiple_entries };
+    try std.testing.expectError(error.ProposalDropped, node.step(&multiple));
+    try std.testing.expectEqual(@as(u64, 1), node.raft_log.lastIndex());
+}
+
+test "raft: repeated transfer to the same voter is a no-op" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+    try node.becomeLeader();
+    clearMessages(&node);
+
+    var transfer = Message{ .msg_type = .transfer_leader, .from = 2 };
+    try node.step(&transfer);
+    try std.testing.expectEqual(@as(?u64, 2), node.lead_transferee);
+    const message_count = node.messages.items.len;
+
+    var repeated = Message{ .msg_type = .transfer_leader, .from = 2 };
+    try node.step(&repeated);
+    try std.testing.expectEqual(message_count, node.messages.items.len);
+}
+
+test "raft: empty append succeeds and pending snapshot request is repeated" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var node = try raft.Raft.init(allocator, raftConfig(1), storage.asStorage());
+    defer node.deinit();
+
+    var append = Message{
+        .msg_type = .append,
+        .from = 2,
+        .to = 1,
+        .term = 1,
+        .index = 0,
+        .log_term = 0,
+    };
+    try node.step(&append);
+    try std.testing.expectEqual(MessageType.append_response, node.messages.items[0].msg_type);
+    try std.testing.expect(!node.messages.items[0].reject);
+    clearMessages(&node);
+
+    node.pending_request_snapshot = 7;
+    var pending_append = Message{
+        .msg_type = .append,
+        .from = 2,
+        .to = 1,
+        .term = 1,
+        .index = 0,
+        .log_term = 0,
+    };
+    try node.step(&pending_append);
+    try std.testing.expectEqual(@as(usize, 1), node.messages.items.len);
+    try std.testing.expect(node.messages.items[0].reject);
+    try std.testing.expectEqual(@as(u64, 7), node.messages.items[0].request_snapshot);
 }

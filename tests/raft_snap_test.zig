@@ -269,3 +269,92 @@ test "snap: snapshot succeed keeps probe but paused" {
     try std.testing.expectEqual(ProgressState.probe, pr.state);
     try std.testing.expect(pr.paused);
 }
+
+test "snap: restore rejects invalid metadata and configuration" {
+    var storage = try newStorage(&.{ 1, 2 });
+    defer storage.deinit(allocator);
+    var node = try raft.Raft.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+
+    const invalid_states = [_]raft.ConfState{
+        .{ .voters = @constCast(&[_]u64{ 0, 1 }) },
+        .{ .voters = @constCast(&[_]u64{ 1, 1 }) },
+        .{ .voters = @constCast(&[_]u64{1}), .learners = @constCast(&[_]u64{1}) },
+        .{ .voters = @constCast(&[_]u64{1}), .auto_leave = true },
+        .{ .voters = @constCast(&[_]u64{1}), .learners_next = @constCast(&[_]u64{2}) },
+        .{ .voters = @constCast(&[_]u64{2}) },
+    };
+    for (invalid_states) |conf_state| {
+        try std.testing.expect(!try node.restoreSnapshot(.{
+            .metadata = .{ .index = 10, .term = 2, .conf_state = conf_state },
+        }));
+        try std.testing.expectEqual(@as(u64, 0), node.raft_log.committed);
+    }
+
+    try std.testing.expect(!try node.restoreSnapshot(.{
+        .metadata = .{ .index = std.math.maxInt(u64), .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+}
+
+test "snap: matching snapshot fast-forwards commit" {
+    var storage = try newStorage(&.{1});
+    defer storage.deinit(allocator);
+    try storage.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 2 },
+    });
+    var node = try raft.Raft.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+
+    const restored = try node.restoreSnapshot(.{
+        .metadata = .{ .index = 2, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    });
+    try std.testing.expect(!restored);
+    try std.testing.expectEqual(@as(u64, 2), node.raft_log.committed);
+    try std.testing.expect(node.raft_log.unstable.snapshot == null);
+
+    try std.testing.expect(!try node.restoreSnapshot(.{
+        .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expect(!try node.restoreSnapshot(.{
+        .metadata = .{ .index = 2, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+}
+
+test "snap: pending request accepts its snapshot instead of fast-forwarding" {
+    var storage = try newStorage(&.{1});
+    defer storage.deinit(allocator);
+    try storage.append(allocator, &.{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 2, .term = 2 },
+    });
+    var node = try raft.Raft.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.pending_request_snapshot = 2;
+
+    try std.testing.expect(!try node.restoreSnapshot(.{
+        .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectEqual(@as(u64, 2), node.pending_request_snapshot);
+
+    try std.testing.expect(try node.restoreSnapshot(.{
+        .metadata = .{ .index = 2, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectEqual(raft.invalid_index, node.pending_request_snapshot);
+    try std.testing.expect(node.raft_log.unstable.snapshot != null);
+}
+
+test "snap: non-follower refuses restore and advances term" {
+    var storage = try newStorage(&.{1});
+    defer storage.deinit(allocator);
+    var node = try raft.Raft.init(allocator, makeConfig(1), storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+    const candidate_term = node.term;
+
+    try std.testing.expect(!try node.restoreSnapshot(.{
+        .metadata = .{ .index = 10, .term = 2, .conf_state = .{ .voters = @constCast(&[_]u64{1}) } },
+    }));
+    try std.testing.expectEqual(raft.StateRole.follower, node.state);
+    try std.testing.expectEqual(candidate_term + 1, node.term);
+}

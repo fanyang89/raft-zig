@@ -427,6 +427,22 @@ test "proposal tracker completes ready reads after apply" {
     try std.testing.expectEqual(@as(usize, 0), tracker.pendingReadCount());
 }
 
+test "proposal tracker failRead fails only the matching read" {
+    var tracker = ProposalTracker.init(std.testing.allocator);
+    defer tracker.deinit();
+    var first = ReadTester{};
+    var second = ReadTester{};
+    try tracker.trackRead("first", first.readCallback(), 0, 0);
+    try tracker.trackRead("second", second.readCallback(), 0, 0);
+
+    tracker.failRead("missing", error.LostLeadership);
+    tracker.failRead("first", error.LostLeadership);
+
+    try std.testing.expectEqual(error.LostLeadership, first.result.?.err);
+    try std.testing.expect(second.result == null);
+    try std.testing.expectEqual(@as(usize, 1), tracker.pendingReadCount());
+}
+
 test "proposal tracker ignores ready state after read timeout" {
     const allocator = std.testing.allocator;
     var tracker = ProposalTracker.init(allocator);

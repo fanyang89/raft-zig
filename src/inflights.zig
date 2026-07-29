@@ -280,3 +280,29 @@ test "setCapacity grows the buffer at multiple start offsets" {
         }
     }
 }
+
+test "ordinary boundaries and deferred shrink" {
+    const allocator = std.testing.allocator;
+    var inflight = Inflights.init(4);
+    defer inflight.deinit(allocator);
+
+    inflight.freeTo(allocator, 1);
+    inflight.freeFirstOne(allocator);
+    try inflight.setCapacity(allocator, 4);
+    try inflight.setCapacity(allocator, 6);
+    try std.testing.expectEqual(@as(usize, 6), inflight.capacity);
+    try std.testing.expect(!inflight.bufferIsAllocated());
+
+    try inflight.add(allocator, 3);
+    try inflight.add(allocator, 5);
+    inflight.freeTo(allocator, 2);
+    try std.testing.expectEqual(@as(usize, 2), inflight.count_());
+
+    try inflight.setCapacity(allocator, 1);
+    try std.testing.expect(inflight.full());
+    try std.testing.expectEqual(@as(?usize, 1), inflight.incoming_capacity);
+    inflight.freeTo(allocator, 5);
+    try std.testing.expectEqual(@as(usize, 0), inflight.count_());
+    try std.testing.expectEqual(@as(usize, 1), inflight.capacity);
+    try std.testing.expect(inflight.incoming_capacity == null);
+}

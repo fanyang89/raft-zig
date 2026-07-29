@@ -190,6 +190,28 @@ test "proposal queue push and tryPop" {
     try std.testing.expect(q.tryPop() == null);
 }
 
+test "proposal and read queues deinit pending owned items" {
+    const Cb = struct {
+        fn proposal(_: *anyopaque, _: proposal_tracker_mod.ProposalResult) void {}
+        fn read(_: *anyopaque, _: proposal_tracker_mod.ReadIndexResult) void {}
+    };
+
+    var proposals = ProposalQueue.init(std.testing.allocator, .{});
+    try proposals.push(
+        try std.testing.allocator.dupe(u8, "data"),
+        try std.testing.allocator.dupe(u8, "proposal"),
+        .{ .ctx = undefined, .function = Cb.proposal },
+    );
+    proposals.deinit();
+
+    var reads = ReadIndexQueue.init(std.testing.allocator, .{});
+    try reads.push(
+        try std.testing.allocator.dupe(u8, "read"),
+        .{ .ctx = undefined, .function = Cb.read },
+    );
+    reads.deinit();
+}
+
 test "proposal queue preserves FIFO order across deque wrap-around" {
     var queue = ProposalQueue.init(std.testing.allocator, .{});
     defer queue.deinit();

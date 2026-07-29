@@ -435,3 +435,13 @@ test "progress map ackedIndex vtable dispatch" {
     try std.testing.expectEqual(@as(u64, 9), b.index);
     try std.testing.expect(idx.ackedIndex(99) == null);
 }
+
+test "progress map remove reports missing entries" {
+    var progress = ProgressMap.init(std.testing.allocator);
+    defer progress.deinit();
+
+    try std.testing.expect(!progress.remove(1));
+    try progress.put(1, Progress.init(std.testing.allocator, 2, 8));
+    try std.testing.expect(progress.remove(1));
+    try std.testing.expect(!progress.remove(1));
+}

@@ -669,6 +669,7 @@ test "raft_log: is out of bounds" {
 
     const Case = struct { lo: u64, hi: u64, want_fatal: bool, want_compacted: bool };
     const cases = [_]Case{
+        .{ .lo = first + 1, .hi = first, .want_fatal = true, .want_compacted = false },
         .{ .lo = first - 2, .hi = first + 1, .want_fatal = false, .want_compacted = true },
         .{ .lo = first - 1, .hi = first + 1, .want_fatal = false, .want_compacted = true },
         .{ .lo = first, .hi = first, .want_fatal = false, .want_compacted = false },
@@ -686,6 +687,46 @@ test "raft_log: is out of bounds" {
         };
         try std.testing.expect(!c.want_compacted and !c.want_fatal);
     }
+}
+
+test "raft_log: unstable snapshot satisfies snapshot requests" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var rl = try raft.RaftLog.init(allocator, storage.asStorage(), 0);
+    defer rl.deinit();
+
+    var snapshot = Snapshot{
+        .data = try allocator.dupe(u8, "unstable"),
+        .metadata = .{ .index = 5, .term = 2 },
+    };
+    defer snapshot.deinit(allocator);
+    try rl.restore(snapshot);
+
+    var got = try rl.getSnapshot(4, 2);
+    defer got.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), got.metadata.index);
+    try std.testing.expectEqualStrings("unstable", got.data);
+    try std.testing.expect(got.data.ptr != snapshot.data.ptr);
+}
+
+test "raft_log: find conflict by term walks back and handles future index" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var rl = try raft.RaftLog.init(allocator, storage.asStorage(), 0);
+    defer rl.deinit();
+    _ = try rl.append(&.{
+        newEntry(1, 1),
+        newEntry(2, 2),
+        newEntry(3, 3),
+        newEntry(4, 3),
+    });
+
+    const conflict = try rl.findConflictByTerm(4, 2);
+    try std.testing.expectEqual(@as(u64, 2), conflict.index);
+    try std.testing.expectEqual(@as(?u64, 2), conflict.term);
+    const future = try rl.findConflictByTerm(9, 9);
+    try std.testing.expectEqual(@as(u64, 9), future.index);
+    try std.testing.expectEqual(@as(?u64, null), future.term);
 }
 
 test "raft_log: restore snapshot then resume appending" {

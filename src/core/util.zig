@@ -117,6 +117,8 @@ test "isContinuousEntries detects gap" {
     const gap = [_]Entry{.{ .index = 7, .term = 1 }};
     try std.testing.expect(isContinuousEntries(msg, &cont));
     try std.testing.expect(!isContinuousEntries(msg, &gap));
+    try std.testing.expect(isContinuousEntries(.{}, &cont));
+    try std.testing.expect(isContinuousEntries(msg, &.{}));
 }
 
 // ===========================================================================
