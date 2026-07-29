@@ -720,7 +720,7 @@ pub const Raft = struct {
                 return;
             },
             .check_quorum => {
-                const active = self.progress_tracker.quorumRecentlyActive(self.id) catch true;
+                const active = self.progress_tracker.quorumRecentlyActive(self.id) catch false;
                 if (!active) {
                     log.warn(@src(), "node {} stepped down because quorum is inactive", .{self.id});
                     self.becomeFollower(self.term, invalid_id);

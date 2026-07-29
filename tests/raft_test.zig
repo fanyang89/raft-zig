@@ -209,6 +209,33 @@ test "raft: leader steps down when quorum lost" {
     try std.testing.expectEqual(StateRole.follower, p1.raft.state);
 }
 
+test "raft: leader steps down when check quorum allocation fails" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const node_allocator = failing.allocator();
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(node_allocator);
+    try storage.setRaftState(node_allocator, .{
+        .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2, 3 }) },
+    });
+
+    var config = raftConfig(1);
+    config.check_quorum = true;
+    var node = try raft.Raft.init(node_allocator, config, storage.asStorage());
+    defer node.deinit();
+    node.becomeCandidate();
+    try node.becomeLeader();
+    try std.testing.expectEqual(StateRole.leader, node.state);
+    const term = node.term;
+
+    failing.fail_index = failing.alloc_index;
+    var check = Message{ .msg_type = .check_quorum, .from = 1 };
+    try node.step(&check);
+
+    try std.testing.expectEqual(StateRole.follower, node.state);
+    try std.testing.expectEqual(@as(u64, 0), node.leader_id);
+    try std.testing.expectEqual(term, node.term);
+}
+
 test "raft: follower rejects stale-candidate vote" {
     var net = try network_mod.newNetwork(&.{ 1, 2, 3 });
     defer net.deinit();
