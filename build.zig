@@ -306,6 +306,12 @@ pub fn build(b: *std.Build) void {
     }
 
     const fuzz_smoke_step = b.step("fuzz-smoke", "Run fuzz corpus smoke tests");
+    // Non-RPC fuzz targets must not instrument grpc-lite's third-party C code.
+    const grpc_lite_fuzz_stub = b.createModule(.{
+        .root_source_file = b.path("tests/harness/grpc_lite_fuzz_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const fuzz_specs = [_]FuzzSpec{
         .{ .name = "codec", .source = "src/codec.zig" },
         .{ .name = "wal", .source = "src/wal.zig" },
@@ -319,7 +325,7 @@ pub fn build(b: *std.Build) void {
             .imports = if (std.mem.eql(u8, spec.name, "wal"))
                 &.{
                     .{ .name = "crc32c", .module = crc32c },
-                    .{ .name = "grpc_lite", .module = grpc_lite },
+                    .{ .name = "grpc_lite", .module = grpc_lite_fuzz_stub },
                 }
             else if (std.mem.eql(u8, spec.name, "confchange"))
                 &.{.{ .name = "crc32c", .module = crc32c }}
@@ -336,11 +342,22 @@ pub fn build(b: *std.Build) void {
         fuzz_smoke_step.dependOn(&run_tests.step);
     }
 
+    const raft_zig_fuzz = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "raft_zig_options", .module = raft_zig_options.createModule() },
+            .{ .name = "crc32c", .module = crc32c },
+            .{ .name = "grpc_lite", .module = grpc_lite_fuzz_stub },
+        },
+    });
+    applySanitizers(raft_zig_fuzz, sanitizers);
     const simulation_fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/simulation_test.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "raft_zig", .module = raft_zig }},
+        .imports = &.{.{ .name = "raft_zig", .module = raft_zig_fuzz }},
     });
     applySanitizers(simulation_fuzz_module, sanitizers);
     const simulation_fuzz_tests = b.addTest(.{
