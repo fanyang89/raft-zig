@@ -5,8 +5,8 @@
     .fingerprint = 0xd98872fa44f543c3,
     .dependencies = .{
         .grpc_lite = .{
-            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/28e5bd41ae80e089a159f415cadec40e169762a4",
-            .hash = "grpc_lite-0.3.1-BcwY0Dye-wEJLucngNDZ9O3mY7-0WVlzmDsgzQIuVuEd",
+            .url = "https://codeload.github.com/fanyang89/grpc-lite/tar.gz/d45f929dd73f927fd515aa3b6e3188fd9b6714f0",
+            .hash = "grpc_lite-0.4.0-BcwY0NQW9AGVwOldiYN_ZlF3bGreQl8PArikDoSzDE2n",
         },
         .nanozlog = .{
             .path = "vendor/nanozlog",
