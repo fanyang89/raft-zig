@@ -131,3 +131,33 @@ test "bounded mailbox tracks count and bytes" {
     defer first.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 7), mailbox.bytes());
 }
+
+test "bounded mailbox compacts consumed slots" {
+    const allocator = std.testing.allocator;
+    var mailbox = try InboundMailbox.init(allocator, .{ .max_messages = 2, .max_bytes = 10 });
+    defer mailbox.deinit();
+
+    try mailbox.push(.{ .msg_type = .append, .index = 1 }, 2);
+    try mailbox.push(.{ .msg_type = .append, .index = 2 }, 3);
+    var next_index: u64 = 3;
+    while (mailbox.inbox.items.len < mailbox.inbox.capacity) {
+        var consumed = mailbox.pop().?;
+        consumed.deinit(allocator);
+        try mailbox.push(.{ .msg_type = .append, .index = next_index }, 1);
+        next_index += 1;
+    }
+
+    var consumed = mailbox.pop().?;
+    const expected_next = consumed.index + 1;
+    consumed.deinit(allocator);
+    try mailbox.push(.{ .msg_type = .append, .index = next_index }, 1);
+    try std.testing.expectEqual(@as(usize, 0), mailbox.head);
+    try std.testing.expectEqual(@as(usize, 2), mailbox.count());
+
+    var second = mailbox.pop().?;
+    defer second.deinit(allocator);
+    var third = mailbox.pop().?;
+    defer third.deinit(allocator);
+    try std.testing.expectEqual(expected_next, second.index);
+    try std.testing.expectEqual(next_index, third.index);
+}

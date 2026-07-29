@@ -261,3 +261,51 @@ test "loopback: drop filter simulates partition" {
     try std.testing.expectEqual(@as(usize, 1), tp2.inbox.items.len);
     try std.testing.expectEqual(MessageType.heartbeat, tp2.inbox.items[0].msg_type);
 }
+
+test "loopback: missing target drops owned message" {
+    const allocator = std.testing.allocator;
+    const net = try LoopbackNetwork.create(allocator);
+    defer net.destroy();
+
+    const source = try net.createTransport(1);
+    try source.transport().send(&.{.{
+        .msg_type = .heartbeat,
+        .from = 1,
+        .to = 99,
+        .context = @constCast("context"),
+    }});
+    try std.testing.expect(!(try net.pollAll()));
+}
+
+test "loopback: add and remove peer vtable methods are no-ops" {
+    const allocator = std.testing.allocator;
+    const net = try LoopbackNetwork.create(allocator);
+    defer net.destroy();
+
+    const transport = (try net.createTransport(1)).transport();
+    try std.testing.expect(try transport.addPeer(2, "unused"));
+    try transport.removePeer(2);
+}
+
+fn exerciseLoopbackAllocations(allocator: std.mem.Allocator) !void {
+    const net = try LoopbackNetwork.create(allocator);
+    defer net.destroy();
+    const source = try net.createTransport(1);
+    const target = try net.createTransport(2);
+
+    try source.transport().send(&.{.{
+        .msg_type = .heartbeat,
+        .from = 1,
+        .to = 2,
+        .context = @constCast("context"),
+    }});
+    try std.testing.expectEqual(@as(usize, 1), target.inbox.items.len);
+}
+
+test "loopback: allocation failures clean up network and messages" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseLoopbackAllocations,
+        .{},
+    );
+}

@@ -286,3 +286,54 @@ test "noop transport delivers to callback" {
     try std.testing.expect(received != null);
     try std.testing.expectEqual(@import("core/types.zig").MessageType.heartbeat, received.?.msg_type);
 }
+
+test "noop transport remove peer is a no-op" {
+    var transport = NoopTransport.init(std.testing.allocator);
+    defer transport.deinit();
+
+    try transport.transport().removePeer(99);
+}
+
+test "noop transport delivers peer events to callback" {
+    var transport = NoopTransport.init(std.testing.allocator);
+    defer transport.deinit();
+    var received: ?PeerEvent = null;
+
+    const Callback = struct {
+        event: *?PeerEvent,
+
+        fn invoke(context: *anyopaque, event: PeerEvent) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.event.* = event;
+        }
+    };
+    var callback = Callback{ .event = &received };
+    const interface = transport.transport();
+    interface.setPeerEventCallback(.{ .ctx = &callback, .function = Callback.invoke });
+
+    const event = PeerEvent{ .peer_id = 7, .kind = .snapshot_failure };
+    try std.testing.expect(try transport.deliverPeerEvent(event));
+    try std.testing.expect(try interface.pollOne());
+    try std.testing.expectEqual(event, received.?);
+}
+
+fn exerciseNoopTransportAllocations(allocator: std.mem.Allocator) !void {
+    var transport = NoopTransport.init(allocator);
+    defer transport.deinit();
+    var entries = [_]types.Entry{.{ .data = @constCast("entry") }};
+
+    try transport.transport().send(&.{.{
+        .msg_type = .append,
+        .entries = entries[0..],
+        .context = @constCast("context"),
+    }});
+    try std.testing.expectEqual(@as(usize, 1), transport.sent.items.len);
+}
+
+test "noop transport send handles every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseNoopTransportAllocations,
+        .{},
+    );
+}

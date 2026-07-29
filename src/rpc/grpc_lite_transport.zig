@@ -447,3 +447,89 @@ fn mapCodecError(err: anyerror) Error {
 fn lock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
 }
+
+const TestEventSink = struct {
+    fn emit(_: *anyopaque, _: transport_mod.PeerEvent, _: u64) void {}
+};
+
+fn validTestConfig() Config {
+    return .{
+        .identity = .{ .cluster_id = [_]u8{1} ** 16, .node_id = 2 },
+        .listen_addr = "127.0.0.1:0",
+    };
+}
+
+test "grpc transport config validation rejects invalid fields" {
+    var config = validTestConfig();
+    try config.validate();
+
+    config.identity.node_id = 0;
+    try std.testing.expectError(error.InvalidNodeId, config.validate());
+    config = validTestConfig();
+    config.identity.cluster_id = [_]u8{0} ** 16;
+    try std.testing.expectError(error.ClusterIdRequired, config.validate());
+    config = validTestConfig();
+    config.listen_addr = "";
+    try std.testing.expectError(error.ListenAddressEmpty, config.validate());
+    config = validTestConfig();
+    config.stream_limits.max_message_size = 0;
+    try std.testing.expectError(error.InvalidMaxMessageSize, config.validate());
+    config = validTestConfig();
+    config.mailbox_max_messages = 0;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+    config = validTestConfig();
+    config.mailbox_max_bytes = 0;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+    config = validTestConfig();
+    config.reconnect_initial_delay_ns = 0;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+    config = validTestConfig();
+    config.reconnect_max_delay_ns = config.reconnect_initial_delay_ns - 1;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+    config = validTestConfig();
+    config.graceful_shutdown_timeout_ns = 0;
+    try std.testing.expectError(error.InvalidConfig, config.validate());
+}
+
+test "grpc transport validates inbound message routes" {
+    const allocator = std.testing.allocator;
+    var self: GrpcLiteTransport = undefined;
+    self.config = validTestConfig();
+    self.peer_manager = PeerManager.init(allocator, .{
+        .identity = self.config.identity,
+        .stream_limits = self.config.stream_limits,
+        .reconnect_initial_delay_ns = 1,
+        .reconnect_max_delay_ns = 2,
+        .runtime = null,
+        .event_sink = .{ .ctx = undefined, .function = TestEventSink.emit },
+    });
+    defer self.peer_manager.deinit();
+    try std.testing.expect(try self.peer_manager.addPeer(1, "source"));
+    try std.testing.expect(try self.peer_manager.addPeer(3, "transferee"));
+
+    try std.testing.expect(validRoute(&self, 1, .{ .msg_type = .append, .from = 1, .to = 2 }));
+    try std.testing.expect(!validRoute(&self, 1, .{ .msg_type = .append, .from = 3, .to = 2 }));
+    try std.testing.expect(!validRoute(&self, 1, .{ .msg_type = .append, .from = 1, .to = 3 }));
+    try std.testing.expect(!validRoute(&self, 1, .{ .msg_type = .hup, .from = 1, .to = 2 }));
+    try std.testing.expect(validRoute(&self, 1, .{ .msg_type = .transfer_leader, .from = 2, .to = 2 }));
+    try std.testing.expect(validRoute(&self, 1, .{ .msg_type = .transfer_leader, .from = 3, .to = 2 }));
+    try std.testing.expect(!validRoute(&self, 1, .{ .msg_type = .transfer_leader, .from = 0, .to = 2 }));
+    try std.testing.expect(!validRoute(&self, 1, .{ .msg_type = .transfer_leader, .from = 4, .to = 2 }));
+}
+
+test "grpc transport error mapping is stable" {
+    const start_cases = [_]struct { input: anyerror, expected: Error }{
+        .{ .input = error.OutOfMemory, .expected = error.OutOfMemory },
+        .{ .input = error.BindFailed, .expected = error.BindFailed },
+        .{ .input = error.ListenFailed, .expected = error.ListenFailed },
+        .{ .input = error.Unexpected, .expected = error.ConnectionClosed },
+    };
+    for (start_cases) |case| try std.testing.expectEqual(case.expected, mapStartError(case.input));
+
+    const codec_cases = [_]struct { input: anyerror, expected: Error }{
+        .{ .input = error.OutOfMemory, .expected = error.OutOfMemory },
+        .{ .input = error.MessageTooLarge, .expected = error.MessageTooLarge },
+        .{ .input = error.Unexpected, .expected = error.PayloadParseFailed },
+    };
+    for (codec_cases) |case| try std.testing.expectEqual(case.expected, mapCodecError(case.input));
+}

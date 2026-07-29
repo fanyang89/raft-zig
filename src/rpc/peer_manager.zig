@@ -571,3 +571,136 @@ fn sleepNanoseconds(nanoseconds: u64) void {
         }
     }
 }
+
+const TestEventSink = struct {
+    fn emit(_: *anyopaque, _: transport.PeerEvent, _: u64) void {}
+};
+
+fn testConfig(node_id: u64) Config {
+    return .{
+        .identity = .{ .cluster_id = [_]u8{1} ** 16, .node_id = node_id },
+        .stream_limits = .{},
+        .reconnect_initial_delay_ns = 1,
+        .reconnect_max_delay_ns = 2,
+        .runtime = null,
+        .event_sink = .{ .ctx = undefined, .function = TestEventSink.emit },
+    };
+}
+
+fn appendIdentityMetadata(
+    metadata: *grpc.Metadata,
+    version: []const u8,
+    cluster_id: []const u8,
+    source_node: []const u8,
+    target_node: []const u8,
+) !void {
+    try metadata.append(protocol_version_key, version);
+    try metadata.append(cluster_id_key, cluster_id);
+    try metadata.append(source_node_key, source_node);
+    try metadata.append(target_node_key, target_node);
+}
+
+test "peer manager rejects conflicting duplicate peer addresses" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    try std.testing.expect(!(try manager.addPeer(2, "127.0.0.1:9002")));
+    try std.testing.expectError(
+        error.ConflictingPeerAddress,
+        manager.addPeer(2, "127.0.0.1:9003"),
+    );
+}
+
+test "peer manager handles missing peers and snapshot acknowledgement" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+
+    try std.testing.expectError(error.ConnectionClosed, manager.send(2, "payload", false));
+    try std.testing.expectEqual(@as(u64, 0), manager.openCount(2));
+    manager.acknowledgeSnapshot(2);
+
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    const peer = manager.peers.get(2).?;
+    peer.snapshot_queued = true;
+    manager.acknowledgeSnapshot(2);
+    try std.testing.expect(!peer.snapshot_queued);
+}
+
+test "stream identity parser rejects missing and duplicate metadata" {
+    const allocator = std.testing.allocator;
+    const cluster_id = [_]u8{1} ** 16;
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    std.mem.writeInt(u64, &source, 1, .little);
+    std.mem.writeInt(u64, &target, 2, .little);
+
+    for (0..4) |omitted| {
+        var metadata = grpc.Metadata.init(allocator);
+        defer metadata.deinit();
+        if (omitted != 0) try metadata.append(protocol_version_key, "1");
+        if (omitted != 1) try metadata.append(cluster_id_key, &cluster_id);
+        if (omitted != 2) try metadata.append(source_node_key, &source);
+        if (omitted != 3) try metadata.append(target_node_key, &target);
+        try std.testing.expectError(error.MissingIdentityMetadata, parseStreamIdentity(&metadata));
+    }
+
+    var duplicate = grpc.Metadata.init(allocator);
+    defer duplicate.deinit();
+    try appendIdentityMetadata(&duplicate, "1", &cluster_id, &source, &target);
+    try duplicate.append(protocol_version_key, "1");
+    try std.testing.expectError(error.DuplicateIdentityMetadata, parseStreamIdentity(&duplicate));
+}
+
+test "stream identity parser rejects malformed values" {
+    const allocator = std.testing.allocator;
+    const cluster_id = [_]u8{1} ** 16;
+    const zero_cluster = [_]u8{0} ** 16;
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    const zero_node = [_]u8{0} ** 8;
+    std.mem.writeInt(u64, &source, 1, .little);
+    std.mem.writeInt(u64, &target, 2, .little);
+    const cases = [_]struct {
+        version: []const u8,
+        cluster_id: []const u8,
+        source_node: []const u8,
+        target_node: []const u8,
+    }{
+        .{ .version = "2", .cluster_id = &cluster_id, .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = "short", .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = "short", .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &source, .target_node = "short" },
+        .{ .version = "1", .cluster_id = &zero_cluster, .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &zero_node, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &source, .target_node = &zero_node },
+    };
+
+    for (cases) |case| {
+        var metadata = grpc.Metadata.init(allocator);
+        defer metadata.deinit();
+        try appendIdentityMetadata(
+            &metadata,
+            case.version,
+            case.cluster_id,
+            case.source_node,
+            case.target_node,
+        );
+        try std.testing.expectError(error.MalformedIdentityMetadata, parseStreamIdentity(&metadata));
+    }
+}
+
+test "peer manager error mapping is stable" {
+    const send_cases = [_]struct { input: anyerror, expected: Error }{
+        .{ .input = error.WouldBlock, .expected = error.TransportBackpressure },
+        .{ .input = error.OutboundBufferLimitExceeded, .expected = error.TransportBackpressure },
+        .{ .input = error.MessageTooLarge, .expected = error.MessageTooLarge },
+        .{ .input = error.OutOfMemory, .expected = error.OutOfMemory },
+        .{ .input = error.StreamClosed, .expected = error.ConnectionClosed },
+        .{ .input = error.SendClosed, .expected = error.ConnectionClosed },
+        .{ .input = error.Unexpected, .expected = error.ConnectionClosed },
+    };
+    for (send_cases) |case| try std.testing.expectEqual(case.expected, mapSendError(case.input));
+    try std.testing.expectEqual(error.OutOfMemory, mapWorkerError(error.OutOfMemory));
+    try std.testing.expectEqual(error.ConnectionClosed, mapWorkerError(error.Unexpected));
+}

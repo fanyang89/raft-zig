@@ -69,3 +69,23 @@ pub const PeerEventQueue = struct {
 fn lock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
 }
+
+test "full peer event queue drops oldest and compacts" {
+    var queue = try PeerEventQueue.init(std.testing.allocator, 2);
+    defer queue.deinit();
+
+    queue.push(.{ .peer_id = 1, .kind = .@"unreachable" }, 1);
+    queue.push(.{ .peer_id = 2, .kind = .snapshot_failure }, 1);
+    var next_peer_id: u64 = 3;
+    while (queue.items.items.len < queue.items.capacity) {
+        queue.push(.{ .peer_id = next_peer_id, .kind = .identity_rejected }, 1);
+        next_peer_id += 1;
+    }
+    queue.push(.{ .peer_id = next_peer_id, .kind = .identity_rejected }, 1);
+
+    try std.testing.expectEqual(@as(usize, 0), queue.head);
+    try std.testing.expectEqual(@as(usize, 2), queue.items.items.len);
+    try std.testing.expectEqual(next_peer_id - 1, queue.pop().?.peer_id);
+    try std.testing.expectEqual(next_peer_id, queue.pop().?.peer_id);
+    try std.testing.expectEqual(@as(?transport.PeerEvent, null), queue.pop());
+}
