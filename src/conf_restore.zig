@@ -52,8 +52,10 @@ pub fn toConfChangeSingle(
         try incoming.append(allocator, .{ .change_type = .add_learner_node, .node_id = id });
     }
 
+    const outgoing_owned = try outgoing.toOwnedSlice(allocator);
+    errdefer allocator.free(outgoing_owned);
     return .{
-        .outgoing = try outgoing.toOwnedSlice(allocator),
+        .outgoing = outgoing_owned,
         .incoming = try incoming.toOwnedSlice(allocator),
     };
 }
@@ -65,42 +67,43 @@ pub fn restore(
     next_idx: u64,
     cs: ConfState,
 ) Error!void {
+    var rebuilt = ProgressTracker.init(tracker.allocator, tracker.max_inflight);
+    errdefer rebuilt.deinit();
+    rebuilt.group_commit = tracker.group_commit;
+    try restoreEmpty(&rebuilt, next_idx, cs);
+
+    var old = tracker.*;
+    tracker.* = rebuilt;
+    old.deinit();
+}
+
+fn restoreEmpty(tracker: *ProgressTracker, next_idx: u64, cs: ConfState) Error!void {
     const allocator = tracker.allocator;
     const split = toConfChangeSingle(allocator, cs) catch return error.OutOfMemory;
     defer allocator.free(split.outgoing);
     defer allocator.free(split.incoming);
 
     if (split.outgoing.len == 0) {
-        // Initial configuration: bulk-add via EnterJoint. If that fails
-        // (e.g. already joint), fall back to direct Apply.
         var changer = ConfChanger.init(tracker);
-        if (changer.enterJoint(false, split.incoming)) |result| {
-            var r = result;
-            defer r.deinit(allocator);
-            try tracker.applyConf(r.conf, r.changes, next_idx);
-        } else |_| {
-            // Fallback: checkAndCopy then apply each change directly.
-            var pair = changer.checkAndCopy() catch return error.OutOfMemory;
-            defer pair.deinit();
-            for (split.incoming) |cc| {
-                const one = [_]ConfChangeSingle{cc};
-                try ConfChanger.applyChanges(&pair.cfg, &pair.prs, &one);
-            }
-            try conf_changer_mod.checkInvariants(pair.cfg, pair.prs);
-            const changes = try pair.prs.changes.toOwnedSlice(allocator);
-            defer allocator.free(changes);
-            // Apply to tracker. We need a fresh clone because applyConf clones.
-            const cfg_copy = pair.cfg.clone() catch return error.OutOfMemory;
-            var cfg_clone = cfg_copy;
-            defer cfg_clone.deinit();
-            try tracker.applyConf(cfg_clone, changes, next_idx);
+        var pair = changer.checkAndCopy() catch return error.OutOfMemory;
+        defer pair.deinit();
+        for (split.incoming) |cc| {
+            const one = [_]ConfChangeSingle{cc};
+            try ConfChanger.applyChanges(&pair.cfg, &pair.prs, &one);
         }
+        try conf_changer_mod.checkInvariants(pair.cfg, pair.prs);
+        const changes = try pair.prs.changes.toOwnedSlice(allocator);
+        defer allocator.free(changes);
+        const cfg_copy = pair.cfg.clone() catch return error.OutOfMemory;
+        var cfg_clone = cfg_copy;
+        defer cfg_clone.deinit();
+        try tracker.applyConf(cfg_clone, changes, next_idx);
     } else {
         // Replay outgoing changes via Simple, then enter joint with incoming.
         for (split.outgoing) |cc| {
             const one = [_]ConfChangeSingle{cc};
             var r = ConfChanger.init(tracker).simple(&one) catch |e| {
-                log.warn(@src(), "simple failed during restore: {s}", .{@errorName(e)});
+                log.warn(@src(), "simple failed during restore: {s}", .{@errorName(e)}); // KCOV_EXCL_LINE
                 return e;
             };
             defer r.deinit(allocator);
@@ -137,9 +140,19 @@ test "restore builds a simple config from a ConfState" {
     try std.testing.expect(tr.conf.voters.incoming.contains(3));
     try std.testing.expectEqual(@as(usize, 1), tr.conf.learners.count());
     try std.testing.expect(tr.conf.learners.contains(4));
-    // Bootstrap from empty falls back to direct Apply (EnterJoint fails on
-    // empty incoming), so the result is a simple non-joint config.
     try std.testing.expect(tr.conf.voters.outgoing.isEmpty());
+}
+
+test "restore replaces an existing configuration" {
+    const allocator = std.testing.allocator;
+    var tracker = ProgressTracker.init(allocator, 8);
+    defer tracker.deinit();
+    try restore(&tracker, 1, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    try restore(&tracker, 2, .{ .voters = @constCast(&[_]u64{1}) });
+
+    try std.testing.expectEqual(@as(usize, 1), tracker.progress.count());
+    try std.testing.expect(tracker.getPtr(1) != null);
+    try std.testing.expect(tracker.getPtr(2) == null);
 }
 
 test "toConfChangeSingle splits outgoing and incoming streams" {
@@ -186,5 +199,32 @@ test "restore rebuilds a joint configuration" {
     defer restored.deinit(allocator);
     try std.testing.expect(state.eql(restored));
     try std.testing.expectEqual(@as(u64, 10), tracker.getPtr(5).?.next_idx);
+}
+
+test "conf state splitting cleans up every allocation failure" {
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator, state: ConfState) !void {
+            const split = try toConfChangeSingle(allocator, state);
+            defer allocator.free(split.outgoing);
+            defer allocator.free(split.incoming);
+        }
+    };
+    const state = ConfState{
+        .voters = @constCast(&[_]u64{ 1, 2, 4 }),
+        .voters_outgoing = @constCast(&[_]u64{ 1, 2, 3 }),
+        .learners = @constCast(&[_]u64{5}),
+        .learners_next = @constCast(&[_]u64{3}),
+        .auto_leave = true,
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{state});
+}
+
+test "restore rejects a configuration that removes all voters" {
+    const allocator = std.testing.allocator;
+    var empty = ProgressTracker.init(allocator, 8);
+    defer empty.deinit();
+    try std.testing.expectError(error.RemovedAllVoters, restore(&empty, 1, .{
+        .voters_outgoing = @constCast(&[_]u64{1}),
+    }));
 }
 // KCOV_EXCL_STOP
