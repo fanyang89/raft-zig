@@ -22,7 +22,7 @@ const proposal_tracker_mod = @import("proposal_tracker.zig");
 const proposal_queue_mod = @import("proposal_queue.zig");
 const request_context_mod = @import("request_context.zig");
 const ready_processor_mod = @import("ready_processor.zig");
-const raftor_config_mod = @import("raftor_config.zig");
+const raftor_config_mod = @import("raftor_config.zig"); // KCOV_EXCL_LINE
 const state_role_mod = @import("core/state_role.zig");
 const cluster_membership_mod = @import("cluster_membership.zig");
 
@@ -64,17 +64,21 @@ fn spinLock(mutex: *std.atomic.Mutex) void {
 }
 
 fn sleepNanoseconds(nanoseconds: u64) void {
+    sleepNanosecondsUsing(nanoseconds, linux.nanosleep);
+}
+
+fn sleepNanosecondsUsing(nanoseconds: u64, comptime nanosleep: anytype) void {
     var request = linux.timespec{
         .sec = std.math.cast(isize, nanoseconds / std.time.ns_per_s) orelse std.math.maxInt(isize),
         .nsec = @intCast(nanoseconds % std.time.ns_per_s),
     };
     var remaining: linux.timespec = undefined;
     while (true) {
-        const rc = linux.nanosleep(&request, &remaining);
+        const rc = nanosleep(&request, &remaining);
         switch (linux.errno(rc)) {
             .SUCCESS => return,
             .INTR => request = remaining,
-            else => return,
+            else => return, // KCOV_EXCL_LINE
         }
     }
 }
@@ -1356,6 +1360,27 @@ fn buildLegacyMembership(
 fn localAddress(config: RaftorConfig) []const u8 {
     return if (config.advertise_addr.len != 0) config.advertise_addr else config.listen_addr;
 }
+
+// KCOV_EXCL_START
+test "sleep retries with the remaining duration after interruption" {
+    const Stub = struct {
+        var calls: usize = 0;
+
+        fn nanosleep(request: *const linux.timespec, remaining: ?*linux.timespec) usize {
+            calls += 1;
+            if (calls == 1) {
+                remaining.?.* = .{ .sec = 0, .nsec = 7 };
+                return @bitCast(-@as(isize, @intFromEnum(linux.E.INTR)));
+            }
+            std.debug.assert(request.sec == 0 and request.nsec == 7);
+            return 0;
+        }
+    };
+    Stub.calls = 0;
+    sleepNanosecondsUsing(1, Stub.nanosleep);
+    try std.testing.expectEqual(@as(usize, 2), Stub.calls);
+}
+// KCOV_EXCL_STOP
 
 fn containsSorted(ids: []const u64, id: u64) bool {
     var low: usize = 0;

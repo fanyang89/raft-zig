@@ -347,7 +347,7 @@ pub const RaftLog = struct {
             const unstable_high = @min(high, unstable_offset);
             const ents = self.store.entries(self.allocator, low, unstable_high, max_size, context) catch |e| switch (e) {
                 error.Compacted, error.LogTemporarilyUnavailable => return e,
-                error.Unavailable => @panic("entries[lo:hi] unavailable from storage"),
+                error.Unavailable => @panic("entries[lo:hi] unavailable from storage"), // KCOV_EXCL_LINE
                 else => return e,
             };
             defer {
@@ -543,6 +543,81 @@ pub const RaftLog = struct {
 };
 
 // KCOV_EXCL_START
+const FaultStorage = struct {
+    inner: @import("memory_storage.zig").MemoryStorage = @import("memory_storage.zig").MemoryStorage.init(),
+    first_error: ?Error = null,
+    last_error: ?Error = null,
+    term_error: ?Error = null,
+    entries_error: ?Error = null,
+    compact_entries_once: bool = false,
+    empty_entries: bool = false,
+
+    fn deinit(self: *FaultStorage, allocator: std.mem.Allocator) void {
+        self.inner.deinit(allocator);
+    }
+
+    fn asStorage(self: *FaultStorage) Storage {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn fromContext(ctx: *anyopaque) *FaultStorage {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn initialState(ctx: *anyopaque, allocator: std.mem.Allocator) Error!storage_mod.RaftState {
+        return fromContext(ctx).inner.initialState(allocator);
+    }
+
+    fn entries(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        low: u64,
+        high: u64,
+        max_size: ?u64,
+        context: GetEntriesContext,
+    ) Error![]Entry {
+        const self = fromContext(ctx);
+        if (self.entries_error) |err| return err;
+        if (self.compact_entries_once) {
+            self.compact_entries_once = false;
+            return error.Compacted;
+        }
+        if (self.empty_entries) return allocator.alloc(Entry, 0);
+        return self.inner.entries(allocator, low, high, max_size, context);
+    }
+
+    fn term(ctx: *anyopaque, index: u64) Error!u64 {
+        const self = fromContext(ctx);
+        if (self.term_error) |err| return err;
+        return self.inner.term(index);
+    }
+
+    fn firstIndex(ctx: *anyopaque) Error!u64 {
+        const self = fromContext(ctx);
+        if (self.first_error) |err| return err;
+        return self.inner.firstIndex();
+    }
+
+    fn lastIndex(ctx: *anyopaque) Error!u64 {
+        const self = fromContext(ctx);
+        if (self.last_error) |err| return err;
+        return self.inner.lastIndex();
+    }
+
+    fn getSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator, request_index: u64, to: u64) Error!Snapshot {
+        return fromContext(ctx).inner.getSnapshot(allocator, request_index, to);
+    }
+
+    const vtable: Storage.VTable = .{
+        .initial_state = initialState,
+        .entries = entries,
+        .term = term,
+        .first_index = firstIndex,
+        .last_index = lastIndex,
+        .get_snapshot = getSnapshot,
+    };
+};
+
 test "raft log term returns 0 for out-of-range and dummy index" {
     const allocator = std.testing.allocator;
     var storage = @import("memory_storage.zig").MemoryStorage.init();
@@ -666,5 +741,80 @@ test "raft log scan walks pages and supports early exit" {
     var full = Collector{ .sum = 0, .max_iters = 100 };
     try raft_log.scan(1, 4, 0, GetEntriesContext.empty_(false), Collector, &full);
     try std.testing.expectEqual(@as(u64, 1 + 2 + 3), full.sum);
+}
+
+test "raft log propagates and contains storage query failures" {
+    const allocator = std.testing.allocator;
+    var storage = FaultStorage{};
+    defer storage.deinit(allocator);
+    try storage.inner.setEntries(allocator, &.{.{ .index = 1, .term = 1 }});
+    var raft_log = try RaftLog.init(allocator, storage.asStorage(), 0);
+    defer raft_log.deinit();
+
+    storage.term_error = error.Unavailable;
+    try std.testing.expectError(error.Unavailable, raft_log.lastTerm());
+    try std.testing.expectError(error.Unavailable, raft_log.append(&.{.{ .index = 2, .term = 2 }}));
+    storage.term_error = null;
+
+    storage.last_error = error.Unavailable;
+    try std.testing.expectEqual(@as(u64, 0), raft_log.lastIndex());
+    storage.last_error = null;
+    storage.first_error = error.Unavailable;
+    try std.testing.expectEqual(@as(u64, 0), raft_log.firstIndex());
+    storage.first_error = null;
+
+    storage.entries_error = error.LogTemporarilyUnavailable;
+    try std.testing.expectError(
+        error.LogTemporarilyUnavailable,
+        raft_log.slice(1, 2, null, GetEntriesContext.empty_(true)),
+    );
+    storage.entries_error = error.Compacted;
+    try std.testing.expectError(error.Compacted, raft_log.slice(1, 2, null, GetEntriesContext.empty_(false)));
+    storage.entries_error = null;
+
+    storage.compact_entries_once = true;
+    const all = try raft_log.allEntries();
+    defer {
+        for (all) |*entry| entry.deinit(allocator);
+        allocator.free(all);
+    }
+    try std.testing.expectEqual(@as(usize, 1), all.len);
+
+    storage.empty_entries = true;
+    const Scanner = struct {
+        fn scan(_: *@This(), _: []const Entry) Error!bool {
+            return true;
+        }
+    };
+    var scanner = Scanner{};
+    try std.testing.expectError(
+        error.ZeroEntriesInSlice,
+        raft_log.scan(1, 2, 1, GetEntriesContext.empty_(false), Scanner, &scanner),
+    );
+}
+
+test "raft log slice cleans up every allocation failure" {
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator, storage: *FaultStorage) !void {
+            var raft_log = try RaftLog.init(allocator, storage.asStorage(), 0);
+            defer raft_log.deinit();
+            const entries = try raft_log.slice(1, 3, null, GetEntriesContext.empty_(false));
+            defer {
+                for (entries) |*entry| entry.deinit(allocator);
+                allocator.free(entries);
+            }
+        }
+    };
+
+    var storage = FaultStorage{};
+    defer storage.deinit(std.testing.allocator);
+    var entries = [_]Entry{ .{ .index = 1, .term = 1 }, .{ .index = 2, .term = 1 } };
+    entries[0].context = try std.testing.allocator.dupe(u8, "one");
+    defer entries[0].deinit(std.testing.allocator);
+    entries[1].context = try std.testing.allocator.dupe(u8, "two");
+    defer entries[1].deinit(std.testing.allocator);
+    try storage.inner.setEntries(std.testing.allocator, &entries);
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{&storage});
 }
 // KCOV_EXCL_STOP

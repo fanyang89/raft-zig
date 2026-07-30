@@ -19,6 +19,7 @@ const SyncFailingStorage = struct {
     fail_sync: bool = false,
     fail_conf_state: bool = false,
     fail_incarnation: bool = false,
+    fail_entries: bool = false,
     successful_syncs: usize = 0,
 
     fn cast(ctx: *anyopaque) *SyncFailingStorage {
@@ -30,7 +31,9 @@ const SyncFailingStorage = struct {
     }
 
     fn entries(ctx: *anyopaque, alloc: std.mem.Allocator, low: u64, high: u64, max_size: ?u64, request_ctx: raft.GetEntriesContext) raft.Error![]raft.Entry {
-        return cast(ctx).inner.entries(alloc, low, high, max_size, request_ctx);
+        const self = cast(ctx);
+        if (self.fail_entries) return error.OutOfMemory;
+        return self.inner.entries(alloc, low, high, max_size, request_ctx);
     }
 
     fn term(ctx: *anyopaque, index: u64) raft.Error!u64 {
@@ -175,6 +178,8 @@ const RecordingTransport = struct {
     delivered_message_count: usize = 0,
     delivered_peer_event_count: usize = 0,
     stopped: bool = false,
+    before_message_ctx: ?*anyopaque = null,
+    before_message: ?*const fn (*anyopaque) void = null,
     identity_value: raft.TransportIdentity = .{ .cluster_id = .{0} ** 16, .node_id = 0 },
 
     fn init(alloc: std.mem.Allocator) RecordingTransport {
@@ -278,6 +283,7 @@ const RecordingTransport = struct {
         if (self.stopped) return false;
         if (self.inbound_messages.items.len > 0) {
             const callback = self.callback orelse return false;
+            if (self.before_message) |before_message| before_message(self.before_message_ctx.?);
             try callback.invoke(self.inbound_messages.orderedRemove(0));
             self.delivered_message_count += 1;
             return true;
@@ -331,6 +337,8 @@ const RecordingTransport = struct {
 const FailingStateMachine = struct {
     inner: *MockStateMachine,
     fail_data: []const u8,
+    fail_snapshot: bool = false,
+    snapshot_attempts: usize = 0,
 
     fn cast(ctx: *anyopaque) *FailingStateMachine {
         return @ptrCast(@alignCast(ctx));
@@ -343,7 +351,10 @@ const FailingStateMachine = struct {
     }
 
     fn takeSnapshot(ctx: *anyopaque, alloc: std.mem.Allocator, applied_index: u64, applied_term: u64, conf_state: raft.ConfState) raft.Error!raft.Snapshot {
-        return MockStateMachine.takeSnapshotImpl(cast(ctx).inner, alloc, applied_index, applied_term, conf_state);
+        const self = cast(ctx);
+        self.snapshot_attempts += 1;
+        if (self.fail_snapshot) return error.OutOfMemory;
+        return MockStateMachine.takeSnapshotImpl(self.inner, alloc, applied_index, applied_term, conf_state);
     }
 
     fn restoreSnapshot(ctx: *anyopaque, metadata: raft.SnapshotMetadata, reader: raft.SnapshotReader) raft.Error!void {
@@ -1646,6 +1657,32 @@ test "raftor: snapshot disabled when all thresholds zero" {
     while (i < 20) : (i += 1) _ = try r.tick();
 
     try std.testing.expectEqual(@as(usize, 0), sm.snapshot_count);
+}
+
+test "raftor: automatic snapshot failure does not fail the tick" {
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    var failing = FailingStateMachine{
+        .inner = &machine,
+        .fail_data = "not-proposed",
+        .fail_snapshot = true,
+    };
+    var config = makeConfig(1);
+    config.snapshot_entries_threshold = 1;
+    config.snapshot_retry_min_ticks = 0;
+    const r = try Raftor.create(allocator, config, failing.stateMachine());
+    defer r.destroy();
+    try r.campaign();
+
+    var proposal = ProposalTester{};
+    try r.propose("snapshot", proposal.callback());
+    for (0..10) |_| {
+        _ = try r.tick();
+        if (proposal.applied) break;
+    }
+    try std.testing.expect(proposal.applied);
+    try std.testing.expectEqual(@as(usize, 1), failing.snapshot_attempts);
+    try std.testing.expectEqual(@as(usize, 0), machine.snapshot_count);
 }
 
 test "raftor: snapshot rate-limits retries" {
@@ -3097,4 +3134,463 @@ test "raftor: legacy add mutates transport only after commit" {
     for (0..16) |_| _ = try r.tick();
     try std.testing.expectEqual(@as(usize, 1), transport.events.items.len);
     try std.testing.expectEqualStrings("node-2", transport.events.items[0].addressSlice());
+}
+
+test "raftor: checksum mismatch is terminal" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    var config = makeConfig(1);
+    config.checksum_enabled = true;
+    const r = try Raftor.createWithDependencies(allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try r.campaign();
+
+    try r.getRawNode().propose("corrupt-context", "corrupt");
+    const unstable = r.getRawNode().raftPtr().raft_log.unstable.entries.items;
+    unstable[unstable.len - 1].checksum = 1;
+
+    try std.testing.expectError(error.ChecksumMismatch, r.run());
+    try std.testing.expectError(error.ChecksumMismatch, r.run());
+}
+
+test "raftor: incoming snapshot rejects malformed and inconsistent membership" {
+    const Case = struct {
+        membership: []const u8,
+        expected: raft.Error,
+    };
+    const cases = [_]Case{
+        .{ .membership = "not-a-membership", .expected = error.InvalidClusterMembership },
+        .{ .membership = "valid-but-inconsistent", .expected = error.InvalidClusterMembership },
+    };
+
+    for (cases, 0..) |case, case_index| {
+        var storage = raft.MemoryStorage.init();
+        defer storage.deinit(allocator);
+        var peers = [_]raft.PeerEndpoint{.{ .node_id = 1, .address = @constCast("node-1") }};
+        try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{1}) }, &peers, &.{}, 0, .{});
+        var transport = RecordingTransport.init(allocator);
+        defer transport.deinit();
+        var machine = DurableStateMachine.init(allocator);
+        defer machine.deinit();
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        });
+        defer r.destroy();
+
+        const membership = if (case_index == 0)
+            try allocator.dupe(u8, case.membership)
+        else blk: {
+            var snapshot_peers = [_]raft.PeerEndpoint{
+                .{ .node_id = 1, .address = @constCast("node-1") },
+                .{ .node_id = 2, .address = @constCast("node-2") },
+            };
+            break :blk try (raft.ClusterMembership{
+                .cluster_id = durable_cluster_id,
+                .peers = &snapshot_peers,
+            }).encode(allocator);
+        };
+        try r.getRawNode().step(.{
+            .msg_type = .snapshot,
+            .from = 2,
+            .to = 1,
+            .term = 4,
+            .snapshot = .{
+                .membership = membership,
+                .data = try allocator.dupe(u8, "snapshot"),
+                .metadata = .{
+                    .index = 10,
+                    .term = 4,
+                    .conf_state = .{ .voters = try allocator.dupe(u64, &.{1}) },
+                },
+            },
+        });
+        try std.testing.expect(try r.processReadyStep());
+        try std.testing.expect(try r.processReadyStep());
+        try std.testing.expectError(case.expected, r.processReadyStep());
+        try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    }
+}
+
+test "raftor: legacy transport add and remove failures become terminal after Ready" {
+    const Change = struct {
+        change_type: raft.ConfChangeType,
+        fail_add: bool,
+        fail_remove: bool,
+    };
+    const cases = [_]Change{
+        .{ .change_type = .add_node, .fail_add = true, .fail_remove = false },
+        .{ .change_type = .remove_node, .fail_add = false, .fail_remove = true },
+    };
+    for (cases) |case| {
+        var storage = raft.MemoryStorage.init();
+        defer storage.deinit(allocator);
+        try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+        var transport = RecordingTransport.init(allocator);
+        defer transport.deinit();
+        transport.fail_add = case.fail_add;
+        transport.fail_remove = case.fail_remove;
+        var machine = MockStateMachine.init(allocator);
+        defer machine.deinit();
+        const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        });
+        defer r.destroy();
+
+        var change = [_]raft.ConfChangeSingle{.{ .change_type = case.change_type, .node_id = 2 }};
+        try stageCommittedConfChange(r, 3, 1, .{ .changes = &change, .context = @constCast("node-2") });
+        var terminal_error: ?raft.Error = null;
+        for (0..32) |_| {
+            if (r.processReadyStep()) |_| {} else |err| {
+                terminal_error = err;
+                break;
+            }
+        }
+        try std.testing.expectEqual(error.ConnectionClosed, terminal_error.?);
+        try std.testing.expectError(error.ConnectionClosed, r.processReadyStep());
+    }
+}
+
+test "raftor: run rejects a concurrent runner and exits cleanly on callback stop" {
+    const thread_allocator = std.heap.smp_allocator;
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(thread_allocator);
+    var transport = RecordingTransport.init(thread_allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(thread_allocator);
+    defer machine.deinit();
+    var config = makeConfig(1);
+    config.tick_interval_ms = 1;
+    const r = try Raftor.createWithDependencies(thread_allocator, config, .bootstrap, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    const StopGate = struct {
+        raftor: *Raftor,
+        entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn stop(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) std.atomic.spinLoopHint();
+            self.raftor.stop();
+        }
+    };
+    var stop_gate = StopGate{ .raftor = r };
+    transport.before_message_ctx = &stop_gate;
+    transport.before_message = StopGate.stop;
+    try transport.queueMessage(.{ .msg_type = .heartbeat, .from = 2, .to = 1 });
+
+    const RunState = struct {
+        raftor: *Raftor,
+        error_value: ?raft.Error = null,
+        fn run(self: *@This()) void {
+            self.raftor.run() catch |err| {
+                self.error_value = err;
+            };
+        }
+    };
+    var run_state = RunState{ .raftor = r };
+    const thread = try std.Thread.spawn(.{}, RunState.run, .{&run_state});
+    errdefer {
+        stop_gate.release.store(true, .release);
+        thread.join();
+    }
+    while (!stop_gate.entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expect(r.isRunning());
+    try std.testing.expectError(error.AlreadyStarted, r.run());
+    stop_gate.release.store(true, .release);
+    thread.join();
+    try std.testing.expect(run_state.error_value == null);
+}
+
+test "raftor: stopped drain breaks before later queued requests" {
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    var config = makeConfig(1);
+    config.raft.disable_proposal_forwarding = true;
+    const r = try Raftor.create(allocator, config, machine.stateMachine());
+    defer r.destroy();
+
+    const StopCallback = struct {
+        raftor: *Raftor,
+        calls: usize = 0,
+        fn proposal(ctx: *anyopaque, _: raft.ProposalResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            self.raftor.stop();
+        }
+    };
+    var first = StopCallback{ .raftor = r };
+    var second = ErrorTester{};
+    try r.propose("first", .{ .ctx = &first, .function = StopCallback.proposal });
+    try r.propose("second", second.proposalCallback());
+    _ = try r.tick();
+    try std.testing.expectEqual(@as(usize, 1), first.calls);
+    try std.testing.expectEqual(error.ShuttingDown, second.err.?);
+}
+
+test "raftor: tracking allocation failures complete proposal and read callbacks" {
+    const Kind = enum { proposal, read };
+    for ([_]Kind{ .proposal, .read }) |kind| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const failing_allocator = failing.allocator();
+        var machine = MockStateMachine.init(failing_allocator);
+        defer machine.deinit();
+        const r = try Raftor.create(failing_allocator, makeConfig(1), machine.stateMachine());
+        defer r.destroy();
+        var callback = ErrorTester{};
+        switch (kind) {
+            .proposal => try r.propose("queued", callback.proposalCallback()),
+            .read => try r.readIndex("queued", callback.readCallback()),
+        }
+        failing.fail_index = failing.alloc_index;
+        _ = try r.tick();
+        try std.testing.expectEqual(error.OutOfMemory, callback.err.?);
+        failing.fail_index = std.math.maxInt(usize);
+    }
+}
+
+test "raftor: read construction failure removes the tracked callback" {
+    var saw_read_failure = false;
+    for (0..64) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const failing_allocator = failing.allocator();
+        var machine = MockStateMachine.init(failing_allocator);
+        const r = try Raftor.create(failing_allocator, makeConfig(1), machine.stateMachine());
+        var callback = ErrorTester{};
+        try r.readIndex("queued", callback.readCallback());
+        failing.fail_index = failing.alloc_index + failure_offset;
+
+        if (r.tick()) |_| {} else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(error.OutOfMemory, callback.err.?);
+            saw_read_failure = true;
+        }
+
+        failing.fail_index = std.math.maxInt(usize);
+        r.destroy();
+        machine.deinit();
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (saw_read_failure) break;
+    }
+    try std.testing.expect(saw_read_failure);
+}
+
+test "raftor: read drain stops after tracking failure callback shuts down" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const failing_allocator = failing.allocator();
+    var machine = MockStateMachine.init(failing_allocator);
+    defer machine.deinit();
+    const r = try Raftor.create(failing_allocator, makeConfig(1), machine.stateMachine());
+    defer r.destroy();
+
+    const StopCallback = struct {
+        raftor: *Raftor,
+        error_value: ?raft.Error = null,
+        fn read(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (result == .err) self.error_value = result.err;
+            self.raftor.stop();
+        }
+    };
+    var first = StopCallback{ .raftor = r };
+    var second = ErrorTester{};
+    try r.readIndex("first", .{ .ctx = &first, .function = StopCallback.read });
+    try r.readIndex("second", second.readCallback());
+    failing.fail_index = failing.alloc_index;
+    _ = try r.tick();
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(error.OutOfMemory, first.error_value.?);
+    try std.testing.expectEqual(error.ShuttingDown, second.err.?);
+}
+
+test "raftor: fresh join rejects persisted state" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setHardState(.{ .term = 1 });
+    var transport = RecordingTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const seeds = [_]raft.Peer{.{ .id = 2, .context = "seed-2" }};
+    var config = makeDurableConfig(1, "node-1");
+    config.initial_peers = &seeds;
+    try std.testing.expectError(error.IncompatibleStorage, Raftor.createWithDependencies(allocator, config, .join, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    }));
+}
+
+test "raftor: durable address conflicts and remove allocation failure do not propose" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const failing_allocator = failing.allocator();
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(failing_allocator);
+    var peers = [_]raft.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    var retired_node_ids = [_]u64{ 3, 4 };
+    try seedMembership(&storage, .{ .voters = @constCast(&[_]u64{ 1, 2 }) }, &peers, &retired_node_ids, 0, .{});
+    var transport = RecordingTransport.init(failing_allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(failing_allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(failing_allocator, makeDurableConfig(1, "node-1"), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+
+    try std.testing.expectError(error.ConflictingPeerAddress, r.addNode(2, "other-address"));
+    try std.testing.expectError(error.ProposalDropped, r.addNode(5, "node-5"));
+    try r.campaign();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, r.removeNode(2));
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectError(error.ProposalDropped, r.removeNode(2));
+}
+
+test "raftor: legacy membership construction cleans up every allocation failure" {
+    const peers = [_]raft.Peer{
+        .{ .id = 1, .context = "node-1" },
+        .{ .id = 2, .context = "node-2" },
+    };
+    var saw_oom = false;
+    var reached_success = false;
+    for (0..128) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const failing_allocator = failing.allocator();
+        var storage = raft.MemoryStorage.init();
+        try storage.setConfState(failing_allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+        var transport = raft.NoopTransport.init(allocator);
+        defer transport.deinit();
+        var machine = MockStateMachine.init(allocator);
+        defer machine.deinit();
+        failing.fail_index = failing.alloc_index + failure_offset;
+        var config = makeDurableConfig(1, "node-1");
+        config.legacy_membership_migration = .{
+            .peers = &peers,
+            .retired_node_ids = &.{ 3, 4 },
+            .membership_index = 0,
+        };
+        if (Raftor.createWithDependencies(failing.allocator(), config, .restart, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.stateMachine(),
+        })) |r| {
+            r.destroy();
+            reached_success = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+        }
+        storage.deinit(failing_allocator);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (reached_success) break;
+    }
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(reached_success);
+}
+
+test "raftor: invalid retired legacy member cleans up construction" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const peers = [_]raft.Peer{
+        .{ .id = 1, .context = "node-1" },
+        .{ .id = 2, .context = "node-2" },
+    };
+    var config = makeDurableConfig(1, "node-1");
+    config.legacy_membership_migration = .{
+        .peers = &peers,
+        .retired_node_ids = &.{ 3, 3 },
+        .membership_index = 0,
+    };
+    try std.testing.expectError(error.InvalidClusterMembership, Raftor.createWithDependencies(allocator, config, .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    }));
+}
+
+test "raftor: advance allocation failure is terminal" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    const raft_state = r.getRawNode().raftPtr();
+    raft_state.becomeCandidate();
+    try raft_state.becomeLeader();
+    try r.getRawNode().step(.{
+        .msg_type = .append_response,
+        .from = 2,
+        .to = 1,
+        .term = raft_state.term,
+        .index = raft_state.raft_log.lastIndex(),
+    });
+    while (try r.processReadyStep()) {}
+    try r.getRawNode().propose("context", "payload");
+
+    try std.testing.expect(try r.processReadyStep());
+    try r.getRawNode().step(.{
+        .msg_type = .append_response,
+        .from = 2,
+        .to = 1,
+        .term = raft_state.term,
+        .index = raft_state.raft_log.lastIndex(),
+    });
+    while (r.getReadyPhase() != raft.ReadyPhase.advance) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    failing_storage.fail_entries = true;
+    try std.testing.expectError(error.OutOfMemory, r.processReadyStep());
+    try std.testing.expectError(error.OutOfMemory, r.tick());
+}
+
+test "raftor: createWithTransport unwinds owned storage on initialization OOM" {
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    failing.fail_index = 1;
+    try std.testing.expectError(error.OutOfMemory, Raftor.createWithTransport(
+        failing.allocator(),
+        makeConfig(1),
+        machine.stateMachine(),
+        transport.transport(),
+    ));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

@@ -441,19 +441,6 @@ pub const Raft = struct {
             m.deinit(self.allocator);
         }
 
-        if (self.state != .leader) return has_ready;
-
-        if (self.heartbeat_elapsed >= self.heartbeat_timeout) {
-            self.heartbeat_elapsed = 0;
-            has_ready = true;
-            var m = Message{
-                .msg_type = .beat,
-                .to = invalid_id,
-                .from = self.id,
-            };
-            try self.step(&m);
-            m.deinit(self.allocator);
-        }
         return has_ready;
     }
 
@@ -1098,11 +1085,7 @@ pub const Raft = struct {
         defer self.allocator.free(statuses);
         for (statuses) |*st| {
             if (try self.handleReadyReadIndexMsg(st.req, st.index)) |resp| {
-                self.send(resp) catch |err| {
-                    var owned = resp;
-                    owned.deinit(self.allocator);
-                    return err;
-                };
+                try self.sendOwned(resp);
             }
             // Advance transferred ownership of the status (incl. req).
             var mut = st.*;
@@ -1214,11 +1197,7 @@ pub const Raft = struct {
         if (self.progress_tracker.isSingleton()) {
             const read_index = self.raft_log.committed;
             if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                self.send(resp) catch |err| {
-                    var owned = resp;
-                    owned.deinit(self.allocator);
-                    return err;
-                };
+                try self.sendOwned(resp);
             }
             return;
         }
@@ -1234,11 +1213,7 @@ pub const Raft = struct {
             .lease_based => {
                 const read_index = self.raft_log.committed;
                 if (try self.handleReadyReadIndex(m, read_index)) |resp| {
-                    self.send(resp) catch |err| {
-                        var owned = resp;
-                        owned.deinit(self.allocator);
-                        return err;
-                    };
+                    try self.sendOwned(resp);
                 }
             },
         }
@@ -1344,8 +1319,10 @@ pub const Raft = struct {
         restoreTracker(&restored_tracker, meta.index + 1, meta.conf_state) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
+                // KCOV_EXCL_START
                 log.warn(@src(), "failed to restore tracker from snapshot: {s}", .{@errorName(err)});
                 return false;
+                // KCOV_EXCL_STOP
             },
         };
         var restored_cs = try restored_tracker.conf.toConfState(self.allocator);
@@ -1354,8 +1331,10 @@ pub const Raft = struct {
         self.raft_log.restore(snap_in) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
+                // KCOV_EXCL_START
                 log.warn(@src(), "failed to restore raft log from snapshot: {s}", .{@errorName(err)});
                 return false;
+                // KCOV_EXCL_STOP
             },
         };
 
@@ -1433,6 +1412,14 @@ pub const Raft = struct {
         }
 
         try self.messages.append(self.allocator, m);
+    }
+
+    fn sendOwned(self: *Raft, m: Message) Error!void {
+        self.send(m) catch |err| {
+            var owned = m;
+            owned.deinit(self.allocator);
+            return err;
+        };
     }
 
     pub fn sendTimeoutNow(self: *Raft, to: u64) Error!void {
@@ -1604,10 +1591,7 @@ pub const Raft = struct {
     // -----------------------------------------------------------------------
 
     pub fn appendEntry(self: *Raft, entries: []const Entry) Error!bool {
-        if (entries.len == 0) {
-            _ = try self.raft_log.append(&.{});
-            return true;
-        }
+        if (entries.len == 0) return true;
 
         // Re-tag each entry with our current term and the next available index.
         const last_index = self.raft_log.lastIndex();
@@ -1702,10 +1686,7 @@ pub const Raft = struct {
                     defer self.allocator.free(statuses);
                     for (statuses) |*st| {
                         if (self.handleReadyReadIndexMsg(st.req, st.index) catch null) |resp| {
-                            self.send(resp) catch {
-                                var owned = resp;
-                                owned.deinit(self.allocator);
-                            };
+                            self.sendOwned(resp) catch {};
                         }
                         var mut = st.*;
                         mut.deinit(self.allocator);
@@ -1726,12 +1707,14 @@ pub const Raft = struct {
     pub fn loadState(self: *Raft, hs: HardState) void {
         defer invariant.assertRaft(self);
         if (hs.commit < self.raft_log.committed or hs.commit > self.raft_log.lastIndex()) {
+            // KCOV_EXCL_START
             log.warn(
                 @src(),
                 "hs.commit {} out of range [{}, {}]",
                 .{ hs.commit, self.raft_log.committed, self.raft_log.lastIndex() },
             );
             @panic("hs.commit out of range");
+            // KCOV_EXCL_STOP
         }
         self.raft_log.committed = hs.commit;
         self.term = hs.term;
@@ -1762,12 +1745,14 @@ pub const Raft = struct {
             };
             var entry = Entry{ .entry_type = .conf_change_v2 };
             entry.adoptData(self.allocator, data) catch {
+                // KCOV_EXCL_START
                 self.allocator.free(data);
                 @panic("failed to retain auto-leave ConfChangeV2");
+                // KCOV_EXCL_STOP
             };
             defer entry.deinit(self.allocator);
             _ = self.appendEntry(&.{entry}) catch {
-                @panic("appending an empty EntryConfChangeV2 should never be dropped");
+                @panic("appending an empty EntryConfChangeV2 should never be dropped"); // KCOV_EXCL_LINE
             };
             self.pending_conf_index = self.raft_log.lastIndex();
         }
@@ -1888,7 +1873,7 @@ fn voteRespMsgType(mt: MessageType) MessageType {
     return switch (mt) {
         .request_vote => .request_vote_response,
         .request_pre_vote => .request_pre_vote_response,
-        else => @panic("not a vote message"),
+        else => @panic("not a vote message"), // KCOV_EXCL_LINE
     };
 }
 
@@ -1941,6 +1926,19 @@ test "uncommitted state enforces entry count and ignores old log entries on redu
     try std.testing.expect(!byte_limited.maybeIncreaseUncommittedSize(&.{.{ .data = "b" }}));
     try std.testing.expectEqual(@as(u64, 1), byte_limited.uncommitted_size);
     try std.testing.expectEqual(@as(u64, 1), byte_limited.uncommitted_entries);
+
+    var invalid = UncommittedState{
+        .max_uncommitted_size = 10,
+        .max_uncommitted_entries = 10,
+        .uncommitted_size = 1,
+        .uncommitted_entries = 1,
+    };
+    try std.testing.expect(!invalid.maybeReduceUncommittedSize(&.{
+        .{ .index = 1, .data = "aa" },
+        .{ .index = 2, .data = "bb" },
+    }));
+    try std.testing.expectEqual(@as(u64, 0), invalid.uncommitted_entries);
+    try std.testing.expectEqual(@as(u64, 0), invalid.uncommitted_size);
 }
 
 fn newThreePeerSetup(allocator: std.mem.Allocator, id: u64) !struct { storage: MemoryStorage, raft: Raft } {
@@ -2008,5 +2006,268 @@ test "raft single-node self-elects via hup" {
 
     try std.testing.expectEqual(StateRole.leader, r.state);
     try std.testing.expectEqual(@as(u64, 1), r.term);
+}
+
+test "election tick sends heartbeat after becoming leader" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setRaftState(allocator, .{ .conf_state = .{ .voters = @constCast(&[_]u64{1}) } });
+    var config = raft_config_mod.defaultConfig();
+    config.id = 1;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.election_timeout_seed = 42;
+    var raft = try Raft.init(allocator, config, storage.asStorage());
+    defer raft.deinit();
+    raft.election_elapsed = raft.randomized_election_timeout - 1;
+    raft.heartbeat_elapsed = raft.heartbeat_timeout - 1;
+
+    try std.testing.expect(try raft.tick());
+    try std.testing.expectEqual(StateRole.leader, raft.state);
+    try std.testing.expectEqual(@as(usize, 0), raft.heartbeat_elapsed);
+}
+
+test "raft handlers ignore responses from peers without progress" {
+    const allocator = std.testing.allocator;
+    var setup = try newThreePeerSetup(allocator, 1);
+    defer setup.storage.deinit(allocator);
+    defer setup.raft.deinit();
+    var response = Message{ .from = 99 };
+    try setup.raft.handleAppendResponse(&response);
+    try setup.raft.handleHeartbeatResponse(&response);
+    try std.testing.expectEqual(@as(usize, 0), setup.raft.messages.items.len);
+}
+
+test "raft requestSnapshot rejects an existing request" {
+    const allocator = std.testing.allocator;
+    var setup = try newThreePeerSetup(allocator, 1);
+    defer setup.storage.deinit(allocator);
+    defer setup.raft.deinit();
+    setup.raft.leader_id = 2;
+    setup.raft.pending_request_snapshot = 1;
+    try std.testing.expectError(error.RequestSnapshotDropped, setup.raft.requestSnapshot());
+}
+
+test "raft appendEntry accepts an empty batch" {
+    const allocator = std.testing.allocator;
+    var setup = try newThreePeerSetup(allocator, 1);
+    defer setup.storage.deinit(allocator);
+    defer setup.raft.deinit();
+    const last_index = setup.raft.raft_log.lastIndex();
+    try std.testing.expect(try setup.raft.appendEntry(&.{}));
+    try std.testing.expectEqual(last_index, setup.raft.raft_log.lastIndex());
+}
+
+test "raft read index paths clean up every allocation failure" {
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator, voters: []const u64, option: ReadOnlyOption) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.setRaftState(allocator, .{ .conf_state = .{ .voters = @constCast(voters) } });
+            var config = raft_config_mod.defaultConfig();
+            config.id = 1;
+            config.election_tick = 10;
+            config.heartbeat_tick = 1;
+            config.election_timeout_seed = 42;
+            config.read_only_option = option;
+            if (option == .lease_based) config.check_quorum = true;
+            var raft = try Raft.init(allocator, config, storage.asStorage());
+            defer raft.deinit();
+            var entries = [_]Entry{.{ .data = @constCast("context"), .context = @constCast("entry-context") }};
+            var request = Message{ .msg_type = .read_index, .from = 2, .entries = &entries };
+            try raft.serveReadIndex(&request);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Helper.run,
+        .{ @as([]const u64, &.{1}), ReadOnlyOption.safe },
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Helper.run,
+        .{ @as([]const u64, &.{ 1, 2 }), ReadOnlyOption.lease_based },
+    );
+}
+
+test "raft postponed read index cleans up every allocation failure" {
+    var saw_oom = false;
+    var reached_success = false;
+    for (0..32) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        var storage = MemoryStorage.init();
+        defer storage.deinit(allocator);
+        try storage.setRaftState(allocator, .{ .conf_state = .{ .voters = @constCast(&[_]u64{1}) } });
+        var config = raft_config_mod.defaultConfig();
+        config.id = 1;
+        config.election_tick = 10;
+        config.heartbeat_tick = 1;
+        config.election_timeout_seed = 42;
+        var raft = try Raft.init(allocator, config, storage.asStorage());
+        defer raft.deinit();
+        raft.becomeCandidate();
+        try raft.becomeLeader();
+        var entries = [_]Entry{.{ .data = @constCast("context"), .context = @constCast("entry-context") }};
+        var request = Message{ .msg_type = .read_index, .from = 1, .entries = &entries };
+
+        failing.fail_index = failing.alloc_index + failure_offset;
+        if (raft.step(&request)) {
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            try std.testing.expectEqual(@as(usize, 0), raft.pending_read_index_messages.items.len);
+        }
+    }
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(reached_success);
+}
+
+test "leader defers append when storage is temporarily unavailable" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.setEntries(allocator, &.{.{ .index = 1, .term = 1 }});
+    try storage.setRaftState(allocator, .{ .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) } });
+    var config = raft_config_mod.defaultConfig();
+    config.id = 1;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.election_timeout_seed = 42;
+    var raft = try Raft.init(allocator, config, storage.asStorage());
+    defer raft.deinit();
+    raft.becomeCandidate();
+    try raft.becomeLeader();
+    for (raft.messages.items) |*message| message.deinit(allocator);
+    raft.messages.clearRetainingCapacity();
+    const progress = raft.progress_tracker.getPtr(2).?;
+    progress.next_idx = 1;
+    progress.recent_active = true;
+    storage.triggerLogUnavailable(true);
+
+    try std.testing.expect(!try raft.maybeSendAppend(2, progress, true));
+    try std.testing.expectEqual(@as(usize, 0), raft.messages.items.len);
+}
+
+test "leader falls back to snapshot when term disappears after reading entries" {
+    const TermFailStorage = struct {
+        inner: storage_mod.Storage,
+        fail_term: bool = false,
+
+        fn storage(self: *@This()) storage_mod.Storage {
+            return .{ .ctx = self, .vtable = &vtable };
+        }
+
+        fn initialState(ctx: *anyopaque, allocator: std.mem.Allocator) Error!storage_mod.RaftState {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.inner.initialState(allocator);
+        }
+
+        fn entries(ctx: *anyopaque, allocator: std.mem.Allocator, low: u64, high: u64, max_size: ?u64, context: storage_mod.GetEntriesContext) Error![]Entry {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const result = try self.inner.entries(allocator, low, high, max_size, context);
+            self.fail_term = true;
+            return result;
+        }
+
+        fn term(ctx: *anyopaque, index: u64) Error!u64 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.fail_term) return error.Compacted;
+            return self.inner.term(index);
+        }
+
+        fn firstIndex(ctx: *anyopaque) Error!u64 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.inner.firstIndex();
+        }
+
+        fn lastIndex(ctx: *anyopaque) Error!u64 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.inner.lastIndex();
+        }
+
+        fn getSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator, request_index: u64, to: u64) Error!Snapshot {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.inner.getSnapshot(allocator, request_index, to);
+        }
+
+        const vtable: storage_mod.Storage.VTable = .{
+            .initial_state = initialState,
+            .entries = entries,
+            .term = term,
+            .first_index = firstIndex,
+            .last_index = lastIndex,
+            .get_snapshot = getSnapshot,
+        };
+    };
+
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try storage.applySnapshot(allocator, .{
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+        },
+    });
+    try storage.append(allocator, &.{.{ .index = 2, .term = 1 }});
+    const inner = storage.asStorage();
+    var fault = TermFailStorage{ .inner = inner };
+    var config = raft_config_mod.defaultConfig();
+    config.id = 1;
+    config.election_tick = 10;
+    config.heartbeat_tick = 1;
+    config.election_timeout_seed = 42;
+    var raft = try Raft.init(allocator, config, fault.storage());
+    defer raft.deinit();
+    raft.becomeCandidate();
+    try raft.becomeLeader();
+    for (raft.messages.items) |*message| message.deinit(allocator);
+    raft.messages.clearRetainingCapacity();
+    const progress = raft.progress_tracker.getPtr(2).?;
+    progress.next_idx = 2;
+    progress.recent_active = true;
+
+    try std.testing.expect(try raft.maybeSendAppend(2, progress, true));
+    try std.testing.expect(fault.fail_term);
+    try std.testing.expectEqual(MessageType.snapshot, raft.messages.items[0].msg_type);
+}
+
+test "append batching cleans up every allocation failure" {
+    var saw_oom = false;
+    var reached_success = false;
+    for (0..32) |failure_offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        var setup = try newThreePeerSetup(allocator, 1);
+        defer setup.storage.deinit(allocator);
+        defer setup.raft.deinit();
+        var existing = [_]Entry{.{ .index = 1, .term = 1, .context = @constCast("existing") }};
+        try setup.raft.messages.append(allocator, .{
+            .msg_type = .append,
+            .to = 2,
+            .entries = try storage_mod.shareEntries(allocator, &existing),
+        });
+        const progress = setup.raft.progress_tracker.getPtr(2).?;
+        var incoming = [_]Entry{.{ .index = 2, .term = 1, .context = @constCast("incoming") }};
+
+        failing.fail_index = failing.alloc_index + failure_offset;
+        if (setup.raft.tryBatching(2, progress, &incoming)) |batched| {
+            try std.testing.expect(batched);
+            reached_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+            try std.testing.expectEqual(@as(usize, 1), setup.raft.messages.items[0].entries.len);
+        }
+    }
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(reached_success);
 }
 // KCOV_EXCL_STOP

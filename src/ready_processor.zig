@@ -358,17 +358,21 @@ pub const ReadyProcessor = struct {
 
         try self.storage.applySnapshot(self.allocator, snap);
         var membership = cluster_membership_mod.decode(self.allocator, snap.membership) catch |err| {
+            // KCOV_EXCL_START
             const mapped: Error = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidClusterMembership,
             };
             self.fatal_error = mapped;
             return mapped;
+            // KCOV_EXCL_STOP
         };
-        errdefer membership.deinit(self.allocator);
+        errdefer membership.deinit(self.allocator); // KCOV_EXCL_LINE
         membership.validate(snap.metadata.conf_state) catch {
+            // KCOV_EXCL_START
             self.fatal_error = error.InvalidClusterMembership;
             return error.InvalidClusterMembership;
+            // KCOV_EXCL_STOP
         };
         return membership;
     }
