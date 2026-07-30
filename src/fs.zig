@@ -186,8 +186,12 @@ fn linuxMakeDir(_: *anyopaque, path: [:0]const u8) Error!bool {
 }
 
 fn linuxListDir(_: *anyopaque, allocator: std.mem.Allocator, path: [:0]const u8) Error!DirListing {
+    return linuxListDirUsingOpen(allocator, path, linux.open);
+}
+
+fn linuxListDirUsingOpen(allocator: std.mem.Allocator, path: [:0]const u8, comptime open: anytype) Error!DirListing {
     const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const rc = linux.open(path.ptr, flags, 0);
+    const rc = open(path.ptr, flags, 0);
     const fd: linux.fd_t = switch (linux.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => return error.Interrupted,
@@ -271,11 +275,24 @@ fn linuxPwrite(_: *anyopaque, handle: Handle, data: []const u8, offset: u64) Err
 
 fn linuxFileSize(_: *anyopaque, handle: Handle) Error!u64 {
     const fd: linux.fd_t = @intCast(handle);
-    const current = linux.lseek(fd, 0, 1);
-    if (linux.errno(current) != .SUCCESS) return error.StatFailed;
-    const end = linux.lseek(fd, 0, 2);
-    if (linux.errno(end) != .SUCCESS) return error.StatFailed;
-    _ = linux.lseek(fd, @intCast(current), 0);
+    const current_rc = linux.lseek(fd, 0, 1);
+    const current = switch (linux.errno(current_rc)) {
+        .SUCCESS => current_rc,
+        .INTR => return error.Interrupted, // KCOV_EXCL_LINE
+        else => return error.StatFailed,
+    };
+    const end_rc = linux.lseek(fd, 0, 2);
+    const end = switch (linux.errno(end_rc)) {
+        .SUCCESS => end_rc,
+        .INTR => return error.Interrupted, // KCOV_EXCL_LINE
+        else => return error.StatFailed,
+    };
+    const restore_rc = linux.lseek(fd, @intCast(current), 0);
+    switch (linux.errno(restore_rc)) {
+        .SUCCESS => {},
+        .INTR => return error.Interrupted, // KCOV_EXCL_LINE
+        else => return error.StatFailed, // KCOV_EXCL_LINE
+    }
     return @intCast(end);
 }
 
@@ -321,8 +338,12 @@ fn linuxUnlink(_: *anyopaque, path: [:0]const u8) Error!void {
 }
 
 fn linuxSyncDir(ctx: *anyopaque, path: [:0]const u8) Error!void {
+    return linuxSyncDirUsingOpen(ctx, path, linux.open);
+}
+
+fn linuxSyncDirUsingOpen(ctx: *anyopaque, path: [:0]const u8, comptime open: anytype) Error!void {
     const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
-    const rc = linux.open(path.ptr, flags, 0);
+    const rc = open(path.ptr, flags, 0);
     const handle: Handle = switch (linux.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INTR => return error.Interrupted,
@@ -372,5 +393,15 @@ test "RealFs round-trips files and directory listings" {
     var listing = try fs.listDir(allocator, path);
     defer listing.deinit();
     try std.testing.expectEqual(@as(usize, 1), listing.entries.items.len);
+}
+
+test "Linux directory operations map interrupted open" {
+    const Stub = struct {
+        fn open(_: [*:0]const u8, _: linux.O, _: linux.mode_t) usize {
+            return @bitCast(-@as(isize, @intFromEnum(linux.E.INTR)));
+        }
+    };
+    try std.testing.expectError(error.Interrupted, linuxListDirUsingOpen(std.testing.allocator, ".", Stub.open));
+    try std.testing.expectError(error.Interrupted, linuxSyncDirUsingOpen(undefined, ".", Stub.open));
 }
 // KCOV_EXCL_STOP

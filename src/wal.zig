@@ -603,33 +603,12 @@ pub const WAL = struct {
                         };
                         self.entries.appendAssumeCapacity(e);
                     },
-                    .hard_state => {
-                        if (!has_metadata) self.hard_state = try deserializeHardState(parsed.payload);
-                    },
-                    .conf_state => {
-                        if (!has_metadata) {
-                            const conf_state = try deserializeConfState(self.allocator, parsed.payload);
-                            self.conf_state.deinit(self.allocator);
-                            self.conf_state = conf_state;
-                        }
-                    },
-                    .snapshot => {
-                        if (!has_metadata) {
-                            const metadata = try deserializeSnapshotMetadata(parsed.payload);
-                            self.snapshot_metadata.deinit(self.allocator);
-                            self.snapshot_metadata = metadata;
-                        }
-                    },
+                    .hard_state, .conf_state, .snapshot => {},
                 }
                 offset += total;
             }
         }
 
-        if (!has_metadata and self.snapshot_metadata.index > 0) return error.MetadataCorrupt;
-        if (!has_metadata and self.entries.items.len > 0) {
-            self.first_index = self.entries.items[0].index;
-            self.wal_index.setFirstIndex(self.first_index);
-        }
         if (!has_metadata) self.metadata_dirty = true;
         if (self.lastIndex() < self.hard_state.commit) return error.Fatal;
         if (has_metadata and self.first_index > 1) try self.cleanupCompactedSegments();
@@ -641,11 +620,7 @@ pub const WAL = struct {
         const record_length = std.math.cast(u32, record.len) orelse return error.RecordTooLarge;
 
         // Roll segment if needed.
-        const cur = self.segment_manager.getCurrent() orelse
-            try self.segment_manager.rollToNew(if (self.entries.items.len > 0)
-                self.entries.items[self.entries.items.len - 1].index + 1
-            else
-                1);
+        const cur = self.segment_manager.getCurrent().?;
 
         if (cur.write_offset + record.len > self.segment_size and cur.write_offset > SEGMENT_HEADER_SIZE) {
             const next_idx = if (self.entries.items.len > 0)
@@ -1446,6 +1421,150 @@ test "wal: confstate serialize/deserialize round-trip" {
     try std.testing.expectEqualSlices(u64, original.voters, decoded.voters);
     try std.testing.expectEqualSlices(u64, original.learners, decoded.learners);
     try std.testing.expect(original.auto_leave);
+}
+
+test "wal: malformed conf state cleans up decoded slices" {
+    const allocator = std.testing.allocator;
+    const bytes = try serializeConfState(allocator, .{
+        .voters = @constCast(&[_]u64{1}),
+        .learners = @constCast(&[_]u64{2}),
+        .voters_outgoing = @constCast(&[_]u64{3}),
+        .learners_next = @constCast(&[_]u64{4}),
+    });
+    defer allocator.free(bytes);
+
+    try std.testing.expectError(error.ConfStateParseError, deserializeConfState(allocator, bytes[0 .. bytes.len - 1]));
+}
+
+test "wal: entry and conf state codecs clean up allocation failures" {
+    const allocator = std.testing.allocator;
+    const entry_bytes = try serializeEntry(allocator, .{
+        .index = 1,
+        .term = 1,
+        .data = @constCast("entry-data"),
+        .context = @constCast("entry-context"),
+    });
+    defer allocator.free(entry_bytes);
+    const conf_state = ConfState{
+        .voters = @constCast(&[_]u64{ 1, 2 }),
+        .learners = @constCast(&[_]u64{3}),
+        .voters_outgoing = @constCast(&[_]u64{ 1, 2, 4 }),
+        .learners_next = @constCast(&[_]u64{5}),
+        .auto_leave = true,
+    };
+    const conf_bytes = try serializeConfState(allocator, conf_state);
+    defer allocator.free(conf_bytes);
+
+    const Check = struct {
+        fn entry(failing_allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var value = try deserializeEntry(failing_allocator, bytes);
+            defer value.deinit(failing_allocator);
+        }
+
+        fn serializeConf(failing_allocator: std.mem.Allocator, value: ConfState) !void {
+            const bytes = try serializeConfState(failing_allocator, value);
+            defer failing_allocator.free(bytes);
+        }
+
+        fn deserializeConf(failing_allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var value = try deserializeConfState(failing_allocator, bytes);
+            defer value.deinit(failing_allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.entry, .{entry_bytes});
+    try std.testing.checkAllAllocationFailures(allocator, Check.serializeConf, .{conf_state});
+    try std.testing.checkAllAllocationFailures(allocator, Check.deserializeConf, .{conf_bytes});
+}
+
+test "wal: state updates clean up allocation failures" {
+    const allocator = std.testing.allocator;
+    const Check = struct {
+        fn saveConfState(failing_allocator: std.mem.Allocator) !void {
+            var fixture = try fs_testing.FsFixture.init(failing_allocator, .real);
+            defer fixture.deinit();
+            var wal = try WAL.open(failing_allocator, .{ .dir = fixture.walDir() });
+            defer wal.deinit();
+            try wal.saveConfState(.{
+                .voters = @constCast(&[_]u64{ 1, 2 }),
+                .learners = @constCast(&[_]u64{3}),
+                .voters_outgoing = @constCast(&[_]u64{ 1, 2 }),
+                .learners_next = @constCast(&[_]u64{3}),
+                .auto_leave = true,
+            });
+        }
+
+        fn applySnapshot(failing_allocator: std.mem.Allocator) !void {
+            var fixture = try fs_testing.FsFixture.init(failing_allocator, .real);
+            defer fixture.deinit();
+            var wal = try WAL.open(failing_allocator, .{ .dir = fixture.walDir() });
+            defer wal.deinit();
+            try wal.append(&.{
+                .{ .index = 1, .term = 1 },
+                .{ .index = 2, .term = 1 },
+            });
+            try wal.saveHardState(.{ .term = 1, .commit = 2 });
+            try wal.sync();
+            try wal.applySnapshot(.{
+                .data = @constCast("incoming-state"),
+                .metadata = .{
+                    .index = 3,
+                    .term = 2,
+                    .conf_state = .{
+                        .voters = @constCast(&[_]u64{ 1, 2 }),
+                        .learners = @constCast(&[_]u64{3}),
+                        .voters_outgoing = @constCast(&[_]u64{ 1, 2 }),
+                        .learners_next = @constCast(&[_]u64{3}),
+                        .auto_leave = true,
+                    },
+                },
+            });
+        }
+
+        fn migrateMembership(failing_allocator: std.mem.Allocator) !void {
+            var fixture = try fs_testing.FsFixture.init(failing_allocator, .real);
+            defer fixture.deinit();
+            var wal = try WAL.open(failing_allocator, .{ .dir = fixture.walDir() });
+            defer wal.deinit();
+            try wal.append(&.{
+                .{ .index = 1, .term = 1 },
+                .{ .index = 2, .term = 1 },
+            });
+            try wal.saveHardState(.{ .term = 1, .commit = 2 });
+            try wal.saveConfState(.{ .voters = @constCast(&[_]u64{1}) });
+            try wal.sync();
+            try wal.applyLocalSnapshot(.{
+                .data = @constCast("legacy-state"),
+                .metadata = .{
+                    .index = 1,
+                    .term = 1,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+                },
+            });
+            var peers = [_]cluster_membership_mod.PeerEndpoint{
+                .{ .node_id = 1, .address = @constCast("node-1") },
+            };
+            const membership = ClusterMembership{
+                .cluster_id = .{1} ++ .{0} ** 15,
+                .peers = &peers,
+            };
+            try wal.migrateLegacyMembership(membership, 2, membership);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Check.saveConfState, .{});
+    try std.testing.checkAllAllocationFailures(allocator, Check.applySnapshot, .{});
+    try std.testing.checkAllAllocationFailures(allocator, Check.migrateMembership, .{});
+}
+
+test "wal: membership ancestry requires every retired node" {
+    const cluster_id = [_]u8{1} ++ [_]u8{0} ** 15;
+    try std.testing.expect(membershipDescendsFrom(
+        .{ .cluster_id = cluster_id, .retired_node_ids = @constCast(&[_]u64{ 2, 3 }) },
+        .{ .cluster_id = cluster_id, .retired_node_ids = @constCast(&[_]u64{2}) },
+    ));
+    try std.testing.expect(!membershipDescendsFrom(
+        .{ .cluster_id = cluster_id, .retired_node_ids = @constCast(&[_]u64{2}) },
+        .{ .cluster_id = cluster_id, .retired_node_ids = @constCast(&[_]u64{ 2, 3 }) },
+    ));
 }
 
 const linux = std.os.linux;
@@ -2764,21 +2883,32 @@ test "wal: recovery cleans up every allocation failure" {
         var wal = try WAL.open(allocator, .{ .dir = path, .segment_size = 4096 });
         defer wal.deinit();
         try wal.append(&.{
-            .{ .index = 1, .term = 1, .data = @constCast("a") },
-            .{ .index = 2, .term = 1, .data = @constCast("b") },
+            .{ .index = 1, .term = 1, .data = @constCast("a"), .context = @constCast("ctx-a") },
+            .{ .index = 2, .term = 1, .data = @constCast("b"), .context = @constCast("ctx-b") },
         });
         try wal.saveHardState(.{ .term = 1, .vote = 1, .commit = 2 });
         try wal.sync();
         var voters = [_]u64{1};
+        var learners = [_]u64{2};
+        var voters_outgoing = [_]u64{1};
+        var learners_next = [_]u64{2};
+        const conf_state = ConfState{
+            .voters = &voters,
+            .learners = &learners,
+            .voters_outgoing = &voters_outgoing,
+            .learners_next = &learners_next,
+            .auto_leave = true,
+        };
         var peers = [_]cluster_membership_mod.PeerEndpoint{
             .{ .node_id = 1, .address = @constCast("node-1") },
+            .{ .node_id = 2, .address = @constCast("node-2") },
         };
         const membership = ClusterMembership{
             .cluster_id = .{1} ++ .{0} ** 15,
             .peers = &peers,
         };
         try wal.saveMembershipState(
-            .{ .voters = &voters },
+            conf_state,
             membership,
             1,
         );
@@ -2787,7 +2917,7 @@ test "wal: recovery cleans up every allocation failure" {
         try wal.applyLocalSnapshot(.{
             .membership = membership_bytes,
             .data = @constCast("snapshot-state"),
-            .metadata = .{ .index = 1, .term = 1, .conf_state = .{ .voters = &voters } },
+            .metadata = .{ .index = 1, .term = 1, .conf_state = conf_state },
         });
     }
 
@@ -2800,6 +2930,7 @@ test "wal: recovery cleans up every allocation failure" {
             try std.testing.expectEqualStrings("snapshot-state", wal.snapshot.?.data);
             try std.testing.expectEqual(@as(u64, 1), wal.membership_index);
             try std.testing.expectEqualStrings("node-1", wal.cluster_membership.?.peers[0].address);
+            try std.testing.expectEqualStrings("ctx-b", wal.entries.items[0].context);
         }
     };
     try std.testing.checkAllAllocationFailures(allocator, Recovery.run, .{path});

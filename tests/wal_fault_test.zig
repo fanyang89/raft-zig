@@ -42,6 +42,13 @@ test "FaultFs retries interrupted and short positional I/O" {
     try std.testing.expectEqual(buffer.len, try fs.preadAll(read_handle, &buffer, 0));
     try std.testing.expectEqualStrings("abcdefghijkl", &buffer);
     try backend.assertConsumed();
+
+    backend.inject(.{ .operation = .file_size, .occurrence = 1, .effect = .interrupted });
+    try std.testing.expectEqual(@as(u64, 12), try fs.fileSize(read_handle));
+    try backend.assertConsumed();
+    backend.inject(.{ .operation = .file_size, .occurrence = 1, .effect = .fail_before });
+    try std.testing.expectError(error.StatFailed, fs.fileSize(read_handle));
+    try backend.assertConsumed();
 }
 
 test "FaultFs segment creation removes files after header write failure" {
@@ -206,5 +213,48 @@ test "FaultFs legacy migration recovers retryable or complete state" {
         snapshot.deinit(allocator);
         state.deinit(allocator);
         recovered.deinit();
+    }
+}
+
+test "FaultFs snapshot cleanup failures remain non-fatal" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        operation: fault.Operation,
+        occurrence: u32,
+    };
+    const cases = [_]Case{
+        .{ .operation = .unlink, .occurrence = 1 },
+        .{ .operation = .unlink, .occurrence = 2 },
+        .{ .operation = .sync_dir, .occurrence = 4 },
+    };
+
+    for (cases) |case| {
+        var fixture = try raft.FsTestFixture.init(allocator, .real);
+        defer fixture.deinit();
+        var backend = fault.FaultFs.init(fixture.fs());
+        var wal = try raft.WAL.open(allocator, .{ .dir = fixture.walDir(), .fs = backend.fs() });
+        defer wal.deinit();
+        try wal.append(&.{
+            .{ .index = 1, .term = 1 },
+            .{ .index = 2, .term = 1 },
+        });
+        try wal.saveHardState(.{ .term = 1, .commit = 2 });
+        try wal.sync();
+        try wal.applyLocalSnapshot(.{
+            .data = @constCast("local-state"),
+            .metadata = .{ .index = 1, .term = 1 },
+        });
+
+        backend.inject(.{
+            .operation = case.operation,
+            .occurrence = case.occurrence,
+            .effect = .fail_before,
+        });
+        try wal.applySnapshot(.{
+            .data = @constCast("incoming-state"),
+            .metadata = .{ .index = 3, .term = 2 },
+        });
+        try backend.assertConsumed();
+        try std.testing.expectEqual(@as(u64, 3), wal.snapshot_metadata.index);
     }
 }

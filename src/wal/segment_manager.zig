@@ -71,10 +71,9 @@ pub const SegmentManager = struct {
 
     pub fn getCurrent(self: *SegmentManager) ?*Segment {
         if (self.segments.items.len == 0) return null;
-        for (self.segments.items) |*entry| {
-            if (entry.id == self.current_segment_id) return entry.segment;
-        }
-        return null;
+        const entry = &self.segments.items[self.segments.items.len - 1];
+        std.debug.assert(entry.id == self.current_segment_id);
+        return entry.segment;
     }
 
     pub fn rollToNew(self: *SegmentManager, first_index: u64) !*Segment {
