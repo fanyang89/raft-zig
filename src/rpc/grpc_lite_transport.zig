@@ -4,6 +4,7 @@
 //! peer workers encode, decode, and queue data concurrently.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const grpc = @import("grpc_lite");
 const Error = @import("../core/error.zig").Error;
 const types = @import("../core/types.zig");
@@ -69,6 +70,8 @@ pub const GrpcLiteTransport = struct {
     lifecycle_mutex: std.atomic.Mutex = .unlocked,
     state: State = .initialized,
     accepting: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    start_server: *const fn (*grpc.Server) anyerror!void = startServer,
+    test_before_mailbox_push: if (builtin.is_test) ?*const fn (*GrpcLiteTransport) void else void = if (builtin.is_test) null else {},
 
     pub fn create(allocator: std.mem.Allocator, config: Config) !*GrpcLiteTransport {
         try config.validate();
@@ -184,7 +187,7 @@ pub const GrpcLiteTransport = struct {
         if (self.state != .initialized) return error.AlreadyStarted;
         self.state = .starting;
         peer_manager.lockTsanLifecycle();
-        const start_result = self.server.start();
+        const start_result = self.start_server(&self.server);
         peer_manager.unlockTsanLifecycle();
         start_result catch |err| {
             self.state = .stopped;
@@ -207,23 +210,13 @@ pub const GrpcLiteTransport = struct {
     fn stopImpl(context: *anyopaque) void {
         const self: *GrpcLiteTransport = @ptrCast(@alignCast(context));
         while (true) {
-            lock(&self.lifecycle_mutex);
-            switch (self.state) {
-                .stopped => {
-                    self.lifecycle_mutex.unlock();
-                    return;
-                },
-                .stopping => {
-                    self.lifecycle_mutex.unlock();
+            switch (beginStop(self)) {
+                .done => return,
+                .wait => {
                     std.atomic.spinLoopHint();
                     continue;
                 },
-                .initialized, .starting, .started => {
-                    self.state = .stopping;
-                    self.accepting.store(false, .release);
-                    self.lifecycle_mutex.unlock();
-                    break;
-                },
+                .stop => break,
             }
         }
 
@@ -264,15 +257,7 @@ pub const GrpcLiteTransport = struct {
         for (messages) |message| {
             if (message.to == 0 or message.to == self.config.identity.node_id) return error.MessageDestinationMismatch;
             if (raw_node.isLocalMessage(message.msg_type)) return error.LocalMessageOnTransport;
-            if (message.msg_type == .transfer_leader) {
-                if (message.from == 0 or
-                    (message.from != self.config.identity.node_id and !self.peer_manager.hasPeer(message.from)))
-                {
-                    return error.MessageSourceMismatch;
-                }
-            } else if (message.from != self.config.identity.node_id) {
-                return error.MessageSourceMismatch;
-            }
+            if (!validOutboundSource(self, message)) return error.MessageSourceMismatch;
             const payload = codec.encodeMessage(self.allocator, message) catch |err| return mapCodecError(err);
             defer self.allocator.free(payload);
             try self.peer_manager.send(message.to, payload, message.msg_type == .snapshot);
@@ -316,6 +301,10 @@ pub const GrpcLiteTransport = struct {
     }
 };
 
+fn startServer(server: *grpc.Server) !void {
+    try server.start();
+}
+
 fn onStreamStart(
     context: ?*anyopaque,
     stream: grpc.ServerStream,
@@ -351,15 +340,22 @@ fn onStreamMessage(
         finishIdentityError(stream, err);
         return .continue_receiving;
     };
+    return receiveStreamMessage(self, identity.source_node, payload);
+}
+
+fn receiveStreamMessage(self: *GrpcLiteTransport, source_node: u64, payload: []const u8) !grpc.StreamReceiveAction {
     if (!self.mailbox.canAccept(payload.len)) return error.InboundMailboxFull;
     var message = codec.decodeMessage(self.allocator, payload) catch {
         return error.InvalidRaftMessage;
     };
-    if (!validRoute(self, identity.source_node, message)) {
+    if (!validRoute(self, source_node, message)) {
         message.deinit(self.allocator);
         return error.InvalidRaftMessageRoute;
     }
-    if (message.msg_type == .append_response) self.peer_manager.acknowledgeSnapshot(identity.source_node);
+    if (message.msg_type == .append_response) self.peer_manager.acknowledgeSnapshot(source_node);
+    if (comptime builtin.is_test) {
+        if (self.test_before_mailbox_push) |hook| hook(self);
+    }
     self.mailbox.push(message, payload.len) catch |err| {
         message.deinit(self.allocator);
         return if (err == error.TransportBackpressure) error.InboundMailboxFull else error.InboundMailboxFailed;
@@ -399,6 +395,28 @@ fn validRoute(self: *GrpcLiteTransport, source: u64, message: Message) bool {
     if (message.msg_type != .transfer_leader) return message.from == source;
     return message.from != 0 and
         (message.from == self.config.identity.node_id or self.peer_manager.hasPeer(message.from));
+}
+
+fn validOutboundSource(self: *GrpcLiteTransport, message: Message) bool {
+    if (message.msg_type != .transfer_leader) return message.from == self.config.identity.node_id;
+    return message.from != 0 and
+        (message.from == self.config.identity.node_id or self.peer_manager.hasPeer(message.from));
+}
+
+const StopAction = enum { done, wait, stop };
+
+fn beginStop(self: *GrpcLiteTransport) StopAction {
+    lock(&self.lifecycle_mutex);
+    defer self.lifecycle_mutex.unlock();
+    return switch (self.state) {
+        .stopped => .done,
+        .stopping => .wait,
+        .initialized, .starting, .started => action: {
+            self.state = .stopping;
+            self.accepting.store(false, .release);
+            break :action .stop;
+        },
+    };
 }
 
 fn finishIdentityError(stream: grpc.ServerStream, err: anyerror) void {
@@ -458,6 +476,193 @@ fn validTestConfig() Config {
         .identity = .{ .cluster_id = [_]u8{1} ** 16, .node_id = 2 },
         .listen_addr = "127.0.0.1:0",
     };
+}
+
+const TestServerStream = struct {
+    finish_count: usize = 0,
+    status_code: ?grpc.StatusCode = null,
+
+    fn handle(self: *TestServerStream) grpc.ServerStream {
+        return .init(self, send, finish, resumeReceive);
+    }
+
+    fn send(_: *anyopaque, _: []const u8, _: grpc.StreamSendOptions) !void {}
+    fn finish(context: *anyopaque, status: grpc.Status) !void {
+        const self: *TestServerStream = @ptrCast(@alignCast(context));
+        self.finish_count += 1;
+        self.status_code = status.code;
+    }
+    fn resumeReceive(_: *anyopaque) !void {}
+};
+
+fn appendTestIdentity(metadata: *grpc.Metadata, identity: peer_manager.StreamIdentity) !void {
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    std.mem.writeInt(u64, &source, identity.source_node, .little);
+    std.mem.writeInt(u64, &target, identity.target_node, .little);
+    try metadata.append(peer_manager.protocol_version_key, "1");
+    try metadata.append(peer_manager.cluster_id_key, &identity.cluster_id);
+    try metadata.append(peer_manager.source_node_key, &source);
+    try metadata.append(peer_manager.target_node_key, &target);
+}
+
+fn checkCreateAllocationFailures(allocator: std.mem.Allocator) !void {
+    var config = validTestConfig();
+    config.mailbox_max_messages = 2;
+    const self = try GrpcLiteTransport.create(allocator, config);
+    self.destroy();
+}
+
+fn failTransportWorkerSpawn(_: *anyopaque) !std.Thread {
+    return error.OutOfMemory;
+}
+
+fn failServerStart(_: *grpc.Server) !void {
+    return error.BindFailed;
+}
+
+fn fillTestMailbox(self: *GrpcLiteTransport) void {
+    self.test_before_mailbox_push = null;
+    self.mailbox.push(.{ .msg_type = .heartbeat }, 1) catch unreachable;
+}
+
+test "grpc transport cleans up create allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkCreateAllocationFailures,
+        .{},
+    );
+}
+
+test "grpc transport rolls back peer worker start failure" {
+    const self = try GrpcLiteTransport.create(std.testing.allocator, validTestConfig());
+    defer self.destroy();
+    try std.testing.expect(try self.peer_manager.addPeer(1, "127.0.0.1:9001"));
+    self.peer_manager.spawn_worker = failTransportWorkerSpawn;
+
+    try std.testing.expectError(error.OutOfMemory, self.start());
+    try std.testing.expectEqual(GrpcLiteTransport.State.stopped, self.state);
+    try std.testing.expect(!self.accepting.load(.acquire));
+}
+
+test "grpc transport maps server start failure and stops" {
+    const self = try GrpcLiteTransport.create(std.testing.allocator, validTestConfig());
+    defer self.destroy();
+    self.start_server = failServerStart;
+
+    try std.testing.expectError(error.BindFailed, self.start());
+    try std.testing.expectEqual(GrpcLiteTransport.State.stopped, self.state);
+}
+
+test "grpc transport stop state transition is deterministic" {
+    const self = try GrpcLiteTransport.create(std.testing.allocator, validTestConfig());
+    defer self.destroy();
+
+    self.state = .stopping;
+    try std.testing.expectEqual(StopAction.wait, beginStop(self));
+    self.state = .stopped;
+    try std.testing.expectEqual(StopAction.done, beginStop(self));
+    self.state = .initialized;
+    self.accepting.store(true, .release);
+    try std.testing.expectEqual(StopAction.stop, beginStop(self));
+    try std.testing.expectEqual(GrpcLiteTransport.State.stopping, self.state);
+    try std.testing.expect(!self.accepting.load(.acquire));
+    self.state = .stopped;
+}
+
+test "grpc transport validates outbound transfer sources" {
+    const self = try GrpcLiteTransport.create(std.testing.allocator, validTestConfig());
+    defer self.destroy();
+    try std.testing.expect(try self.peer_manager.addPeer(1, "127.0.0.1:9001"));
+
+    try std.testing.expect(validOutboundSource(self, .{ .msg_type = .append, .from = 2 }));
+    try std.testing.expect(!validOutboundSource(self, .{ .msg_type = .append, .from = 1 }));
+    try std.testing.expect(validOutboundSource(self, .{ .msg_type = .transfer_leader, .from = 2 }));
+    try std.testing.expect(validOutboundSource(self, .{ .msg_type = .transfer_leader, .from = 1 }));
+    try std.testing.expect(!validOutboundSource(self, .{ .msg_type = .transfer_leader, .from = 0 }));
+    try std.testing.expect(!validOutboundSource(self, .{ .msg_type = .transfer_leader, .from = 3 }));
+}
+
+test "grpc server callbacks reject stopping identity route and mailbox races" {
+    var config = validTestConfig();
+    config.mailbox_max_messages = 1;
+    const self = try GrpcLiteTransport.create(std.testing.allocator, config);
+    defer self.destroy();
+    try std.testing.expect(try self.peer_manager.addPeer(1, "127.0.0.1:9001"));
+    var stream_state = TestServerStream{};
+    const stream = stream_state.handle();
+    var server_context = grpc.ServerContext.init(std.testing.allocator);
+    defer server_context.deinit();
+
+    try std.testing.expectError(
+        error.TransportStopping,
+        onStreamMessage(self, stream, &server_context, "", .identity),
+    );
+
+    self.accepting.store(true, .release);
+    try std.testing.expectEqual(
+        grpc.StreamReceiveAction.continue_receiving,
+        try onStreamMessage(self, stream, &server_context, "", .identity),
+    );
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, stream_state.status_code.?);
+
+    try appendTestIdentity(&server_context.request_metadata, .{
+        .cluster_id = self.config.identity.cluster_id,
+        .source_node = 1,
+        .target_node = 2,
+    });
+    const invalid_route = try codec.encodeMessage(std.testing.allocator, .{
+        .msg_type = .append,
+        .from = 3,
+        .to = 2,
+    });
+    defer std.testing.allocator.free(invalid_route);
+    try std.testing.expectError(
+        error.InvalidRaftMessageRoute,
+        onStreamMessage(self, stream, &server_context, invalid_route, .identity),
+    );
+
+    const valid = try codec.encodeMessage(std.testing.allocator, .{
+        .msg_type = .append,
+        .from = 1,
+        .to = 2,
+    });
+    defer std.testing.allocator.free(valid);
+    self.test_before_mailbox_push = fillTestMailbox;
+    try std.testing.expectError(
+        error.InboundMailboxFull,
+        onStreamMessage(self, stream, &server_context, valid, .identity),
+    );
+}
+
+test "grpc server start and remote end callbacks finish with exact statuses" {
+    const self = try GrpcLiteTransport.create(std.testing.allocator, validTestConfig());
+    defer self.destroy();
+    try std.testing.expect(try self.peer_manager.addPeer(1, "127.0.0.1:9001"));
+    self.accepting.store(true, .release);
+    var stream_state = TestServerStream{};
+    const stream = stream_state.handle();
+
+    var invalid_context = grpc.ServerContext.init(std.testing.allocator);
+    defer invalid_context.deinit();
+    try onStreamStart(self, stream, &invalid_context);
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, stream_state.status_code.?);
+
+    var valid_context = grpc.ServerContext.init(std.testing.allocator);
+    defer valid_context.deinit();
+    try appendTestIdentity(&valid_context.request_metadata, .{
+        .cluster_id = self.config.identity.cluster_id,
+        .source_node = 1,
+        .target_node = 2,
+    });
+    try onStreamStart(self, stream, &valid_context);
+    try std.testing.expectEqual(@as(usize, 4), valid_context.initial_metadata.items().len);
+    try onStreamRemoteEnd(self, stream, &valid_context);
+    try std.testing.expectEqual(grpc.StatusCode.ok, stream_state.status_code.?);
+
+    self.accepting.store(false, .release);
+    try onStreamRemoteEnd(self, stream, &valid_context);
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, stream_state.status_code.?);
 }
 
 test "grpc transport config validation rejects invalid fields" {
