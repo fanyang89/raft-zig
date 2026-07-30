@@ -100,12 +100,14 @@ pub const Unstable = struct {
         }
         const tail = &self.entries.items[self.entries.items.len - 1];
         if (tail.index != index or tail.term != term) {
+            // KCOV_EXCL_START
             log.warn(
                 @src(),
                 "unstable.slice tail has different index {} and term {}, expect {} {}",
                 .{ tail.index, tail.term, index, term },
             );
             @panic("unstable.slice tail index/term mismatch");
+            // KCOV_EXCL_STOP
         }
         self.offset = tail.index + 1;
         for (self.entries.items) |*e| e.deinit(self.allocator);
@@ -176,12 +178,14 @@ pub const Unstable = struct {
     pub fn stableSnapshot(self: *Unstable, index: u64) void {
         if (self.snapshot) |s| {
             if (s.metadata.index != index) {
+                // KCOV_EXCL_START
                 log.warn(
                     @src(),
                     "unstable.snap has different index {}, expect {}",
                     .{ s.metadata.index, index },
                 );
                 @panic("unstable.snap index mismatch");
+                // KCOV_EXCL_STOP
             }
             var mut = s;
             mut.deinit(self.allocator);

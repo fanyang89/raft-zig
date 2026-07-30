@@ -636,6 +636,28 @@ test "codec: rich message allocation failures clean up" {
     try std.testing.checkAllAllocationFailures(allocator, Check.decodeFrame, .{framed});
 }
 
+test "codec: conf state cleans up when auto leave is truncated" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    inline for (.{
+        @as([]const u64, &.{1}),
+        @as([]const u64, &.{2}),
+        @as([]const u64, &.{3}),
+        @as([]const u64, &.{4}),
+    }) |members| {
+        try writeU64Slice(std.testing.allocator, &encoded, members);
+    }
+
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var decoder = Decoder{ .data = bytes };
+            var state = try decoder.readConfState(allocator);
+            defer state.deinit(allocator);
+        }
+    };
+    try std.testing.expectError(error.TruncatedMessage, Check.run(std.testing.allocator, encoded.items));
+}
+
 test "fuzz: codec decoders" {
     try std.testing.fuzz({}, fuzzCodec, .{ .corpus = &.{
         "",

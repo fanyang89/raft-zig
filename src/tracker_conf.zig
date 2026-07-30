@@ -165,4 +165,18 @@ test "toConfState cleans up allocation failures" {
     try conf.learners_next.put(4, {});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{&conf});
 }
+
+test "tracker configuration construction cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var conf = try TrackerConfiguration.fromVotersLearners(
+                allocator,
+                &.{ 1, 2, 3 },
+                &.{ 4, 5 },
+            );
+            defer conf.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
 // KCOV_EXCL_STOP

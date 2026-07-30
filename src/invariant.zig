@@ -144,12 +144,14 @@ pub fn checkRaft(raft: anytype) ?Violation {
 pub fn assertRaft(raft: anytype) void {
     if (!options.invariant_checks) return;
     if (checkRaft(raft)) |violation| {
+        // KCOV_EXCL_START
         grpc_log.err(
             @src(),
             "raft invariant failed: {s}, peer={}, expected={}, actual={}",
             .{ @tagName(violation.kind), violation.peer_id, violation.expected, violation.actual },
         );
         @panic("raft invariant failed");
+        // KCOV_EXCL_STOP
     }
 }
 
@@ -213,9 +215,10 @@ test "fast invariant checker accepts a valid raft state" {
             offset: u64 = 1,
             snapshot: ?Snapshot = null,
         } = .{},
+        last_index: u64 = 0,
 
-        fn lastIndex(_: *const @This()) u64 {
-            return 0;
+        fn lastIndex(self: *const @This()) u64 {
+            return self.last_index;
         }
     };
     const Role = enum { follower, candidate, pre_candidate, leader };
@@ -233,12 +236,128 @@ test "fast invariant checker accepts a valid raft state" {
 
     var raft = MockRaft{ .progress_tracker = tracker };
     defer raft.progress_tracker.deinit();
+    defer raft.raft_log.unstable.entries.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(?Violation, null), checkRaft(&raft));
 
     _ = raft.progress_tracker.progress.remove(1);
     const violation = checkRaft(&raft).?;
     try std.testing.expectEqual(Kind.missing_progress, violation.kind);
     try std.testing.expectEqual(@as(u64, 1), violation.peer_id);
+}
+
+test "fast invariant checker diagnoses corrupt raft state" {
+    const Progress = @import("progress.zig").Progress;
+    const ProgressTracker = @import("progress_tracker.zig").ProgressTracker;
+    const Entry = struct { index: u64 };
+    const Snapshot = struct { metadata: struct { index: u64 } };
+    const MockLog = struct {
+        applied: u64 = 0,
+        committed: u64 = 0,
+        persisted: u64 = 0,
+        unstable: struct {
+            entries: std.ArrayList(Entry) = .empty,
+            offset: u64 = 1,
+            snapshot: ?Snapshot = null,
+        } = .{},
+        last_index: u64 = 0,
+
+        fn lastIndex(self: *const @This()) u64 {
+            return self.last_index;
+        }
+    };
+    const Role = enum { follower, candidate, pre_candidate, leader };
+    const MockRaft = struct {
+        id: u64 = 1,
+        state: Role = .follower,
+        leader_id: u64 = 0,
+        raft_log: MockLog = .{},
+        progress_tracker: ProgressTracker,
+    };
+
+    var tracker = ProgressTracker.init(std.testing.allocator, 4);
+    try tracker.conf.voters.incoming.add(1);
+    try tracker.progress.put(1, Progress.init(std.testing.allocator, 1, 4));
+    var raft = MockRaft{ .progress_tracker = tracker };
+    defer raft.progress_tracker.deinit();
+    defer raft.raft_log.unstable.entries.deinit(std.testing.allocator);
+
+    raft.raft_log.unstable.offset = std.math.maxInt(u64);
+    try raft.raft_log.unstable.entries.append(std.testing.allocator, .{ .index = std.math.maxInt(u64) });
+    try std.testing.expectEqual(Kind.unstable_range_overflows, checkRaft(&raft).?.kind);
+    raft.raft_log.unstable.entries.clearRetainingCapacity();
+    raft.raft_log.unstable.offset = 1;
+
+    try raft.raft_log.unstable.entries.append(std.testing.allocator, .{ .index = 2 });
+    var violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.unstable_entry_index_mismatch, violation.kind);
+    try std.testing.expectEqual(@as(u64, 1), violation.expected);
+    try std.testing.expectEqual(@as(u64, 2), violation.actual);
+    raft.raft_log.unstable.entries.clearRetainingCapacity();
+
+    raft.raft_log.unstable.snapshot = .{ .metadata = .{ .index = 2 } };
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.unstable_snapshot_offset_mismatch, violation.kind);
+    try std.testing.expectEqual(@as(u64, 2), violation.expected);
+    try std.testing.expectEqual(@as(u64, 1), violation.actual);
+    raft.raft_log.unstable.snapshot = null;
+
+    raft.raft_log.committed = 1;
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.committed_exceeds_last_index, violation.kind);
+    try std.testing.expectEqual(@as(u64, 1), violation.actual);
+    raft.raft_log.committed = 0;
+    raft.raft_log.persisted = 1;
+    try std.testing.expectEqual(Kind.persisted_exceeds_last_index, checkRaft(&raft).?.kind);
+    raft.raft_log.persisted = 0;
+
+    raft.state = .leader;
+    raft.leader_id = 2;
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.leader_id_mismatch, violation.kind);
+    try std.testing.expectEqual(@as(u64, 1), violation.peer_id);
+    try std.testing.expectEqual(@as(u64, 1), violation.expected);
+    try std.testing.expectEqual(@as(u64, 2), violation.actual);
+    raft.state = .follower;
+    raft.leader_id = 0;
+
+    try raft.progress_tracker.conf.learners.put(1, {});
+    try std.testing.expectEqual(Kind.learner_is_voter, checkRaft(&raft).?.kind);
+    _ = raft.progress_tracker.conf.learners.remove(1);
+
+    try raft.progress_tracker.conf.learners_next.put(1, {});
+    try std.testing.expectEqual(Kind.learner_next_invalid, checkRaft(&raft).?.kind);
+    _ = raft.progress_tracker.conf.learners_next.remove(1);
+    raft.progress_tracker.conf.auto_leave = true;
+    try std.testing.expectEqual(Kind.non_joint_state_invalid, checkRaft(&raft).?.kind);
+    raft.progress_tracker.conf.auto_leave = false;
+
+    try raft.progress_tracker.progress.put(2, Progress.init(std.testing.allocator, 1, 4));
+    try std.testing.expectEqual(Kind.unexpected_progress, checkRaft(&raft).?.kind);
+    _ = raft.progress_tracker.progress.remove(2);
+
+    const progress = raft.progress_tracker.getPtr(1).?;
+    progress.next_idx = 0;
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.progress_next_index_invalid, violation.kind);
+    try std.testing.expectEqual(@as(u64, 1), violation.expected);
+    try std.testing.expectEqual(@as(u64, 0), violation.actual);
+    progress.next_idx = 2;
+    progress.matched = 1;
+    raft.state = .leader;
+    raft.leader_id = 1;
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.progress_match_exceeds_log, violation.kind);
+    try std.testing.expectEqual(@as(u64, 0), violation.expected);
+    try std.testing.expectEqual(@as(u64, 1), violation.actual);
+    raft.state = .follower;
+    raft.leader_id = 0;
+    progress.matched = 0;
+    progress.next_idx = 1;
+    progress.inflights.count = 1;
+    violation = checkRaft(&raft).?;
+    try std.testing.expectEqual(Kind.progress_inflights_invalid, violation.kind);
+    try std.testing.expectEqual(@as(u64, 4), violation.expected);
+    try std.testing.expectEqual(@as(u64, 1), violation.actual);
 }
 // KCOV_EXCL_STOP
 

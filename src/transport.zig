@@ -338,4 +338,38 @@ test "noop transport send handles every allocation failure" {
         .{},
     );
 }
+
+test "noop transport delivery cleans up every allocation failure" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var transport = NoopTransport.init(allocator);
+            defer transport.deinit();
+            const Callback = struct {
+                allocator: std.mem.Allocator,
+
+                fn invoke(context: *anyopaque, msg: Message) Error!void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    var owned = msg;
+                    owned.deinit(self.allocator);
+                }
+            };
+            var callback_context = Callback{ .allocator = allocator };
+            transport.transport().setMessageCallback(.{
+                .ctx = &callback_context,
+                .function = Callback.invoke,
+            });
+            var entries = [_]types.Entry{.{
+                .data = @constCast("entry-data"),
+                .context = @constCast("entry-context"),
+            }};
+            try std.testing.expect(try transport.deliver(.{
+                .msg_type = .append,
+                .context = @constCast("message-context"),
+                .entries = &entries,
+                .snapshot = .{ .data = @constCast("snapshot-data") },
+            }));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
 // KCOV_EXCL_STOP

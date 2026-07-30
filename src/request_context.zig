@@ -45,10 +45,14 @@ pub const Generator = struct {
     }
 
     fn nextSequence(self: *Generator) Error!u64 {
+        return self.nextSequenceUsing(atomicCompareExchange);
+    }
+
+    fn nextSequenceUsing(self: *Generator, comptime compare_exchange: anytype) Error!u64 {
         var current = self.sequence.load(.monotonic);
         while (true) {
             if (current == std.math.maxInt(u64)) return error.ContextSequenceExhausted;
-            if (self.sequence.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |actual| {
+            if (compare_exchange(&self.sequence, current, current + 1)) |actual| {
                 current = actual;
             } else {
                 return current;
@@ -56,6 +60,10 @@ pub const Generator = struct {
         }
     }
 };
+
+fn atomicCompareExchange(sequence: *std.atomic.Value(u64), current: u64, next: u64) ?u64 {
+    return sequence.cmpxchgWeak(current, next, .monotonic, .monotonic);
+}
 
 pub fn decode(context: []const u8) ?Header {
     if (context.len < header_size) return null;
@@ -125,5 +133,20 @@ test "request context sequence fails before wrapping" {
         error.ContextSequenceExhausted,
         generator.next(std.testing.allocator, .proposal, ""),
     );
+}
+
+test "request context retries a failed compare exchange" {
+    const Stub = struct {
+        fn compareExchange(sequence: *std.atomic.Value(u64), current: u64, next: u64) ?u64 {
+            if (current == 0) {
+                sequence.store(1, .monotonic);
+                return 1;
+            }
+            return sequence.cmpxchgStrong(current, next, .monotonic, .monotonic);
+        }
+    };
+    var generator = Generator.init(1, 1);
+    try std.testing.expectEqual(@as(u64, 1), try generator.nextSequenceUsing(Stub.compareExchange));
+    try std.testing.expectEqual(@as(u64, 2), generator.sequence.load(.monotonic));
 }
 // KCOV_EXCL_STOP

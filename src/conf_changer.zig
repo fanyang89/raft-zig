@@ -184,11 +184,6 @@ pub const ConfChanger = struct {
         const cfg = &pair.cfg;
         const prs = &pair.prs;
 
-        if (cfg.voters.outgoing.isEmpty()) {
-            log.warn(@src(), "configuration is not joint", .{});
-            return error.ConfChangeError;
-        }
-
         // learners_next graduates into learners.
         var ln_it = cfg.learners_next.keyIterator();
         while (ln_it.next()) |k| try cfg.learners.put(k.*, {});
@@ -539,5 +534,51 @@ test "conf changer: update node preserves joint configuration and progress" {
     try std.testing.expect(before.eql(after));
     try std.testing.expectEqual(@as(u64, 5), tr.progress.getPtr(1).?.matched);
     try std.testing.expectEqual(@as(u64, 3), tr.progress.getPtr(2).?.matched);
+}
+
+test "conf changer: invariant diagnostics reject malformed configurations" {
+    const allocator = std.testing.allocator;
+    var progress = ProgressMap.init(allocator);
+    defer progress.deinit();
+    var changes = IncrChangeMap.init(allocator, &progress);
+    defer changes.deinit();
+    var cfg = TrackerConfiguration.init(allocator);
+    defer cfg.deinit();
+
+    try cfg.voters.incoming.add(1);
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+    try progress.put(1, progress_mod.Progress.init(allocator, 1, 4));
+
+    try cfg.learners.put(2, {});
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+    try progress.put(2, progress_mod.Progress.init(allocator, 1, 4));
+    try cfg.voters.outgoing.add(2);
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+    _ = cfg.voters.outgoing.remove(2);
+    try cfg.voters.incoming.add(2);
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+    _ = cfg.voters.incoming.remove(2);
+    _ = cfg.learners.remove(2);
+
+    try cfg.learners_next.put(3, {});
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+    try progress.put(3, progress_mod.Progress.init(allocator, 1, 4));
+    try std.testing.expectError(error.ConfChangeError, checkInvariants(cfg, changes));
+}
+
+test "conf changer: invariant voter collection reports OOM" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var progress = ProgressMap.init(allocator);
+    defer progress.deinit();
+    var changes = IncrChangeMap.init(allocator, &progress);
+    defer changes.deinit();
+    var cfg = TrackerConfiguration.init(allocator);
+    defer cfg.deinit();
+    try cfg.voters.incoming.add(1);
+    try progress.put(1, progress_mod.Progress.init(allocator, 1, 4));
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, checkInvariants(cfg, changes));
 }
 // KCOV_EXCL_STOP

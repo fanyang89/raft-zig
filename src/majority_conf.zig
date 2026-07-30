@@ -258,4 +258,14 @@ test "committed index picks the majority-th match" {
     try std.testing.expectEqual(@as(u64, 20), r.index);
     try std.testing.expectEqual(false, r.use_group_commit);
 }
+
+test "majority construction cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var conf = try MajorityConfig.fromIds(allocator, &.{ 1, 2, 3, 4 });
+            defer conf.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
 // KCOV_EXCL_STOP

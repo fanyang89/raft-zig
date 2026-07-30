@@ -245,6 +245,26 @@ test "read only advance allocation failure preserves pending requests" {
     try std.testing.expectEqual(@as(usize, 1), statuses.len);
 }
 
+test "read only add request cleans up every allocation failure" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var ro = ReadOnly.init(allocator, .safe);
+            defer ro.deinit();
+            var entries = [_]types.Entry{.{
+                .data = @constCast("request-context"),
+                .context = @constCast("entry-context"),
+            }};
+            try ro.addRequest(10, .{
+                .msg_type = .read_index,
+                .context = @constCast("message-context"),
+                .entries = &entries,
+            }, 1);
+            try std.testing.expectEqual(@as(usize, 1), ro.pendingReadCount());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
+
 test "read only ack set accumulates per request" {
     var ro = ReadOnly.init(std.testing.allocator, .safe);
     defer ro.deinit();

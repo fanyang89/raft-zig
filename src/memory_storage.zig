@@ -1042,6 +1042,21 @@ test "memory storage local snapshot applies membership and compacts" {
     try std.testing.expectEqualSlices(u8, membership, storage.core.snapshot_data.membership);
 }
 
+test "memory storage local snapshot cleans up when compaction fails" {
+    const allocator = std.testing.allocator;
+    var storage = MemoryStorage.init();
+    defer storage.deinit(allocator);
+
+    try std.testing.expectError(error.Fatal, storage.applyLocalSnapshot(allocator, .{
+        .data = @constCast("state"),
+        .metadata = .{
+            .index = 1,
+            .term = 1,
+            .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+        },
+    }));
+}
+
 test "memory storage snapshot membership allocation failures clean up" {
     const Check = struct {
         fn run(allocator: std.mem.Allocator, membership: []const u8) !void {
@@ -1069,6 +1084,145 @@ test "memory storage snapshot membership allocation failures clean up" {
     }).encode(std.testing.allocator);
     defer std.testing.allocator.free(membership);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{membership});
+}
+
+test "memory storage local snapshot allocation failures clean up" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, membership: []const u8) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.append(allocator, &.{
+                .{ .index = 1, .term = 1, .data = @constCast("one") },
+                .{ .index = 2, .term = 1, .data = @constCast("two") },
+            });
+            try storage.applyLocalSnapshot(allocator, .{
+                .membership = @constCast(membership),
+                .data = @constCast("local-state"),
+                .metadata = .{
+                    .index = 1,
+                    .term = 1,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{ 1, 2 }) },
+                },
+            });
+        }
+    };
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+        .{ .node_id = 2, .address = @constCast("node-2") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(membership);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{membership});
+}
+
+test "memory storage snapshot result cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator, membership: []const u8) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.applySnapshot(allocator, .{
+                .membership = @constCast(membership),
+                .data = @constCast("snapshot-state"),
+                .metadata = .{
+                    .index = 3,
+                    .term = 2,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+                },
+            });
+            var snapshot = try storage.core.snapshot(allocator);
+            defer snapshot.deinit(allocator);
+        }
+    };
+    var peers = [_]cluster_membership_mod.PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("node-1") },
+    };
+    const membership = try (ClusterMembership{
+        .cluster_id = .{1} ++ .{0} ** 15,
+        .peers = &peers,
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(membership);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{membership});
+}
+
+test "memory storage entry reads clean up allocation failures" {
+    const Check = struct {
+        fn entries(allocator: std.mem.Allocator) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.setEntries(allocator, &.{
+                .{ .index = 1, .term = 1, .data = @constCast("one"), .context = @constCast("first") },
+                .{ .index = 2, .term = 1, .data = @constCast("two"), .context = @constCast("second") },
+            });
+            const result = try storage.entries(allocator, 1, 3, null, .{ .empty = .{ .can_async = false } });
+            defer {
+                for (result) |*entry| entry.deinit(allocator);
+                allocator.free(result);
+            }
+        }
+
+        fn allEntries(allocator: std.mem.Allocator) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.setEntries(allocator, &.{
+                .{ .index = 1, .term = 1, .data = @constCast("one"), .context = @constCast("first") },
+                .{ .index = 2, .term = 1, .data = @constCast("two"), .context = @constCast("second") },
+            });
+            const result = try storage.allEntries(allocator);
+            defer {
+                for (result) |*entry| entry.deinit(allocator);
+                allocator.free(result);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.entries, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.allEntries, .{});
+}
+
+test "memory storage legacy migration cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var storage = MemoryStorage.init();
+            defer storage.deinit(allocator);
+            try storage.append(allocator, &.{
+                .{ .index = 1, .term = 1 },
+                .{ .index = 2, .term = 1 },
+                .{ .index = 3, .term = 2 },
+            });
+            try storage.setHardState(.{ .term = 2, .vote = 1, .commit = 3 });
+            try storage.applyLocalSnapshot(allocator, .{
+                .data = @constCast("legacy-state"),
+                .metadata = .{
+                    .index = 1,
+                    .term = 1,
+                    .conf_state = .{ .voters = @constCast(&[_]u64{1}) },
+                },
+            });
+            try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+
+            var current_peers = [_]cluster_membership_mod.PeerEndpoint{
+                .{ .node_id = 1, .address = @constCast("node-1") },
+                .{ .node_id = 2, .address = @constCast("node-2") },
+            };
+            var historical_peers = [_]cluster_membership_mod.PeerEndpoint{
+                .{ .node_id = 1, .address = @constCast("old-node-1") },
+            };
+            const current = ClusterMembership{
+                .cluster_id = .{1} ++ .{0} ** 15,
+                .peers = &current_peers,
+                .retired_node_ids = @constCast(&[_]u64{3}),
+            };
+            const historical = ClusterMembership{
+                .cluster_id = current.cluster_id,
+                .peers = &historical_peers,
+                .retired_node_ids = @constCast(&[_]u64{3}),
+            };
+            try storage.migrateLegacyMembership(allocator, current, 2, historical);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
 }
 
 test "memory storage migrates legacy membership atomically" {

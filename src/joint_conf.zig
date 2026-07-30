@@ -207,4 +207,18 @@ test "joint ids unions incoming and outgoing without duplicates" {
     defer allocator.free(got);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, got);
 }
+
+test "joint construction cleans up allocation failures" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var conf = try JointConfiguration.fromIncomingOutgoing(
+                allocator,
+                &.{ 1, 2, 3 },
+                &.{ 2, 3, 4 },
+            );
+            defer conf.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{});
+}
 // KCOV_EXCL_STOP

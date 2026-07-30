@@ -373,6 +373,26 @@ test "proposal tracker rejects duplicate contexts" {
     try std.testing.expectError(error.DuplicateRequest, tracker.trackRead("read", read.readCallback(), 0, 0));
 }
 
+test "proposal tracker registration cleans up allocation failures" {
+    const Check = struct {
+        fn proposal(allocator: std.mem.Allocator) !void {
+            var tracker = ProposalTracker.init(allocator);
+            defer tracker.deinit();
+            var callback = Tester{};
+            try tracker.track("proposal-context", callback.proposalCallback(), 3, 5);
+        }
+
+        fn read(allocator: std.mem.Allocator) !void {
+            var tracker = ProposalTracker.init(allocator);
+            defer tracker.deinit();
+            var callback = ReadTester{};
+            try tracker.trackRead("read-context", callback.readCallback(), 3, 5);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.proposal, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.read, .{});
+}
+
 test "proposal tracker fail and failAll" {
     const allocator = std.testing.allocator;
     var tracker = ProposalTracker.init(allocator);

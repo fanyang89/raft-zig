@@ -127,7 +127,7 @@ pub const Progress = struct {
                 self.optimisticUpdate(last);
                 try self.inflights.add(self.allocator, last);
             },
-            .snapshot => @panic("updating progress state in snapshot state"),
+            .snapshot => @panic("updating progress state in snapshot state"), // KCOV_EXCL_LINE
         }
     }
 
@@ -445,5 +445,18 @@ test "progress map remove reports missing entries" {
     try progress.put(1, Progress.init(std.testing.allocator, 2, 8));
     try std.testing.expect(progress.remove(1));
     try std.testing.expect(!progress.remove(1));
+}
+
+test "progress updateState records probe and replicate sends" {
+    var progress = Progress.init(std.testing.allocator, 2, 4);
+    defer progress.deinit();
+
+    try progress.updateState(2);
+    try std.testing.expect(progress.paused);
+
+    progress.becomeReplicate();
+    try progress.updateState(3);
+    try std.testing.expectEqual(@as(u64, 4), progress.next_idx);
+    try std.testing.expectEqual(@as(usize, 1), progress.inflights.count);
 }
 // KCOV_EXCL_STOP

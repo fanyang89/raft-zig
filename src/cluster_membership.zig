@@ -472,18 +472,8 @@ pub fn deriveClusterMembership(
         if (!containsSorted(new_ids, node_id)) retired.append(allocator, node_id) catch return error.OutOfMemory;
     }
     std.mem.sort(u64, retired.items, {}, std.sort.asc(u64));
-    if (retired.items.len != 0) {
-        var unique_len: usize = 1;
-        for (retired.items[1..]) |node_id| {
-            if (node_id != retired.items[unique_len - 1]) {
-                retired.items[unique_len] = node_id;
-                unique_len += 1;
-            }
-        }
-        retired.items.len = unique_len;
-    }
     const retired_node_ids = retired.toOwnedSlice(allocator) catch return error.OutOfMemory;
-    errdefer if (retired_node_ids.len != 0) allocator.free(retired_node_ids);
+    errdefer if (retired_node_ids.len != 0) allocator.free(retired_node_ids); // KCOV_EXCL_LINE
 
     var result = ClusterMembership{
         .cluster_id = current.cluster_id,
@@ -1105,5 +1095,15 @@ test "derive membership allocation failures are atomic" {
     try std.testing.checkAllAllocationFailures(allocator, Helper.run, .{ &current, previous, next, conf_change });
     try std.testing.expectEqualStrings("node-1", current.addressOf(1).?);
     try std.testing.expect(current.addressOf(2) == null);
+}
+
+test "membership endpoint lookup advances its lower bound" {
+    var endpoints = [_]PeerEndpoint{
+        .{ .node_id = 1, .address = @constCast("one") },
+        .{ .node_id = 2, .address = @constCast("two") },
+        .{ .node_id = 3, .address = @constCast("three") },
+        .{ .node_id = 4, .address = @constCast("four") },
+    };
+    try std.testing.expectEqualStrings("four", addressInEndpoints(&endpoints, 4).?);
 }
 // KCOV_EXCL_STOP

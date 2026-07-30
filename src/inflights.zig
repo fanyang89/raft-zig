@@ -130,7 +130,7 @@ pub const Inflights = struct {
     /// must check `full()` first.
     pub fn add(self: *Inflights, allocator: std.mem.Allocator, inflight: u64) !void {
         if (self.full()) {
-            @panic("inflights full");
+            @panic("inflights full"); // KCOV_EXCL_LINE
         }
 
         if (self.buffer.capacity == 0) {
@@ -305,6 +305,20 @@ test "ordinary boundaries and deferred shrink" {
     inflight.freeTo(allocator, 5);
     try std.testing.expectEqual(@as(usize, 0), inflight.count_());
     try std.testing.expectEqual(@as(usize, 1), inflight.capacity);
+    try std.testing.expect(inflight.incoming_capacity == null);
+}
+
+test "reset applies a deferred shrink" {
+    const allocator = std.testing.allocator;
+    var inflight = Inflights.init(4);
+    defer inflight.deinit(allocator);
+
+    try inflight.add(allocator, 1);
+    try inflight.setCapacity(allocator, 2);
+    inflight.reset(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), inflight.capacity);
+    try std.testing.expectEqual(@as(usize, 0), inflight.count);
     try std.testing.expect(inflight.incoming_capacity == null);
 }
 // KCOV_EXCL_STOP

@@ -663,8 +663,8 @@ const MemoryStorage = @import("memory_storage.zig").MemoryStorage;
 fn seedStorage(allocator: std.mem.Allocator, storage: *MemoryStorage, voters: []const u64) !void {
     const v = try allocator.dupe(u64, voters);
     var cs = types.ConfState{ .voters = v };
+    defer cs.deinit(allocator);
     try storage.setRaftState(allocator, .{ .conf_state = cs });
-    cs.deinit(allocator);
 }
 
 fn makeConfig(id: u64) Config {
@@ -704,5 +704,86 @@ test "isLocalMessage and isResponseMessage classification" {
     try std.testing.expect(isResponseMessage(.heartbeat_response));
     try std.testing.expect(!isResponseMessage(.append));
     try std.testing.expect(!isResponseMessage(.heartbeat));
+}
+
+test "rawnode entry construction cleans up allocation failures" {
+    const Check = struct {
+        fn copy(allocator: std.mem.Allocator) !void {
+            var entry = try makeEntryCopy(allocator, .normal, "entry-data", "entry-context");
+            defer entry.deinit(allocator);
+        }
+
+        fn adopt(allocator: std.mem.Allocator) !void {
+            const data = try allocator.dupe(u8, "entry-data");
+            var entry = try makeEntryAdoptingData(allocator, .normal, data, "entry-context");
+            defer entry.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.copy, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.adopt, .{});
+}
+
+test "rawnode requests and batches clean up allocation failures" {
+    const Check = struct {
+        const Operation = enum { read, batch, owned_batch, ready };
+
+        fn initLeader(allocator: std.mem.Allocator, storage: *MemoryStorage) !RawNode {
+            try seedStorage(allocator, storage, &.{1});
+            var node = try RawNode.init(allocator, makeConfig(1), storage.asStorage());
+            errdefer node.deinit();
+            try node.campaign();
+            return node;
+        }
+
+        fn scan(comptime operation: Operation) !void {
+            var saw_oom = false;
+            var reached_success = false;
+            for (0..64) |failure_offset| {
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+                const allocator = failing.allocator();
+                var storage = MemoryStorage.init();
+                defer storage.deinit(allocator);
+                var node = try initLeader(allocator, &storage);
+                defer node.deinit();
+
+                var owned: [2]RawNode.OwnedProposal = undefined;
+                if (operation == .owned_batch) {
+                    owned = .{
+                        .{ .context = "first-context", .data = try allocator.dupe(u8, "first-data") },
+                        .{ .context = "second-context", .data = try allocator.dupe(u8, "second-data") },
+                    };
+                }
+                if (operation == .ready) try node.propose("proposal-context", "proposal-data");
+
+                failing.fail_index = failing.alloc_index + failure_offset;
+                const result: Error!void = switch (operation) {
+                    .read => node.readIndex("read-context"),
+                    .batch => node.proposeBatch(&.{
+                        .{ .context = "first-context", .data = "first-data" },
+                        .{ .context = "second-context", .data = "second-data" },
+                    }),
+                    .owned_batch => node.proposeBatchOwned(&owned),
+                    .ready => if (node.getReady()) |ready_value| blk: {
+                        var ready = ready_value;
+                        ready.deinit(allocator);
+                        break :blk {};
+                    } else |err| err,
+                };
+                if (result) |_| {
+                    reached_success = true;
+                    break;
+                } else |err| {
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    saw_oom = true;
+                }
+            }
+            try std.testing.expect(saw_oom);
+            try std.testing.expect(reached_success);
+        }
+    };
+    try Check.scan(.read);
+    try Check.scan(.batch);
+    try Check.scan(.owned_batch);
+    try Check.scan(.ready);
 }
 // KCOV_EXCL_STOP
