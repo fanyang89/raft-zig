@@ -1,0 +1,31 @@
+[tools]
+zig = "0.16.0"
+
+[tasks.build]
+description = "Build raft-sqlite"
+run = "zig build"
+
+[tasks.test]
+description = "Run Debug tests"
+run = "zig build test --summary all"
+
+[tasks.test-release-safe]
+description = "Run ReleaseSafe tests"
+run = "zig build test -Doptimize=ReleaseSafe --summary all"
+
+[tasks.fmt]
+description = "Format Zig sources"
+run = "zig fmt build.zig src"
+
+[tasks.fmt-check]
+description = "Check Zig formatting"
+run = "zig fmt --check build.zig src"
+
+[tasks.check]
+description = "Run all required checks"
+run = [
+  "zig fmt --check build.zig src",
+  "zig build --summary all",
+  "zig build test --summary all",
+  "zig build test -Doptimize=ReleaseSafe --summary all",
+]

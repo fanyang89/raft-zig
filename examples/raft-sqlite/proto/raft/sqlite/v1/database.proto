@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package raft.sqlite.v1;
+
+service DatabaseService {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+enum NullValue {
+  NULL_VALUE_UNSPECIFIED = 0;
+  NULL_VALUE = 1;
+}
+
+message Value {
+  oneof kind {
+    NullValue null_value = 1;
+    sint64 integer_value = 2;
+    double real_value = 3;
+    string text_value = 4;
+    bytes blob_value = 5;
+  }
+}
+
+message Statement {
+  string sql = 1;
+  repeated Value parameters = 2;
+}
+
+message ExecuteRequest {
+  string request_id = 1;
+  repeated Statement statements = 2;
+}
+
+enum ExecuteCode {
+  EXECUTE_CODE_UNSPECIFIED = 0;
+  EXECUTE_CODE_OK = 1;
+  EXECUTE_CODE_SQL_ERROR = 2;
+  EXECUTE_CODE_REQUEST_CONFLICT = 3;
+  EXECUTE_CODE_INVALID_REQUEST = 4;
+  EXECUTE_CODE_RESOURCE_EXHAUSTED = 5;
+}
+
+message StatementResult {
+  int64 rows_affected = 1;
+  int64 last_insert_rowid = 2;
+}
+
+message ExecuteResponse {
+  ExecuteCode code = 1;
+  repeated StatementResult results = 2;
+  int32 sqlite_code = 3;
+  string error_message = 4;
+  uint64 applied_index = 5;
+}
+
+message QueryRequest {
+  string sql = 1;
+  repeated Value parameters = 2;
+}
+
+message Column {
+  string name = 1;
+}
+
+message Row {
+  repeated Value values = 1;
+}
+
+message QueryResponse {
+  repeated Column columns = 1;
+  repeated Row rows = 2;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  uint64 node_id = 1;
+  uint64 leader_id = 2;
+  string role = 3;
+  uint64 term = 4;
+  uint64 applied_index = 5;
+  uint64 database_bytes = 6;
+  string sqlite_version = 7;
+}
+
+message CommandEnvelope {
+  uint32 format_version = 1;
+  uint32 sqlite_version_number = 2;
+  ExecuteRequest execute = 3;
+}

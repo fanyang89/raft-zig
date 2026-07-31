@@ -1,0 +1,24 @@
+.{
+    .name = .raft_sqlite,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x286becab5ae176f8,
+    .dependencies = .{
+        .raft_zig = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+        "mise.toml",
+        "proto",
+        "src",
+        "vendor/sqlite/sqlite3.c",
+        "vendor/sqlite/sqlite3.h",
+        "vendor/sqlite/sqlite3ext.h",
+        "vendor/sqlite/README.md",
+    },
+}
