@@ -28,6 +28,12 @@ pub const ApplyResult = struct {
     }
 };
 
+/// Last entry atomically persisted by a durable state machine.
+pub const DurableApplied = struct {
+    index: u64 = 0,
+    term: u64 = 0,
+};
+
 /// Streaming sink for snapshot payload bytes. Implementations write chunks
 /// until the snapshot is fully serialized.
 pub const SnapshotWriter = struct {
@@ -97,6 +103,9 @@ pub const StateMachine = struct {
         /// state unchanged.
         restore_snapshot: *const fn (ctx: *anyopaque, metadata: SnapshotMetadata, reader: SnapshotReader) Error!void,
         on_leadership_change: *const fn (ctx: *anyopaque, is_leader: bool, term: u64, leader_id: u64) void = noopOnLeadershipChange,
+        /// When present, apply must atomically persist the entry and this cursor
+        /// before returning success. The zero index and term form a valid cursor.
+        durable_applied: ?*const fn (ctx: *anyopaque) Error!DurableApplied = null,
     };
 
     pub fn apply(self: StateMachine, entry: Entry) Error!ApplyResult {
@@ -113,6 +122,15 @@ pub const StateMachine = struct {
 
     pub fn onLeadershipChange(self: StateMachine, is_leader: bool, term: u64, leader_id: u64) void {
         self.vtable.on_leadership_change(self.ctx, is_leader, term, leader_id);
+    }
+
+    pub fn durableApplied(self: StateMachine) Error!?DurableApplied {
+        const get = self.vtable.durable_applied orelse return null;
+        return try get(self.ctx);
+    }
+
+    pub fn supportsDurableApplied(self: StateMachine) bool {
+        return self.vtable.durable_applied != null;
     }
 };
 

@@ -95,6 +95,7 @@ pub const ReadyProcessor = struct {
     fatal_after_ready: ?Error,
     pending: ?PendingReady,
     checksum_enabled: bool,
+    durable_state_machine: bool,
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -128,6 +129,7 @@ pub const ReadyProcessor = struct {
             .fatal_after_ready = null,
             .pending = null,
             .checksum_enabled = checksum_enabled,
+            .durable_state_machine = state_machine.supportsDurableApplied(),
             .allocator = allocator,
         };
     }
@@ -218,7 +220,8 @@ pub const ReadyProcessor = struct {
             },
             .sync => {
                 const has_snapshot = if (pending.ready.snapshot) |snapshot| snapshot.metadata.index > 0 else false;
-                if (pending.ready.must_sync or has_snapshot) try self.storage.sync();
+                const durable_commit = self.durable_state_machine and pending.ready.hs != null;
+                if (pending.ready.must_sync or has_snapshot or durable_commit) try self.storage.sync();
                 if (pending.snapshot_membership) |membership| {
                     pending.snapshot_membership = null;
                     self.installMembership(membership, pending.ready.snapshot.?.metadata.index);

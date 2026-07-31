@@ -363,6 +363,7 @@ pub const Raftor = struct {
         if (config.proposal_drain_budget == 0) return error.InvalidConfig;
         if (config.read_index_drain_budget == 0) return error.InvalidConfig;
         if (config.max_queued_read_indexes == 0 or config.max_queued_read_index_bytes == 0) return error.InvalidConfig;
+        if (startup_mode != .restart) try validateFreshStateMachine(dependencies.state_machine);
         try self.prepareStorage(startup_mode);
         var initial_state = try self.storage.initialState(allocator);
         defer initial_state.deinit(allocator);
@@ -382,7 +383,7 @@ pub const Raftor = struct {
         const incarnation = try self.storage.reserveIncarnation();
         self.request_context_generator = request_context_mod.Generator.init(config.nodeId(), incarnation);
         const initial_applied_index = if (startup_mode == .restart)
-            try self.restoreLocalSnapshot(dependencies.state_machine, config.raft.applied)
+            try self.recoverStateMachine(dependencies.state_machine, initial_state.hard_state.commit, config.raft.applied)
         else
             config.raft.applied;
 
@@ -451,10 +452,55 @@ pub const Raftor = struct {
         };
     }
 
-    fn restoreLocalSnapshot(self: *Raftor, state_machine: StateMachine, fallback_applied_index: u64) Error!u64 {
-        var snapshot = (try self.storage.localSnapshot(self.allocator)) orelse return fallback_applied_index;
-        defer snapshot.deinit(self.allocator);
-        if (snapshot.metadata.index == 0) return fallback_applied_index;
+    fn recoverStateMachine(
+        self: *Raftor,
+        state_machine: StateMachine,
+        commit_index: u64,
+        fallback_applied_index: u64,
+    ) Error!u64 {
+        const durable_applied = try state_machine.durableApplied();
+        var snapshot = try self.storage.localSnapshot(self.allocator);
+        defer if (snapshot) |*value| value.deinit(self.allocator);
+        const snapshot_index = if (snapshot) |value| value.metadata.index else 0;
+
+        if (durable_applied) |durable| {
+            if (durable.index > commit_index) return error.IncompatibleStorage;
+            if (durable.index < snapshot_index) {
+                try self.restoreLocalSnapshot(state_machine, snapshot.?);
+                return snapshot_index;
+            }
+            if (durable.index == snapshot_index) {
+                const expected_term = if (snapshot) |value| value.metadata.term else 0;
+                if (durable.term != expected_term) return error.IncompatibleStorage;
+                return durable.index;
+            }
+
+            const first_index = try self.storage.firstIndex();
+            const last_index = try self.storage.lastIndex();
+            if (durable.index < first_index or durable.index > last_index) return error.IncompatibleStorage;
+            const stored_term = self.storage.term(durable.index) catch |err| switch (err) {
+                error.Compacted, error.Unavailable => return error.IncompatibleStorage,
+                else => return err,
+            };
+            if (durable.term != stored_term) return error.IncompatibleStorage;
+            return durable.index;
+        }
+
+        if (snapshot) |value| {
+            if (value.metadata.index > 0) {
+                try self.restoreLocalSnapshot(state_machine, value);
+                return value.metadata.index;
+            }
+        }
+        return fallback_applied_index;
+    }
+
+    fn validateFreshStateMachine(state_machine: StateMachine) Error!void {
+        const durable_applied = (try state_machine.durableApplied()) orelse return;
+        if (durable_applied.index != 0 or durable_applied.term != 0) return error.IncompatibleStorage;
+    }
+
+    fn restoreLocalSnapshot(self: *Raftor, state_machine: StateMachine, snapshot: types.Snapshot) Error!void {
         var reader = state_machine_mod.BufferSnapshotReader.init(snapshot.data);
         try state_machine.restoreSnapshot(snapshot.metadata, reader.reader());
         log.info(@src(), "restored local snapshot: node_id={}, index={}, term={}", .{
@@ -462,7 +508,6 @@ pub const Raftor = struct {
             snapshot.metadata.index,
             snapshot.metadata.term,
         });
-        return snapshot.metadata.index;
     }
 
     fn prepareStorage(self: *Raftor, startup_mode: StartupMode) Error!void {

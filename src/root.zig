@@ -198,6 +198,7 @@ pub const RawNodeStatus = raw_node_mod.Status;
 pub const RawNode = raw_node_mod.RawNode;
 
 pub const ApplyResult = state_machine_mod.ApplyResult;
+pub const DurableApplied = state_machine_mod.DurableApplied;
 pub const SnapshotWriter = state_machine_mod.SnapshotWriter;
 pub const SnapshotReader = state_machine_mod.SnapshotReader;
 pub const StateMachine = state_machine_mod.StateMachine;

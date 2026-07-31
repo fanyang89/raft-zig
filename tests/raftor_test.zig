@@ -376,6 +376,7 @@ const DurableStateMachine = struct {
     allocator: std.mem.Allocator,
     state: std.ArrayList(u8) = .empty,
     last_applied_index: u64 = 0,
+    durable_applied: raft.DurableApplied = .{},
     restore_count: usize = 0,
     fail_restore: bool = false,
 
@@ -397,6 +398,7 @@ const DurableStateMachine = struct {
         try self.state.ensureUnusedCapacity(self.allocator, entry.data.len);
         self.state.appendSliceAssumeCapacity(entry.data);
         self.last_applied_index = entry.index;
+        self.durable_applied = .{ .index = entry.index, .term = entry.term };
         return .{};
     }
 
@@ -428,17 +430,33 @@ const DurableStateMachine = struct {
         self.state.deinit(self.allocator);
         self.state = restored;
         self.last_applied_index = metadata.index;
+        self.durable_applied = .{ .index = metadata.index, .term = metadata.term };
         self.restore_count += 1;
+    }
+
+    fn durableApplied(ctx: *anyopaque) raft.Error!raft.DurableApplied {
+        return cast(ctx).durable_applied;
     }
 
     fn stateMachine(self: *DurableStateMachine) raft.StateMachine {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
+    fn durableStateMachine(self: *DurableStateMachine) raft.StateMachine {
+        return .{ .ctx = self, .vtable = &durable_vtable };
+    }
+
     const vtable: raft.StateMachine.VTable = .{
         .apply = apply,
         .take_snapshot = takeSnapshot,
         .restore_snapshot = restoreSnapshot,
+    };
+
+    const durable_vtable: raft.StateMachine.VTable = .{
+        .apply = apply,
+        .take_snapshot = takeSnapshot,
+        .restore_snapshot = restoreSnapshot,
+        .durable_applied = durableApplied,
     };
 };
 
@@ -536,6 +554,64 @@ fn makeReadyEntries(term: u64, first: u64, count: usize) ![]raft.Entry {
         initialized += 1;
     }
     return entries;
+}
+
+fn seedRecoveryStorage(storage: *raft.MemoryStorage) !void {
+    var snapshot = raft.Snapshot{
+        .data = try allocator.dupe(u8, "snapshot-5"),
+        .metadata = .{
+            .index = 5,
+            .term = 2,
+            .conf_state = .{ .voters = try allocator.dupe(u64, &.{1}) },
+        },
+    };
+    defer snapshot.deinit(allocator);
+    try storage.applySnapshot(allocator, snapshot);
+
+    const entries = try makeReadyEntries(3, 6, 3);
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    try storage.append(allocator, entries);
+    try storage.setHardState(.{ .term = 3, .commit = 8 });
+}
+
+fn seedCommitOnlyStorage(storage: *raft.MemoryStorage) !void {
+    try storage.setConfState(allocator, .{ .voters = @constCast(&[_]u64{ 1, 2 }) });
+    const entries = try makeReadyEntries(1, 1, 1);
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    try storage.append(allocator, entries);
+    try storage.setHardState(.{ .term = 1 });
+}
+
+fn stageCommitOnlyReady(r: *Raftor) !void {
+    try r.getRawNode().step(.{
+        .msg_type = .append,
+        .from = 2,
+        .to = 1,
+        .term = 1,
+        .index = 1,
+        .log_term = 1,
+        .commit = 1,
+    });
+}
+
+fn expectUnmodifiedFreshStorage(storage: *raft.MemoryStorage) !void {
+    var state = try storage.initialState(allocator);
+    defer state.deinit(allocator);
+    try std.testing.expect(state.hard_state.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.voters.len);
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.learners.len);
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.voters_outgoing.len);
+    try std.testing.expectEqual(@as(usize, 0), state.conf_state.learners_next.len);
+    try std.testing.expect(state.cluster_membership == null);
+    try std.testing.expectEqual(@as(u64, 0), state.membership_index);
+    try std.testing.expectEqual(@as(u64, 0), try storage.lastIndex());
+    try std.testing.expectEqual(@as(u64, 0), storage.incarnation);
 }
 
 fn stageSnapshotAndSuffix(r: *Raftor) !void {
@@ -2189,6 +2265,203 @@ test "raftor: advanced commit survives restart" {
     try std.testing.expectEqual(sm.last_applied_index, restarted.getStatus().applied_index);
 }
 
+test "raftor: state machine without durable cursor keeps snapshot recovery" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.durable_applied = .{ .index = 7, .term = 3 };
+    try machine.state.appendSlice(allocator, "durable");
+
+    const state_machine = machine.stateMachine();
+    try std.testing.expect((try state_machine.durableApplied()) == null);
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = state_machine,
+    });
+    defer r.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    try std.testing.expectEqualStrings("snapshot-5", machine.state.items);
+    try std.testing.expectEqual(@as(u64, 5), r.getStatus().applied_index);
+}
+
+test "raftor: durable cursor behind snapshot restores snapshot" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    try machine.state.appendSlice(allocator, "durable");
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.durableStateMachine(),
+    });
+    defer r.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1), machine.restore_count);
+    try std.testing.expectEqualStrings("snapshot-5", machine.state.items);
+    try std.testing.expectEqual(raft.DurableApplied{ .index = 5, .term = 2 }, machine.durable_applied);
+    try std.testing.expectEqual(@as(u64, 5), r.getStatus().applied_index);
+}
+
+test "raftor: durable cursor at snapshot skips restore" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.durable_applied = .{ .index = 5, .term = 2 };
+    try machine.state.appendSlice(allocator, "durable");
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.durableStateMachine(),
+    });
+    defer r.destroy();
+
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    try std.testing.expectEqualStrings("durable", machine.state.items);
+    try std.testing.expectEqual(@as(u64, 5), r.getStatus().applied_index);
+}
+
+test "raftor: durable cursor ahead of snapshot resumes from cursor" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.durable_applied = .{ .index = 7, .term = 3 };
+    try machine.state.appendSlice(allocator, "durable");
+
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = storage.asWritableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.durableStateMachine(),
+    });
+    defer r.destroy();
+
+    try std.testing.expectEqual(@as(usize, 0), machine.restore_count);
+    try std.testing.expectEqual(@as(u64, 7), r.getStatus().applied_index);
+    try std.testing.expectEqual(@as(u64, 7), r.getRawNode().raftConst().raft_log.applied);
+    _ = try r.tick();
+    try std.testing.expectEqualStrings("durableentry", machine.state.items);
+    try std.testing.expectEqual(raft.DurableApplied{ .index = 8, .term = 3 }, machine.durable_applied);
+    try std.testing.expectEqual(@as(u64, 8), r.getStatus().applied_index);
+}
+
+test "raftor: durable cursor beyond commit is rejected" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.durable_applied = .{ .index = 9, .term = 3 };
+
+    try std.testing.expectError(error.IncompatibleStorage, Raftor.createWithDependencies(
+        allocator,
+        makeConfig(1),
+        .restart,
+        .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.durableStateMachine(),
+        },
+    ));
+}
+
+test "raftor: durable cursor term mismatch is rejected" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedRecoveryStorage(&storage);
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.durable_applied = .{ .index = 7, .term = 2 };
+
+    try std.testing.expectError(error.IncompatibleStorage, Raftor.createWithDependencies(
+        allocator,
+        makeConfig(1),
+        .restart,
+        .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.durableStateMachine(),
+        },
+    ));
+}
+
+test "raftor: durable apply syncs commit-only Ready before apply" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedCommitOnlyStorage(&storage);
+    var failing_storage = SyncFailingStorage{ .inner = storage.asWritableStorage() };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = DurableStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.durableStateMachine(),
+    });
+    defer r.destroy();
+    try stageCommitOnlyReady(r);
+
+    while (r.getReadyPhase() != raft.ReadyPhase.sync) {
+        try std.testing.expect(try r.processReadyStep());
+    }
+    failing_storage.fail_sync = true;
+    try std.testing.expectError(error.WalSyncFailed, r.processReadyStep());
+    try std.testing.expectEqual(@as(u64, 0), machine.durable_applied.index);
+
+    failing_storage.fail_sync = false;
+    while (r.getReadyPhase() != null) try std.testing.expect(try r.processReadyStep());
+    try std.testing.expectEqual(@as(usize, 1), failing_storage.successful_syncs);
+    try std.testing.expectEqual(raft.DurableApplied{ .index = 1, .term = 1 }, machine.durable_applied);
+}
+
+test "raftor: non-durable commit-only Ready does not add a sync" {
+    var storage = raft.MemoryStorage.init();
+    defer storage.deinit(allocator);
+    try seedCommitOnlyStorage(&storage);
+    var failing_storage = SyncFailingStorage{
+        .inner = storage.asWritableStorage(),
+        .fail_sync = true,
+    };
+    var transport = raft.NoopTransport.init(allocator);
+    defer transport.deinit();
+    var machine = MockStateMachine.init(allocator);
+    defer machine.deinit();
+    const r = try Raftor.createWithDependencies(allocator, makeConfig(1), .restart, .{
+        .storage = failing_storage.writableStorage(),
+        .transport = transport.transport(),
+        .state_machine = machine.stateMachine(),
+    });
+    defer r.destroy();
+    try stageCommitOnlyReady(r);
+
+    try processOneReady(r);
+    try std.testing.expectEqual(@as(usize, 0), failing_storage.successful_syncs);
+    try std.testing.expectEqual(@as(u64, 1), machine.last_applied_index);
+}
+
 test "raftor: configured filesystem is used for WAL storage" {
     var fixture = try raft.FsTestFixture.init(allocator, .real);
     defer fixture.deinit();
@@ -2741,6 +3014,66 @@ test "raftor: durable bootstrap persists sorted membership and validates restart
         error.ClusterIdMismatch,
         Raftor.createWithDependencies(allocator, wrong_config, .restart, dependencies),
     );
+}
+
+test "raftor: fresh modes reject nonzero durable cursors before storage mutation" {
+    const bootstrap_peers = [_]raft.Peer{.{ .id = 1, .context = "node-1" }};
+    const join_peers = [_]raft.Peer{.{ .id = 2, .context = "node-2" }};
+    const cursors = [_]raft.DurableApplied{
+        .{ .index = 1, .term = 1 },
+        .{ .index = 1, .term = 0 },
+        .{ .index = 0, .term = 1 },
+    };
+
+    for ([_]raft.StartupMode{ .bootstrap, .join }) |startup_mode| {
+        for (cursors) |cursor| {
+            var storage = raft.MemoryStorage.init();
+            defer storage.deinit(allocator);
+            var transport = raft.NoopTransport.init(allocator);
+            defer transport.deinit();
+            var machine = DurableStateMachine.init(allocator);
+            defer machine.deinit();
+            machine.durable_applied = cursor;
+            var config = makeDurableConfig(1, "node-1");
+            config.initial_peers = if (startup_mode == .bootstrap) &bootstrap_peers else &join_peers;
+
+            try std.testing.expectError(error.IncompatibleStorage, Raftor.createWithDependencies(
+                allocator,
+                config,
+                startup_mode,
+                .{
+                    .storage = storage.asWritableStorage(),
+                    .transport = transport.transport(),
+                    .state_machine = machine.durableStateMachine(),
+                },
+            ));
+            try expectUnmodifiedFreshStorage(&storage);
+        }
+    }
+}
+
+test "raftor: fresh modes accept zero durable cursor" {
+    const bootstrap_peers = [_]raft.Peer{.{ .id = 1, .context = "node-1" }};
+    const join_peers = [_]raft.Peer{.{ .id = 2, .context = "node-2" }};
+
+    for ([_]raft.StartupMode{ .bootstrap, .join }) |startup_mode| {
+        var storage = raft.MemoryStorage.init();
+        defer storage.deinit(allocator);
+        var transport = raft.NoopTransport.init(allocator);
+        defer transport.deinit();
+        var machine = DurableStateMachine.init(allocator);
+        defer machine.deinit();
+        var config = makeDurableConfig(1, "node-1");
+        config.initial_peers = if (startup_mode == .bootstrap) &bootstrap_peers else &join_peers;
+
+        const r = try Raftor.createWithDependencies(allocator, config, startup_mode, .{
+            .storage = storage.asWritableStorage(),
+            .transport = transport.transport(),
+            .state_machine = machine.durableStateMachine(),
+        });
+        defer r.destroy();
+        try std.testing.expect(r.getClusterMembership() != null);
+    }
 }
 
 test "raftor: transport identity mismatch fails before transport start" {
