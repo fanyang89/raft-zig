@@ -393,12 +393,23 @@ pub fn build(b: *std.Build) void {
     const build_raft_benchmark_step = b.step("build-bench-raft", "Build the Raft benchmark");
     build_raft_benchmark_step.dependOn(&install_raft_benchmark.step);
 
+    const fmt_paths: []const []const u8 = &.{
+        "build.zig",
+        "src",
+        "examples/minimal_node.zig",
+        "examples/raft-sqlite/build.zig",
+        "examples/raft-sqlite/src",
+        "tests",
+        "benchmarks",
+    };
     const fmt_step = b.step("fmt", "Format Zig sources");
-    const fmt_run = b.addSystemCommand(&.{ "zig", "fmt", "build.zig", "src", "examples", "tests", "benchmarks" });
+    const fmt_run = b.addSystemCommand(&.{ "zig", "fmt" });
+    fmt_run.addArgs(fmt_paths);
     fmt_step.dependOn(&fmt_run.step);
 
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting");
-    const fmt_check_run = b.addSystemCommand(&.{ "zig", "fmt", "--check", "build.zig", "src", "examples", "tests", "benchmarks" });
+    const fmt_check_run = b.addSystemCommand(&.{ "zig", "fmt", "--check" });
+    fmt_check_run.addArgs(fmt_paths);
     fmt_check_step.dependOn(&fmt_check_run.step);
 }
 

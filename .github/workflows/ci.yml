@@ -115,6 +115,22 @@ jobs:
           files: zig-out/coverage/kcov-merged/cobertura.xml
           use_oidc: true
 
+  raft-sqlite-example:
+    name: raft-sqlite example
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Test example
+        run: mise run test-raft-sqlite
+
   sanitizer:
     name: Sanitizer (${{ matrix.name }})
     strategy:
@@ -239,6 +255,7 @@ jobs:
       - workflow-lint
       - core-test
       - coverage
+      - raft-sqlite-example
       - sanitizer
       - gperftools
       - fuzz
@@ -251,6 +268,7 @@ jobs:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           CORE_TEST_RESULT: ${{ needs.core-test.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
+          RAFT_SQLITE_EXAMPLE_RESULT: ${{ needs.raft-sqlite-example.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
           GPERFTOOLS_RESULT: ${{ needs.gperftools.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
@@ -259,6 +277,7 @@ jobs:
           test "$WORKFLOW_LINT_RESULT" = success
           test "$CORE_TEST_RESULT" = success
           test "$COVERAGE_RESULT" = success
+          test "$RAFT_SQLITE_EXAMPLE_RESULT" = success
           test "$SANITIZER_RESULT" = success
           test "$GPERFTOOLS_RESULT" = success
           test "$FUZZ_RESULT" = success

@@ -2,3 +2,13 @@
 zig = "0.16.0"
 actionlint = "1.7.12"
 "github:jiacai2050/zigcli" = "0.6.2"
+
+[tasks.test-raft-sqlite]
+description = "Test the raft-sqlite example"
+dir = "{{ config_root }}/examples/raft-sqlite"
+run = [
+  "zig fmt --check build.zig src",
+  "zig build --summary all",
+  "zig build test --summary all",
+  "zig build test -Doptimize=ReleaseSafe --summary all",
+]

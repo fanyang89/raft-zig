@@ -55,6 +55,15 @@ mise run build
 ./zig-out/bin/raft-zig-minimal-node
 ```
 
+For a complete application, [`examples/raft-sqlite`](examples/raft-sqlite)
+implements a durable replicated SQLite database with gRPC and a CLI. It remains
+an independent package so the core build does not compile SQLite or protoc:
+
+```bash
+mise run test-raft-sqlite
+mise -C examples/raft-sqlite run build
+```
+
 See [Getting Started](docs/getting-started.md) for dependency setup, logger
 initialization, state-machine requirements, and a complete node lifecycle.
 

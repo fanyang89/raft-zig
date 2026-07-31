@@ -19,7 +19,8 @@ Direct equivalents are available:
 ```bash
 zig build
 zig build test --summary all
-zig fmt --check build.zig src examples tests benchmarks
+zig fmt --check build.zig src examples/minimal_node.zig \
+  examples/raft-sqlite/build.zig examples/raft-sqlite/src tests benchmarks
 ```
 
 ## Test Tasks
@@ -31,6 +32,7 @@ mise run test-tsan
 mise run test-ubsan
 mise run test-rpc
 mise run test-grpc-raftor
+mise run test-raft-sqlite
 mise run test-upstream
 mise run vopr-smoke
 mise run wal-durability
@@ -47,8 +49,10 @@ mise run fmt-check
 mise run ci-lint
 ```
 
-`fmt` and `fmt-check` cover `build.zig`, `src`, `examples`, `tests`, and
-`benchmarks`. `ci-lint` validates GitHub Actions with actionlint.
+`fmt` and `fmt-check` cover the core sources, the minimal example, the
+raft-sqlite build and Zig sources, tests, and benchmarks. Explicit example paths
+avoid traversing nested build caches. `ci-lint` validates GitHub Actions with
+actionlint.
 
 ## Build Options
 

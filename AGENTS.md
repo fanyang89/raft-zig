@@ -23,6 +23,7 @@ layout, build system conventions, and module style follow the author's Zig
 mise run build
 mise run test
 mise run test-release-safe
+mise run test-raft-sqlite
 mise run test-tsan
 mise run test-ubsan
 mise run prepare-gperftools
@@ -48,7 +49,7 @@ Direct Zig invocations work too:
 ```bash
 zig build
 zig build test --summary all
-zig fmt build.zig src examples tests benchmarks
+zig fmt build.zig src examples/minimal_node.zig examples/raft-sqlite/build.zig examples/raft-sqlite/src tests benchmarks
 ```
 
 ## Reference Layout

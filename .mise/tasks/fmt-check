@@ -2,4 +2,4 @@
 #MISE description="Check Zig formatting"
 set -euo pipefail
 
-exec zig fmt --check build.zig src examples tests benchmarks "$@"
+exec zig fmt --check build.zig src examples/minimal_node.zig examples/raft-sqlite/build.zig examples/raft-sqlite/src tests benchmarks "$@"
