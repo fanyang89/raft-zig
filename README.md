@@ -64,6 +64,15 @@ mise run test-raft-sqlite
 mise -C examples/raft-sqlite run build
 ```
 
+For C applications, [`examples/libelection`](examples/libelection) provides an
+installable fixed-membership leader-election SDK with managed and external drive
+modes:
+
+```bash
+mise run test-libelection
+mise -C examples/libelection run build
+```
+
 See [Getting Started](docs/getting-started.md) for dependency setup, logger
 initialization, state-machine requirements, and a complete node lifecycle.
 

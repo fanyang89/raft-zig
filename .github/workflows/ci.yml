@@ -131,6 +131,22 @@ jobs:
       - name: Test example
         run: mise run test-raft-sqlite
 
+  libelection-example:
+    name: libelection C SDK example
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+
+      - name: Test example
+        run: mise run test-libelection
+
   sanitizer:
     name: Sanitizer (${{ matrix.name }})
     strategy:
@@ -256,6 +272,7 @@ jobs:
       - core-test
       - coverage
       - raft-sqlite-example
+      - libelection-example
       - sanitizer
       - gperftools
       - fuzz
@@ -269,6 +286,7 @@ jobs:
           CORE_TEST_RESULT: ${{ needs.core-test.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           RAFT_SQLITE_EXAMPLE_RESULT: ${{ needs.raft-sqlite-example.result }}
+          LIBELECTION_EXAMPLE_RESULT: ${{ needs.libelection-example.result }}
           SANITIZER_RESULT: ${{ needs.sanitizer.result }}
           GPERFTOOLS_RESULT: ${{ needs.gperftools.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
@@ -278,6 +296,7 @@ jobs:
           test "$CORE_TEST_RESULT" = success
           test "$COVERAGE_RESULT" = success
           test "$RAFT_SQLITE_EXAMPLE_RESULT" = success
+          test "$LIBELECTION_EXAMPLE_RESULT" = success
           test "$SANITIZER_RESULT" = success
           test "$GPERFTOOLS_RESULT" = success
           test "$FUZZ_RESULT" = success

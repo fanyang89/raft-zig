@@ -24,6 +24,7 @@ mise run build
 mise run test
 mise run test-release-safe
 mise run test-raft-sqlite
+mise run test-libelection
 mise run test-tsan
 mise run test-ubsan
 mise run prepare-gperftools

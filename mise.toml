@@ -12,3 +12,14 @@ run = [
   "zig build test --summary all",
   "zig build test -Doptimize=ReleaseSafe --summary all",
 ]
+
+[tasks.test-libelection]
+description = "Test the libelection C SDK example"
+dir = "{{ config_root }}/examples/libelection"
+run = [
+  "zig fmt --check build.zig src tests",
+  "zig build --summary all",
+  "zig build test -Doptimize=Debug --summary all",
+  "zig build test -Doptimize=ReleaseSafe --summary all",
+  "zig build test-installed-c-sdk --summary all",
+]

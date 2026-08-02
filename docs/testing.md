@@ -24,11 +24,12 @@ test build includes:
 - Marionette integration smoke tests
 
 It does not run sanitizer variants, extended WAL crash fuzzing, coverage,
-profiling, or the full raft-sqlite application example. Build that example and
-run its format check and Debug and ReleaseSafe integration tests separately:
+profiling, or the independent application examples. Test their format, build
+modes, and integration suites separately:
 
 ```bash
 mise run test-raft-sqlite
+mise run test-libelection
 ```
 
 ## Focused Tests
@@ -37,6 +38,7 @@ mise run test-raft-sqlite
 mise run test-rpc
 mise run test-grpc-raftor
 mise run test-raft-sqlite
+mise run test-libelection
 mise run test-upstream
 mise run test-upstream-etcd-raft
 mise run test-upstream-raft-rs

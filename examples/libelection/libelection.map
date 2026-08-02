@@ -1,0 +1,6 @@
+LIBELECTION_1.0 {
+  global:
+    election_*;
+  local:
+    *;
+};

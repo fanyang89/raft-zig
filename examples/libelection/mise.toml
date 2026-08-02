@@ -1,0 +1,40 @@
+[tools]
+zig = "0.16.0"
+
+[tasks.build]
+description = "Build libelection"
+run = "zig build"
+
+[tasks.test]
+description = "Run default ReleaseSafe tests"
+run = "zig build test --summary all"
+
+[tasks.test-debug]
+description = "Run Debug tests"
+run = "zig build test -Doptimize=Debug --summary all"
+
+[tasks.test-release-safe]
+description = "Run ReleaseSafe tests"
+run = "zig build test -Doptimize=ReleaseSafe --summary all"
+
+[tasks.test-installed-c-sdk]
+description = "Test the installed SDK with the system C compiler"
+run = "zig build test-installed-c-sdk --summary all"
+
+[tasks.fmt]
+description = "Format Zig sources"
+run = "zig fmt build.zig src"
+
+[tasks.fmt-check]
+description = "Check Zig formatting"
+run = "zig fmt --check build.zig src"
+
+[tasks.check]
+description = "Run all required checks"
+run = [
+  "zig fmt --check build.zig src",
+  "zig build --summary all",
+  "zig build test -Doptimize=Debug --summary all",
+  "zig build test -Doptimize=ReleaseSafe --summary all",
+  "zig build test-installed-c-sdk --summary all",
+]
