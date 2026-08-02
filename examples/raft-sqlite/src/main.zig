@@ -15,6 +15,12 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, arguments[1], "exec")) return executeMain(init, arguments[2..]);
     if (std.mem.eql(u8, arguments[1], "query")) return queryMain(init, arguments[2..]);
     if (std.mem.eql(u8, arguments[1], "status")) return statusMain(init, arguments[2..]);
+    if (std.mem.eql(u8, arguments[1], "add-learner")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_ADD_LEARNER);
+    if (std.mem.eql(u8, arguments[1], "promote")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_PROMOTE_MEMBER);
+    if (std.mem.eql(u8, arguments[1], "remove")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_REMOVE_MEMBER);
+    if (std.mem.eql(u8, arguments[1], "update-address")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_UPDATE_ADDRESS);
+    if (std.mem.eql(u8, arguments[1], "transfer-leader")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_TRANSFER_LEADERSHIP);
+    if (std.mem.eql(u8, arguments[1], "snapshot")) return adminMain(init, arguments[2..], .ADMIN_OPERATION_TAKE_SNAPSHOT);
     try writeStderr(init.io, "unknown command\n\n");
     try writeStderr(init.io, usage);
     return error.UnknownCommand;
@@ -101,6 +107,42 @@ fn statusMain(init: std.process.Init, arguments: []const []const u8) !void {
     try writeJson(init, result.response.?);
 }
 
+fn adminMain(
+    init: std.process.Init,
+    arguments: []const []const u8,
+    operation: database.pb.AdminOperation,
+) !void {
+    const expected_arguments: usize = switch (operation) {
+        .ADMIN_OPERATION_TAKE_SNAPSHOT => 1,
+        .ADMIN_OPERATION_ADD_LEARNER,
+        .ADMIN_OPERATION_PROMOTE_MEMBER,
+        .ADMIN_OPERATION_UPDATE_ADDRESS,
+        => 3,
+        else => 2,
+    };
+    if (arguments.len != expected_arguments) {
+        try writeStderr(init.io, usage);
+        return error.InvalidArguments;
+    }
+    var request: database.pb.AdminRequest = .{ .operation = operation };
+    if (operation != .ADMIN_OPERATION_TAKE_SNAPSHOT) {
+        request.node_id = try std.fmt.parseUnsigned(u64, arguments[1], 10);
+    }
+    switch (operation) {
+        .ADMIN_OPERATION_ADD_LEARNER,
+        .ADMIN_OPERATION_PROMOTE_MEMBER,
+        .ADMIN_OPERATION_UPDATE_ADDRESS,
+        => request.address = arguments[2],
+        else => {},
+    }
+    var client = try database.Client.init(init.gpa, arguments[0]);
+    defer client.deinit();
+    var result = try client.admin(init.gpa, request);
+    defer result.deinit();
+    if (!result.raw.status.isOk()) return reportRpcFailure(init.io, result.raw.status);
+    try writeJson(init, result.response.?);
+}
+
 fn parseParameter(allocator: std.mem.Allocator, argument: []const u8) !database.pb.Value {
     if (std.mem.eql(u8, argument, "null")) return .{ .kind = .{ .null_value = .NULL_VALUE } };
     const separator = std.mem.indexOfScalar(u8, argument, ':') orelse return error.InvalidParameter;
@@ -152,10 +194,16 @@ const usage =
     \\raft-sqlite commands:
     \\  serve --node-id ID --cluster-id UUID --api-listen IPv4:PORT
     \\        --raft-listen IPv4:PORT --data-dir PATH [--raft-advertise IPv4:PORT]
-    \\        [--peer ID=IPv4:PORT ...]
+    \\        [--join] [--peer ID=IPv4:PORT ...]
     \\  exec ENDPOINT REQUEST_ID SQL [PARAM ...]
     \\  query ENDPOINT SQL [PARAM ...]
     \\  status ENDPOINT
+    \\  add-learner ENDPOINT NODE_ID RAFT_ADDRESS
+    \\  promote ENDPOINT NODE_ID RAFT_ADDRESS
+    \\  remove ENDPOINT NODE_ID
+    \\  update-address ENDPOINT NODE_ID RAFT_ADDRESS
+    \\  transfer-leader ENDPOINT NODE_ID
+    \\  snapshot ENDPOINT
     \\
     \\Parameters: null, int:42, real:3.14, text:value, blob:00ff
 ;

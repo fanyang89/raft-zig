@@ -14,15 +14,13 @@ reads use Raft ReadIndex before querying the local state machine.
 
 ## Status
 
-- One Raft group with a static initial membership
-- Typed gRPC Execute, Query, and Status methods
+- One Raft group with bootstrap, learner join, promotion, removal, and readdressing
+- Typed gRPC Execute, Query, Status, and Admin methods
 - Atomic parameterized write batches with request ID deduplication
 - Linearizable leader reads
 - Durable SQLite restart, WAL suffix replay, image snapshots, and follower catch-up
+- Leadership transfer and operator-triggered snapshots
 - SQLite 3.53.4 amalgamation pinned by SHA3-256
-
-Dynamic membership is not exposed yet. Restart nodes with the same node ID,
-cluster ID, peer list, and data directory.
 
 ## Build
 
@@ -74,6 +72,44 @@ For a three-node cluster, pass the same three `--peer` values to every node:
 Each node needs a distinct `--node-id`, API address, Raft address, and data
 directory. All nodes need the same cluster ID.
 
+## Dynamic Membership
+
+Start a new node with `--join` and one or more existing members as seed peers.
+Seed peers must not include the joining node ID:
+
+```sh
+zig-out/bin/raft-sqlite serve \
+  --join \
+  --node-id 4 \
+  --cluster-id 0198f54d-5c2a-7000-8000-000000000001 \
+  --api-listen 127.0.0.1:8004 \
+  --raft-listen 127.0.0.1:9004 \
+  --data-dir ./data/node-4 \
+  --peer 1=127.0.0.1:9001
+```
+
+Add the node through the current leader, then wait for `status` to show
+`promotion_ready: true` before promoting it with the same advertised address:
+
+```sh
+zig-out/bin/raft-sqlite add-learner 127.0.0.1:8001 4 127.0.0.1:9004
+zig-out/bin/raft-sqlite status 127.0.0.1:8001
+zig-out/bin/raft-sqlite promote 127.0.0.1:8001 4 127.0.0.1:9004
+```
+
+Membership Admin success means the change was submitted. The returned
+`observed_membership_index` is the committed index before that submission. Poll
+`status` until `membership_index` advances and the requested member state
+appears. A joining learner may catch up by log replication or snapshot
+installation.
+
+`matched_index` and `promotion_ready` are leader observations. Followers report
+zero and false for those fields.
+
+Persisted membership is authoritative after the first start, even when the
+process is restarted with `--join`. Removed node IDs are retired permanently
+and cannot be reused.
+
 ## Storage
 
 The data directory contains both the `raft-zig` WAL and `state.sqlite3`. Keep
@@ -100,11 +136,30 @@ zig-out/bin/raft-sqlite query 127.0.0.1:8001 \
   'SELECT id, name FROM items WHERE id = ?1' int:1
 
 zig-out/bin/raft-sqlite status 127.0.0.1:8001
+
+zig-out/bin/raft-sqlite update-address 127.0.0.1:8001 4 127.0.0.1:9014
+zig-out/bin/raft-sqlite status 127.0.0.1:8004
+# Restart node 4 with --raft-listen 127.0.0.1:9014, then wait for catch-up.
+zig-out/bin/raft-sqlite transfer-leader 127.0.0.1:8001 4
+zig-out/bin/raft-sqlite status 127.0.0.1:8004
+zig-out/bin/raft-sqlite remove 127.0.0.1:8004 1
+zig-out/bin/raft-sqlite snapshot 127.0.0.1:8004
 ```
 
 Parameter forms are `null`, `int:42`, `real:3.14`, `text:value`, and
 `blob:00ff`. CLI responses are JSON. Followers return `failed_precondition`
 instead of forwarding requests.
+
+Apply an address update while the member is running, wait until that member's
+status reports the new address and membership index, then restart it on the new
+Raft listen address. Send membership changes and leadership transfers to the
+current leader. Snapshots may be requested from any member.
+Leadership transfer success means the request was accepted; poll `status` for
+the new leader. Snapshot success means the local snapshot and compaction
+completed.
+
+The example API has no authentication or TLS. Keep it on loopback or a trusted
+network. Add transport security and Admin authorization before deployment.
 
 ## Limits And SQL Policy
 

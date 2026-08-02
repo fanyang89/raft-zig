@@ -11,6 +11,7 @@ const TypedClient = grpc_pb.ServiceClient(ClientApi);
 pub const ExecuteResult = grpc_pb.TypedResult(pb.ExecuteResponse);
 pub const QueryResult = grpc_pb.TypedResult(pb.QueryResponse);
 pub const StatusResult = grpc_pb.TypedResult(pb.StatusResponse);
+pub const AdminResult = grpc_pb.TypedResult(pb.AdminResponse);
 
 pub const Client = struct {
     channel: grpc.Channel,
@@ -43,5 +44,10 @@ pub const Client = struct {
     pub fn status(self: *Client, allocator: std.mem.Allocator) !StatusResult {
         var client = TypedClient.init(&self.channel);
         return client.callUnary(allocator, "Status", .{}, .{ .timeout_ns = 5 * std.time.ns_per_s });
+    }
+
+    pub fn admin(self: *Client, allocator: std.mem.Allocator, request: pb.AdminRequest) !AdminResult {
+        var client = TypedClient.init(&self.channel);
+        return client.callUnary(allocator, "Admin", request, .{ .timeout_ns = 10 * std.time.ns_per_s });
     }
 };

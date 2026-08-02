@@ -12,6 +12,7 @@ pub const ServerConfig = struct {
     raft_advertise: []u8,
     data_dir: []u8,
     peers: []raft.Peer,
+    join: bool,
 
     pub fn deinit(self: *ServerConfig) void {
         for (self.peers) |peer| self.allocator.free(peer.context.?);
@@ -31,13 +32,15 @@ pub fn parseServer(allocator: std.mem.Allocator, arguments: []const []const u8) 
     var raft_listen: ?[]const u8 = null;
     var raft_advertise: ?[]const u8 = null;
     var data_dir: ?[]const u8 = null;
+    var join = false;
     var peer_values: std.ArrayList([]const u8) = .empty;
     defer peer_values.deinit(allocator);
     var index: usize = 0;
     while (index < arguments.len) : (index += 1) {
         const argument = arguments[index];
         if (std.mem.eql(u8, argument, "--join")) {
-            return error.UnsupportedOption;
+            join = true;
+            continue;
         }
         if (index + 1 == arguments.len) return error.MissingOptionValue;
         const value = arguments[index + 1];
@@ -85,6 +88,9 @@ pub fn parseServer(allocator: std.mem.Allocator, arguments: []const []const u8) 
     errdefer for (peers[0..initialized]) |peer| allocator.free(peer.context.?);
     for (peer_values.items, 0..) |peer_text, peer_index| {
         const parsed = try parsePeer(peer_text);
+        if (join and parsed.id == resolved_node_id) return error.JoinPeerMatchesLocalNode;
+        if (join and (std.mem.eql(u8, parsed.address, resolved_raft_listen) or
+            std.mem.eql(u8, parsed.address, resolved_advertise))) return error.JoinPeerMatchesLocalAddress;
         for (peers[0..initialized]) |existing| {
             if (existing.id == parsed.id) return error.DuplicatePeerId;
             if (std.mem.eql(u8, existing.context.?, parsed.address)) return error.DuplicatePeerAddress;
@@ -92,6 +98,7 @@ pub fn parseServer(allocator: std.mem.Allocator, arguments: []const []const u8) 
         peers[peer_index] = .{ .id = parsed.id, .context = try allocator.dupe(u8, parsed.address) };
         initialized += 1;
     }
+    if (join and peers.len == 0) return error.JoinPeerRequired;
 
     return .{
         .allocator = allocator,
@@ -103,6 +110,7 @@ pub fn parseServer(allocator: std.mem.Allocator, arguments: []const []const u8) 
         .raft_advertise = owned_advertise,
         .data_dir = owned_data_dir,
         .peers = peers,
+        .join = join,
     };
 }
 
@@ -175,8 +183,50 @@ test "parse a three-node server configuration" {
     try std.testing.expectEqual(@as(usize, 3), parsed.peers.len);
     try std.testing.expectEqualStrings("127.0.0.1", parsed.api_host);
     try std.testing.expectEqual(@as(u16, 8002), parsed.api_port);
+    try std.testing.expect(!parsed.join);
 }
 
-test "dynamic join is rejected until membership management is available" {
-    try std.testing.expectError(error.UnsupportedOption, parseServer(std.testing.allocator, &.{"--join"}));
+test "parse a joining server configuration" {
+    const arguments = [_][]const u8{
+        "--join",
+        "--node-id",
+        "2",
+        "--cluster-id",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "--api-listen",
+        "127.0.0.1:8002",
+        "--raft-listen",
+        "127.0.0.1:9002",
+        "--data-dir",
+        "/tmp/raft-sqlite-2",
+        "--peer",
+        "1=127.0.0.1:9001",
+    };
+    var parsed = try parseServer(std.testing.allocator, &arguments);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.join);
+    try std.testing.expectEqual(@as(usize, 1), parsed.peers.len);
+}
+
+test "joining configuration requires a remote seed" {
+    const base = [_][]const u8{
+        "--join",
+        "--node-id",
+        "2",
+        "--cluster-id",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "--api-listen",
+        "127.0.0.1:8002",
+        "--raft-listen",
+        "127.0.0.1:9002",
+        "--data-dir",
+        "/tmp/raft-sqlite-2",
+    };
+    try std.testing.expectError(error.JoinPeerRequired, parseServer(std.testing.allocator, &base));
+
+    const local_seed = base ++ [_][]const u8{ "--peer", "2=127.0.0.1:9002" };
+    try std.testing.expectError(error.JoinPeerMatchesLocalNode, parseServer(std.testing.allocator, &local_seed));
+
+    const local_address = base ++ [_][]const u8{ "--peer", "1=127.0.0.1:9002" };
+    try std.testing.expectError(error.JoinPeerMatchesLocalAddress, parseServer(std.testing.allocator, &local_address));
 }

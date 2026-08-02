@@ -5,6 +5,7 @@ pub const grpc = @import("grpc_lite");
 pub const raft = @import("raft_zig");
 pub const sqlite = @import("sqlite.zig");
 pub const state_machine = @import("state_machine.zig");
+pub const admin = @import("admin.zig");
 pub const SqliteStateMachine = state_machine.SqliteStateMachine;
 pub const service = @import("service.zig");
 pub const config = @import("config.zig");
@@ -19,6 +20,7 @@ test {
     _ = raft;
     _ = sqlite;
     _ = state_machine;
+    _ = admin;
     _ = service;
     _ = config;
     _ = runtime;

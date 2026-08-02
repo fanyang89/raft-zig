@@ -6,6 +6,7 @@ service DatabaseService {
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
   rpc Query(QueryRequest) returns (QueryResponse);
   rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Admin(AdminRequest) returns (AdminResponse);
 }
 
 enum NullValue {
@@ -83,6 +84,41 @@ message StatusResponse {
   uint64 applied_index = 5;
   uint64 database_bytes = 6;
   string sqlite_version = 7;
+  uint64 commit_index = 8;
+  uint64 membership_index = 9;
+  repeated MemberStatus members = 10;
+  repeated uint64 retired_node_ids = 11;
+}
+
+message MemberStatus {
+  uint64 node_id = 1;
+  string address = 2;
+  bool voter = 3;
+  bool learner = 4;
+  bool outgoing_voter = 5;
+  bool learner_next = 6;
+  uint64 matched_index = 7;
+  bool promotion_ready = 8;
+}
+
+enum AdminOperation {
+  ADMIN_OPERATION_UNSPECIFIED = 0;
+  ADMIN_OPERATION_ADD_LEARNER = 1;
+  ADMIN_OPERATION_PROMOTE_MEMBER = 2;
+  ADMIN_OPERATION_REMOVE_MEMBER = 3;
+  ADMIN_OPERATION_UPDATE_ADDRESS = 4;
+  ADMIN_OPERATION_TRANSFER_LEADERSHIP = 5;
+  ADMIN_OPERATION_TAKE_SNAPSHOT = 6;
+}
+
+message AdminRequest {
+  AdminOperation operation = 1;
+  uint64 node_id = 2;
+  string address = 3;
+}
+
+message AdminResponse {
+  uint64 observed_membership_index = 1;
 }
 
 message CommandEnvelope {
