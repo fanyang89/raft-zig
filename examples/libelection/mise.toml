@@ -21,6 +21,18 @@ run = "zig build test -Doptimize=ReleaseSafe --summary all"
 description = "Test the installed SDK with the system C compiler"
 run = "zig build test-installed-c-sdk --summary all"
 
+[tasks.test-vip-bridge]
+description = "Test the fenced VIP leadership bridge"
+run = "zig build test-vip-bridge --summary all"
+
+[tasks.demo-vip]
+description = "Run the three-node fenced VIP demo"
+run = [
+  "zig build example --summary all",
+  "bash tools/fetch_vip_manager.sh zig-out/vip-manager",
+  "sudo -n bash demo/three_node_vip_demo.sh zig-out/bin/election-vip-bridge zig-out/bin/election-vip-fencer zig-out/vip-manager/vip-manager",
+]
+
 [tasks.fmt]
 description = "Format Zig sources"
 run = "zig fmt build.zig src"

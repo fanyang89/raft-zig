@@ -111,11 +111,76 @@ pub fn build(b: *std.Build) void {
         .root_module = example_module,
     });
     const install_example = b.addInstallArtifact(example, .{});
-    const example_step = b.step("example", "Build the C election node example");
+    const example_step = b.step("example", "Build the C examples");
     example_step.dependOn(&install_example.step);
+
+    const vip_bridge_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+    vip_bridge_module.addIncludePath(b.path("include"));
+    vip_bridge_module.addCSourceFile(.{
+        .file = b.path("examples/election_vip_bridge.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+    vip_bridge_module.addObjectFile(packaged_static_library);
+    if (target.result.os.tag == .linux) {
+        vip_bridge_module.linkSystemLibrary("pthread", .{});
+        vip_bridge_module.linkSystemLibrary("dl", .{});
+        vip_bridge_module.linkSystemLibrary("rt", .{});
+    }
+    const vip_bridge = b.addExecutable(.{
+        .name = "election-vip-bridge",
+        .root_module = vip_bridge_module,
+    });
+    const install_vip_bridge = b.addInstallArtifact(vip_bridge, .{});
+    example_step.dependOn(&install_vip_bridge.step);
+
+    const vip_fencer_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vip_fencer_module.addCSourceFile(.{
+        .file = b.path("examples/election_vip_fencer.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+    const vip_fencer = b.addExecutable(.{
+        .name = "election-vip-fencer",
+        .root_module = vip_fencer_module,
+    });
+    const install_vip_fencer = b.addInstallArtifact(vip_fencer, .{});
+    example_step.dependOn(&install_vip_fencer.step);
     test_step.dependOn(&example.step);
 
     if (target.result.os.tag == .linux) {
+        const fencer_client_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        fencer_client_module.addCSourceFile(.{
+            .file = b.path("tests/fencer_client.c"),
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+        });
+        const fencer_client = b.addExecutable(.{
+            .name = "libelection-fencer-client",
+            .root_module = fencer_client_module,
+        });
+        const vip_bridge_smoke = b.addSystemCommand(&.{"bash"});
+        vip_bridge_smoke.addFileArg(b.path("tests/vip_bridge_smoke.sh"));
+        vip_bridge_smoke.addArtifactArg(vip_bridge);
+        vip_bridge_smoke.addArtifactArg(vip_fencer);
+        vip_bridge_smoke.addArtifactArg(fencer_client);
+        const test_vip_bridge = b.step(
+            "test-vip-bridge",
+            "Test the fenced leadership HTTP bridge",
+        );
+        test_vip_bridge.dependOn(&vip_bridge_smoke.step);
+        test_step.dependOn(&vip_bridge_smoke.step);
+
         const installed_c_smoke = b.addSystemCommand(&.{"bash"});
         installed_c_smoke.addFileArg(b.path("tests/installed_c_smoke.sh"));
         installed_c_smoke.addArg(b.getInstallPath(.prefix, ""));

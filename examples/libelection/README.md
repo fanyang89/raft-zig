@@ -126,3 +126,46 @@ Use node IDs 2 and 3 with their matching listen addresses and data directories
 for the other processes. Send `SIGINT` or `SIGTERM` for a clean shutdown.
 
 See `include/libelection/libelection.h` for the complete ABI.
+
+## Fenced VIP Demo
+
+The Linux demo combines `libelection` with
+[`vip-manager` v5.0.0](https://github.com/cybertec-postgresql/vip-manager/releases/tag/v5.0.0).
+`libelection` chooses the owner, a host-side fencer isolates the previous
+owner's service interface, and vip-manager configures the IPv4 address and
+sends a gratuitous ARP reply.
+
+The Raft and service networks are separate. A new leader remains unavailable
+until the fencer has disabled the previous owner's service-side veth, persisted
+the new term and owner, and returned a grant. The local `/leader` endpoint then
+returns HTTP 200, which causes vip-manager to add the VIP. Leadership loss,
+driver starvation, a terminal error, or an unavailable fencer keeps the endpoint
+at HTTP 503.
+
+Run the unprivileged bridge and protocol smoke test:
+
+```sh
+zig build test-vip-bridge --summary all
+```
+
+Run the three-node network namespace demo on a Linux host with `ip`, `curl`,
+`tar`, and passwordless or pre-authorized sudo:
+
+```sh
+sudo -v
+mise run demo-vip
+```
+
+The task downloads the official vip-manager release for x86-64 or AArch64 and
+verifies its pinned SHA-256 checksum. The demo then creates three node
+namespaces, a client namespace, independent Raft and service bridges, and a
+host-side fencer. It verifies initial acquisition, isolates the leader's Raft
+link, checks that its service link is fenced, waits for failover, pings the VIP,
+and confirms that the client neighbor entry moved to the new owner's MAC.
+
+The bridge also exposes `/healthz` and `/status` on its configured loopback HTTP
+listener. `/status` reports local Raft and fencing state for diagnostics; only
+`/leader` is used by vip-manager.
+
+See [`demo/README.md`](demo/README.md) for the process interfaces, fencing state
+rules, and production security boundary.

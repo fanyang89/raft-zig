@@ -71,6 +71,7 @@ modes:
 ```bash
 mise run test-libelection
 mise -C examples/libelection run build
+mise run demo-libelection-vip
 ```
 
 See [Getting Started](docs/getting-started.md) for dependency setup, logger
