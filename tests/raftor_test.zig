@@ -824,6 +824,25 @@ test "raftor: getStatus reports correct applied index" {
     try std.testing.expect(status.applied_index >= 2);
 }
 
+test "raftor: poll does not advance logical time" {
+    var sm = MockStateMachine.init(allocator);
+    defer sm.deinit();
+
+    const node = try Raftor.create(allocator, .{
+        .raft = .{
+            .id = 1,
+            .election_tick = 3,
+            .heartbeat_tick = 1,
+        },
+    }, sm.stateMachine());
+    defer node.destroy();
+
+    for (0..10) |_| try std.testing.expect(!(try node.poll()));
+    const status = node.getStatus();
+    try std.testing.expectEqual(StateRole.follower, status.role);
+    try std.testing.expectEqual(@as(u64, 0), status.term);
+}
+
 test "raftor: noop transport collects outbound messages" {
     var sm = MockStateMachine.init(allocator);
     defer sm.deinit();

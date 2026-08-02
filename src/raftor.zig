@@ -670,6 +670,23 @@ pub const Raftor = struct {
         return self.tickImpl();
     }
 
+    /// Process pending Ready work and a bounded batch of transport events
+    /// without advancing Raft's logical clock.
+    pub fn poll(self: *Raftor) Error!bool {
+        try self.enterEventLoop();
+        defer self.leaveEventLoop();
+        if (self.driverError()) |err| return err;
+
+        var had_work = false;
+        while (try self.processReady()) had_work = true;
+        for (0..self.config.transport_poll_budget) |_| {
+            if (!try self.transport.pollOne()) break;
+            had_work = true;
+        }
+        while (try self.processReady()) had_work = true;
+        return had_work;
+    }
+
     fn tickImpl(self: *Raftor) Error!bool {
         if (self.driverError()) |err| return err;
         if (self.ready_processor.phase() != null) {
